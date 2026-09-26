@@ -38,13 +38,13 @@ Read these first. The project assumes them and doesn't explain them again.
 | [Kubernetes and EKS](/lessons/kubernetes-and-eks/) | Pods, Deployments, Services and Ingress |
 | [ECS or EKS?](/lessons/ecs-or-eks/) | How to turn measurements into a decision |
 
-You also need these on your Mac. [Set up your Mac](/lessons/mac-setup/) installs the first three and a safe AWS login.
+You also need these on your computer. [Set up your computer](/lessons/computer-setup/) installs the first three and a safe AWS login.
 
 | Tool | Used for |
 |---|---|
 | AWS CLI | ECR login, and connecting `kubectl` to the cluster |
-| Docker Desktop | building and running the image |
-| `curl` and `openssl` | testing, and making the certificate. Both come with macOS |
+| Docker | building and running the image |
+| `curl` and `openssl` | testing, and making the certificate. Both come with macOS and Ubuntu, including Ubuntu on WSL |
 | `kubectl` | talking to the Kubernetes cluster |
 | `helm` | installing the load balancer controller into the cluster |
 
@@ -100,7 +100,7 @@ Do the EKS stages in **one sitting**, then go straight to [Clean up](#clean-up).
 
 ## Build and run the order service
 
-The app is small on purpose, so all your attention goes on running it. You prove it works on your Mac before AWS is involved, where problems are far easier to find.
+The app is small on purpose, so all your attention goes on running it. You prove it works on your computer before AWS is involved, where problems are far easier to find.
 
 <Steps>
 
@@ -219,7 +219,7 @@ A list of build steps, ending with a line that names the image `quickcart-orders
 exec format error
 ```
 
-**Why:** your Mac builds for ARM processors unless told otherwise. The image runs on your Mac and fails on AWS.
+**Why:** your computer builds for ARM processors unless told otherwise. The image runs on your computer and fails on AWS.
 
 **The fix:** always build with `--platform linux/amd64` when the image is going to AWS, then push again under a **new** tag. The repository is immutable, so the old tag can't be reused.
 
@@ -227,7 +227,7 @@ exec format error
 
 </Step>
 
-<Step title="Run it on your Mac">
+<Step title="Run it on your computer">
 
 ```sh
 docker run -d -p 8080:8080 --name orders quickcart-orders:v1
@@ -237,13 +237,13 @@ docker run -d -p 8080:8080 --name orders quickcart-orders:v1
 |---|---|
 | `docker run` | start a container from an image |
 | `-d` | run it in the background, so you get the terminal back |
-| `-p 8080:8080` | connect port 8080 on your Mac to port 8080 in the container |
+| `-p 8080:8080` | connect port 8080 on your computer to port 8080 in the container |
 | `--name orders` | call the container `orders` so later commands can use the name |
 | `quickcart-orders:v1` | the image to start |
 
 <See>
 
-A long container ID. Docker may also warn that the image's platform doesn't match your Mac's. That's expected on Apple silicon: the image is built for AWS, and Docker Desktop translates it.
+A long container ID. Docker may also warn that the image's platform doesn't match your computer's. That's expected on Apple silicon: the image is built for AWS, and Docker Desktop translates it.
 
 </See>
 
@@ -254,7 +254,7 @@ curl localhost:8080/health
 | Part | What it means |
 |---|---|
 | `curl` | fetch a web page and print it |
-| `localhost:8080` | port 8080 on your own Mac, which leads into the container |
+| `localhost:8080` | port 8080 on your own computer, which leads into the container |
 | `/health` | the page to fetch |
 
 ```output
@@ -1178,7 +1178,7 @@ aws eks update-kubeconfig --name quickcart-eks --region us-east-1
 | `--region us-east-1` | where it is |
 
 ```output
-Added new context arn:aws:eks:us-east-1:111122223333:cluster/quickcart-eks to /Users/you/.kube/config
+Added new context arn:aws:eks:us-east-1:111122223333:cluster/quickcart-eks to /home/you/.kube/config
 ```
 
 ```sh
@@ -1798,7 +1798,7 @@ while>
 Image Index
 ```
 
-**Why:** without `--provenance=false`, Docker Desktop uploads an image index, a list, plus the real image as a separate untagged entry. ECR scans images, not lists. ECS and EKS still run it fine; they read the list and pick the right image.
+**Why:** without `--provenance=false`, Docker's builder (BuildKit) uploads an image index, a list, plus the real image as a separate untagged entry. ECR scans images, not lists. ECS and EKS still run it fine; they read the list and pick the right image.
 
 **The fix:** tick the untagged entry that's about 50 MB and choose **Scan**. Next time, build with `--provenance=false`. Your message may differ slightly between console versions.
 
@@ -1903,7 +1903,7 @@ Delete `quickcart-lbc-role`, and the cluster and node roles the console created 
 
 </Step>
 
-<Step title="Delete the key from your Mac">
+<Step title="Delete the key from your computer">
 
 ```sh
 rm -f key.pem key-rsa.pem cert.pem

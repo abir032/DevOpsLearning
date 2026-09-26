@@ -177,7 +177,7 @@ Follow the tag `v1` through five steps: push a build, deploy it, push a fix with
 
 You'll create a private repository with immutable tags, push QuickCart's order service to it, watch ECR refuse an overwrite, and add a lifecycle policy. About 25 minutes.
 
-You need Docker Desktop running, the AWS CLI with a working login ([Set up your Mac](/lessons/mac-setup/)), and the `order-service` folder from [Writing a Dockerfile](/lessons/dockerfile/): `app.py`, `requirements.txt` and `Dockerfile`.
+You need Docker Desktop running, the AWS CLI with a working login ([Set up your computer](/lessons/computer-setup/)), and the `order-service` folder from [Writing a Dockerfile](/lessons/dockerfile/): `app.py`, `requirements.txt` and `Dockerfile`.
 
 Open a terminal in that folder:
 
@@ -268,7 +268,7 @@ docker build --platform linux/amd64 --provenance=false -t order-service:v1 .
 |---|---|
 | `docker build` | build an image from the Dockerfile in this folder |
 | `--platform linux/amd64` | build for Intel and AMD processors, which is what this course's Fargate tasks use. A Mac with an Apple chip would otherwise build for ARM |
-| `--provenance=false` | don't attach a build record to the image. Without this, Docker Desktop pushes an **image index** — a list holding your image plus a record — and ECR shows it as extra untagged rows |
+| `--provenance=false` | don't attach a build record to the image. Without this, Docker's builder (BuildKit) pushes an **image index** — a list holding your image plus a record — and ECR shows it as extra untagged rows |
 | `-t order-service:v1` | name the image `order-service`, tag `v1` |
 | `.` | use the files in this folder |
 
@@ -279,9 +279,9 @@ docker build --platform linux/amd64 --provenance=false -t order-service:v1 .
 
 The exact lines vary with your Docker version. The name at the end is what matters.
 
-<Note title="The warning you may see later on a Mac">
+<Note title="The warning you may see later on an ARM computer">
 
-If you run this image on an Apple-chip Mac, Docker warns that its platform doesn't match your machine. That's correct — you built it for AWS. Docker can still run it, more slowly, by translating it.
+If you run this image on a computer with an ARM chip, such as an Apple-chip Mac, Docker warns that its platform doesn't match your machine. That's correct — you built it for AWS. Docker can still run it, more slowly, by translating it.
 
 </Note>
 
@@ -545,7 +545,7 @@ Otherwise, delete the repository and every image in it:
 
 Type `delete` to confirm, and choose **Delete**.
 
-Then remove the local copies from your Mac. Each name you gave an image is removed separately:
+Then remove the local copies from your computer. Each name you gave an image is removed separately:
 
 ```sh ph="111122223333"
 docker image rm order-service:v1 order-service:v1-fix 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2

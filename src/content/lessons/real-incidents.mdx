@@ -160,7 +160,7 @@ This course's projects were built for real, and things broke along the way. Ever
 | Stage | What happened |
 |---|---|
 | Symptom | After pushing `v1` to ECR, the repository showed an **Image Index** with extra untagged rows, and the scan column had no result for the tagged row |
-| Investigation | Docker Desktop's builder had pushed a list — the real image plus build information — rather than one image |
+| Investigation | Docker's builder had pushed a list — the real image plus build information — rather than one image |
 | Cause | The tagged row was the list, which isn't scanned. The actual image was one of the untagged rows |
 | Fix | Look at the untagged image's scan. Next time, build with `--provenance=false` so only the image is pushed |
 | Lesson | Read what the console is actually showing you before deciding something is broken |

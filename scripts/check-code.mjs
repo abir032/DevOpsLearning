@@ -128,8 +128,10 @@ for (const dir of DIRS) {
       } else if (kind === "sh" && need("shellcheck")) {
         writeFileSync(tmp + ".sh", "#!/usr/bin/env bash\n" + b.code);
         /* SC2164 ("cd || exit") is advice for scripts. Lesson commands are typed
-           one at a time, and the learner sees a failed cd straight away. */
-        const r = spawnSync("shellcheck", ["-s", "bash", "-e", "SC2164", tmp + ".sh"], { encoding: "utf8" });
+           one at a time, and the learner sees a failed cd straight away.
+           SC2016 flags $VAR inside single quotes; lessons do that on purpose to
+           write a line like export PATH="…:$PATH" into a settings file as-is. */
+        const r = spawnSync("shellcheck", ["-s", "bash", "-e", "SC2164,SC2016", tmp + ".sh"], { encoding: "utf8" });
         if (r.status !== 0) fail(where, r.stdout || r.stderr);
       } else if (kind === "yaml" && need("yamllint")) {
         writeFileSync(tmp + ".yaml", b.code);

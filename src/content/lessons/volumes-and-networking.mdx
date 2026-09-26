@@ -19,7 +19,7 @@ quiz:
     answer: 2
     options:
       - t: Publish both containers' ports with -p
-        why: -p connects a port on your Mac to a container. It doesn't give containers names for each other.
+        why: -p connects a port on your computer to a container. It doesn't give containers names for each other.
       - t: Use each other's IP address instead
         why: That works until a container restarts and gets a new address. Then it breaks.
       - t: Create a network with docker network create and start both containers on it
@@ -29,9 +29,9 @@ quiz:
   - q: What does -p 8081:8080 mean on docker run?
     answer: 0
     options:
-      - t: Port 8081 on your Mac leads to port 8080 in the container
+      - t: Port 8081 on your computer leads to port 8080 in the container
         why: The left side is your machine, the right side is the container. So you'd use curl localhost:8081.
-      - t: Port 8080 on your Mac leads to port 8081 in the container
+      - t: Port 8080 on your computer leads to port 8081 in the container
         why: It's the other way round. The host's port always comes first.
       - t: The app may use any port between 8080 and 8081
         why: It's a mapping between two ports, not a range.
@@ -64,12 +64,12 @@ quiz:
     options:
       - t: Bind mount for the database, named volume for editing code
         why: It's the other way round. A database's files should live where Docker manages them, not in a folder you might tidy up.
-      - t: Named volume for the database, bind mount for code you're editing on your Mac
+      - t: Named volume for the database, bind mount for code you're editing on your computer
         why: A volume is managed by Docker and outlives containers. A bind mount shows the container a folder you're working in, so edits appear straight away.
       - t: The writable layer for both
         why: Anything in the writable layer is deleted with the container.
       - t: A bind mount for both, on Fargate
-        why: On Fargate there is no Mac folder to mount. Data that must survive belongs in a managed database or S3.
+        why: On Fargate there is no folder on your computer to mount. Data that must survive belongs in a managed database or S3.
 ---
 
 <Part id="problem">
@@ -80,7 +80,7 @@ To test the order service properly, Priya ran MySQL in a container on her laptop
 
 The next morning, the database was empty. The MySQL image was still there; the orders were not.
 
-At the same time, Leo was trying to connect the order service to that database. The app was set to connect to `localhost:3306`, which worked when both ran directly on his Mac. As soon as the app ran in a container, it failed with **connection refused**, even though MySQL was running and healthy.
+At the same time, Leo was trying to connect the order service to that database. The app was set to connect to `localhost:3306`, which worked when both ran directly on his laptop. As soon as the app ran in a container, it failed with **connection refused**, even though MySQL was running and healthy.
 
 </Story>
 
@@ -108,7 +108,7 @@ Most of the time that's what you want: a container you can throw away and replac
 |---|---|---|---|
 | Writable layer | The container's own scratch space | **No** | Temporary files |
 | **Named volume** | Storage Docker creates and manages, with a name you give it | **Yes** | A database's files, anything that must survive |
-| **Bind mount** | A folder on your Mac, shown inside the container | Yes; it's your folder | Code you're editing, config files, local development |
+| **Bind mount** | A folder on your computer, shown inside the container | Yes; it's your folder | Code you're editing, config files, local development |
 
 A volume or bind mount is attached at a folder inside the container, called its **mount point**. MySQL always writes to `/var/lib/mysql`. Mount a volume there, and MySQL's files go into the volume without MySQL knowing anything changed.
 
@@ -130,7 +130,7 @@ A container's writable layer is the sandbox. A volume is the shared library: it 
 |---|---|
 | `-v db-data:/var/lib/mysql` | Mount the named volume `db-data` at `/var/lib/mysql`. Docker creates it if it doesn't exist |
 | `--mount type=volume,source=db-data,target=/var/lib/mysql` | The same, spelled out |
-| `--mount type=bind,source=/Users/maya/order-service,target=/code` | Show that folder on the Mac inside the container, at `/code` |
+| `--mount type=bind,source=/home/maya/order-service,target=/code` | Show that folder on your computer inside the container, at `/code` |
 
 `--mount` is longer but harder to get wrong. With `-v`, if the left side doesn't look like a path, Docker quietly treats it as a volume name. With `--mount type=bind`, a path that doesn't exist is an error, which is what you want.
 
@@ -140,9 +140,9 @@ Each container gets its own network card, its own IP address, and **its own `loc
 
 | From | To | How |
 |---|---|---|
-| Your Mac | A container | **Publish a port**: `-p 8080:8080` connects port 8080 on your Mac to port 8080 in the container |
+| Your computer | A container | **Publish a port**: `-p 8080:8080` connects port 8080 on your computer to port 8080 in the container |
 | A container | Another container | Put both on the **same network you created**, and use the other's **name** |
-| A container | The internet | Works by default. Docker shares your Mac's connection |
+| A container | The internet | Works by default. Docker shares your computer's connection |
 
 ### Publishing ports
 
@@ -150,9 +150,9 @@ Each container gets its own network card, its own IP address, and **its own `loc
 
 | You write | Means |
 |---|---|
-| `-p 8080:8080` | Port 8080 on your Mac, on every network it's connected to, leads to port 8080 in the container |
-| `-p 8081:8080` | Port **8081** on your Mac leads to port 8080 in the container |
-| `-p 127.0.0.1:8080:8080` | Only programs on your own Mac can use it, not other devices on your Wi-Fi |
+| `-p 8080:8080` | Port 8080 on your computer, on every network it's connected to, leads to port 8080 in the container |
+| `-p 8081:8080` | Port **8081** on your computer leads to port 8080 in the container |
+| `-p 127.0.0.1:8080:8080` | Only programs on your own computer can use it, not other devices on your Wi-Fi |
 
 Containers talking to each other on the same network **don't need `-p` at all**. Publishing is only for reaching a container from outside Docker. That's why QuickCart's database will have no `-p`: only the app needs to reach it.
 
@@ -172,7 +172,7 @@ This is the same idea as [security groups](/lessons/security-groups/): who can r
 
 <Mistake title="connecting to localhost from inside a container">
 
-The app is set to reach MySQL at `localhost:3306`. It worked on the Mac; in a container it fails with an error like:
+The app is set to reach MySQL at `localhost:3306`. It worked on the laptop; in a container it fails with an error like:
 
 ```output title="The app logs"
 pymysql.err.OperationalError: (2003, "Can't connect to MySQL server on 'localhost' ([Errno 111] Connection refused)")
@@ -192,7 +192,7 @@ Compose also creates a network for the project, and each **service name becomes 
 
 ### In the cloud
 
-On your Mac, a volume is a folder Docker manages on your disk. In production there's no Mac, and containers move between machines, so QuickCart doesn't keep its database in a container at all. It uses a managed database, [RDS](/lessons/rds/), and files go to [S3](/lessons/s3/). Containers on ECS and Kubernetes get their own networking too, covered in [ECS on Fargate](/lessons/ecs-fargate/). What you learn here is the local version of the same ideas.
+On your computer, a volume is a folder Docker manages on your disk. In production there's no laptop, and containers move between machines, so QuickCart doesn't keep its database in a container at all. It uses a managed database, [RDS](/lessons/rds/), and files go to [S3](/lessons/s3/). Containers on ECS and Kubernetes get their own networking too, covered in [ECS on Fargate](/lessons/ecs-fargate/). What you learn here is the local version of the same ideas.
 
 </Part>
 
@@ -210,9 +210,9 @@ Below is a MySQL container on your machine. Save a few orders, remove the contai
 
 <Cost kind="free">everything runs on your own computer.</Cost>
 
-You'll lose a file on purpose, keep one with a volume, look into your Mac from a container, connect two containers by name, and then run QuickCart's app with MySQL using Compose. About 30 minutes.
+You'll lose a file on purpose, keep one with a volume, look into your computer from a container, connect two containers by name, and then run QuickCart's app with MySQL using Compose. About 30 minutes.
 
-You need Docker Desktop running, and the `order-service` folder from [Writing a Dockerfile](/lessons/dockerfile/). Open a terminal in that folder.
+You need Docker running, and the `order-service` folder from [Writing a Dockerfile](/lessons/dockerfile/). Open a terminal in that folder.
 
 <Steps>
 
@@ -309,7 +309,7 @@ A new container read what an old, deleted one wrote.
 
 </Step>
 
-<Step title="Look into your Mac with a bind mount">
+<Step title="Look into your computer with a bind mount">
 
 A bind mount needs the **full path** of a folder. Ask the terminal where you are:
 
@@ -322,7 +322,7 @@ pwd
 | `pwd` | print working directory: the full path of the folder you're in |
 
 ```output title="Something like"
-/Users/maya/order-service
+/home/maya/order-service
 ```
 
 Copy what yours prints, and use it in place of `FULL_PATH`:
@@ -333,7 +333,7 @@ docker run --rm --mount type=bind,source=FULL_PATH,target=/code,readonly python:
 
 | Part | What it means |
 |---|---|
-| `--mount type=bind` | show a folder from your Mac inside the container |
+| `--mount type=bind` | show a folder from your computer inside the container |
 | `source=FULL_PATH` | which folder: the path `pwd` printed |
 | `target=/code` | where it appears inside the container |
 | `readonly` | the container can read the folder but not change it |
@@ -341,7 +341,7 @@ docker run --rm --mount type=bind,source=FULL_PATH,target=/code,readonly python:
 
 <See>
 
-Your folder's files: `Dockerfile`, `app.py`, `requirements.txt`, and any other files from the last lesson. The container is looking straight at your Mac's folder. Nothing was copied.
+Your folder's files: `Dockerfile`, `app.py`, `requirements.txt`, and any other files from the last lesson. The container is looking straight at your computer's folder. Nothing was copied.
 
 </See>
 
@@ -350,10 +350,10 @@ Your folder's files: `Dockerfile`, `app.py`, `requirements.txt`, and any other f
 With `--mount`, a folder that doesn't exist is an error rather than a surprise:
 
 ```output title="Docker stops with"
-docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /Users/maya/order-servce
+docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /home/maya/order-servce
 ```
 
-**Why:** the path has a typo, so there's no such folder on your Mac.
+**Why:** the path has a typo, so there's no such folder on your computer.
 
 **The fix:** run `pwd` again and copy its output exactly. If the path contains a space, put double quotes around the whole `type=bind,…` value, or the terminal splits it in two.
 
@@ -396,7 +396,7 @@ A long ID: the new network's.
 
 </See>
 
-Start the order service on it. There's no `-p`, so your Mac can't reach it, only containers on the network can:
+Start the order service on it. There's no `-p`, so your computer can't reach it, only containers on the network can:
 
 ```sh
 docker run -d --name orders --network quickcart order-service:v1
@@ -497,7 +497,7 @@ volumes:
 | `services:` | The containers in this project. Each name becomes a hostname on the project's network | Nothing to run |
 | `app:` → `build: .` | Build the image from the Dockerfile in this folder | Compose would need an image that already exists |
 | `image: order-service:v1` | The name to give that image | Compose makes up a name from the folder and service |
-| `ports: "8080:8080"` | Publish port 8080 on your Mac to the app. Quoted, because YAML can misread some number pairs with a colon | You couldn't reach the app from your Mac |
+| `ports: "8080:8080"` | Publish port 8080 on your computer to the app. Quoted, because YAML can misread some number pairs with a colon | You couldn't reach the app from your computer |
 | `depends_on:` → `condition: service_healthy` | Start the app only once the database's health check passes | The app might start before MySQL is ready to accept connections |
 | `db:` → `image: mysql:8.4` | MySQL 8.4, a long-term support release | Required |
 | `environment:` | Settings the MySQL image reads **the first time it starts with an empty data folder**: the root password, and a database and user to create | MySQL refuses to start without a root password setting |
@@ -540,13 +540,13 @@ A short list of what was created: a network called `order-service_default`, a vo
 Bind for 0.0.0.0:8080 failed: port is already allocated
 ```
 
-**Why:** something else is already using port 8080 on your Mac, often a container from an earlier step that's still running.
+**Why:** something else is already using port 8080 on your computer, often a container from an earlier step that's still running.
 
 **The fix:** run `docker ps`, find what's using 8080, and remove it with `docker rm -f` and its name. Or publish a different port, like `"8081:8080"`.
 
 </Mistake>
 
-The app answers on your Mac, as before:
+The app answers on your computer, as before:
 
 ```sh
 curl localhost:8080/health
@@ -748,9 +748,9 @@ docker image rm mysql:8.4 curlimages/curl
 | Writable layer | The container's own files. Deleted by `docker rm` |
 | `docker volume create NAME` | Make a named volume |
 | `-v NAME:/path` | Mount a named volume inside the container |
-| `--mount type=bind,source=FULL_PATH,target=/path` | Show a folder from your Mac inside the container |
-| `-p 8081:8080` | Port 8081 on your Mac leads to 8080 in the container |
-| `-p 127.0.0.1:8080:8080` | Only reachable from your own Mac |
+| `--mount type=bind,source=FULL_PATH,target=/path` | Show a folder from your computer inside the container |
+| `-p 8081:8080` | Port 8081 on your computer leads to 8080 in the container |
+| `-p 127.0.0.1:8080:8080` | Only reachable from your own computer |
 | `docker network create NAME` | A network where containers find each other by name |
 | `localhost` in a container | That container itself. Use the other container's name |
 | `docker compose up -d --wait` | Start everything in `compose.yaml` and wait until healthy |

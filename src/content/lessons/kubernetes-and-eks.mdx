@@ -216,7 +216,7 @@ The control plane is billed **every hour the cluster exists**, even with nothing
 
 You'll create an EKS cluster, install the load balancer controller, run QuickCart's order service on it, watch Kubernetes replace a deleted pod, release v2 under load and roll it back, and then delete everything.
 
-You need the `quickcart-orders` repository in ECR with the `v1` and `v2` images from [Releases without downtime](/lessons/zero-downtime-releases/), your `load.py`, and a working AWS login in your terminal as an IAM user or role, **not root**. [Set up your Mac](/lessons/mac-setup/) covers the login.
+You need the `quickcart-orders` repository in ECR with the `v1` and `v2` images from [Releases without downtime](/lessons/zero-downtime-releases/), your `load.py`, and a working AWS login in your terminal as an IAM user or role, **not root**. [Set up your computer](/lessons/computer-setup/) covers the login.
 
 ### Why eksctl, not the console
 
@@ -232,7 +232,7 @@ brew install eksctl kubectl helm
 
 | Part | What it means |
 |---|---|
-| `brew install` | install programs on your Mac with Homebrew |
+| `brew install` | install programs on your computer with Homebrew |
 | `eksctl` | creates and deletes EKS clusters |
 | `kubectl` | talks to any Kubernetes cluster: creates, lists and deletes objects |
 | `helm` | installs packaged add-ons, called charts, into a cluster |

@@ -42,7 +42,7 @@ Read these first. The project assumes you know what each piece is; here you put 
 
 You need:
 
-- An AWS account, signed in to the console as a user who can create VPC, EC2, IAM, S3, Secrets Manager and CloudWatch resources. [Set up your Mac](/lessons/mac-setup/) covers a safe login.
+- An AWS account, signed in to the console as a user who can create VPC, EC2, IAM, S3, Secrets Manager and CloudWatch resources. [Set up your computer](/lessons/computer-setup/) covers a safe login.
 - A **budget alert**, so a forgotten NAT gateway can't surprise you. **Billing and Cost Management → Budgets → Create budget**, a monthly cost budget of $20, with an email alert at 80%.
 - About 3 to 4 hours. You can stop between stages, but the NAT gateway and endpoints cost money while they exist.
 
@@ -549,7 +549,7 @@ Choose **Create bucket**.
 
 <Step title="Upload a small test file">
 
-On your Mac, create a text file called `hello.txt` containing one line: `hello from quickcart`. Then:
+On your computer, create a text file called `hello.txt` containing one line: `hello from quickcart`. Then:
 
 <ConsolePath path="S3 > quickcart-assets-111122223333 > Upload" />
 

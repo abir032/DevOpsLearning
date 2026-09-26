@@ -29,7 +29,7 @@
     },
     {
       "name": "real domain in a URL",
-      "re": "https?://(?!(?:[a-z0-9-]+\\.)*(?:example\\.com|example\\.org|localhost|127\\.0\\.0\\.1|registry\\.terraform\\.io|www\\.w3\\.org|jcgt\\.org|raw\\.githubusercontent\\.com|aws\\.github\\.io|pkg\\.jenkins\\.io|rpm\\.releases\\.hashicorp\\.com|truststore\\.pki\\.rds\\.amazonaws\\.com|www\\.shellcheck\\.net))[a-z0-9.-]+\\.[a-z]{2,}",
+      "re": "https?://(?!(?:[a-z0-9-]+\\.)*(?:example\\.com|example\\.org|localhost|127\\.0\\.0\\.1|registry\\.terraform\\.io|www\\.w3\\.org|jcgt\\.org|raw\\.githubusercontent\\.com|aws\\.github\\.io|pkg\\.jenkins\\.io|rpm\\.releases\\.hashicorp\\.com|truststore\\.pki\\.rds\\.amazonaws\\.com|www\\.shellcheck\\.net|s3\\.amazonaws\\.com))[a-z0-9.-]+\\.[a-z]{2,}",
       "allow": []
     }
   ]

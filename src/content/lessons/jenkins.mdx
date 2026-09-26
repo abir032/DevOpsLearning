@@ -309,7 +309,9 @@ The EC2 instance costs money every hour until you destroy it, even while you're 
 
 You'll build a Jenkins controller on EC2 with Terraform, reach it without opening a single port, connect an agent, run a build that uses a stored secret, and take a backup. About 60 minutes.
 
-You need Terraform 1.10 or later and a working AWS login in your terminal, as set up in [Set up your Mac](/lessons/mac-setup/). You also need the **Session Manager plugin** for the AWS CLI, which lets your Mac open a tunnel to the instance:
+You need Terraform 1.10 or later and a working AWS login in your terminal, as set up in [Set up your computer](/lessons/computer-setup/). You also need the **Session Manager plugin** for the AWS CLI, which lets your computer open a tunnel to the instance. Install it the way that matches your system.
+
+On **macOS**:
 
 ```sh
 brew install --cask session-manager-plugin
@@ -318,8 +320,31 @@ brew install --cask session-manager-plugin
 | Part | What it means |
 |---|---|
 | `brew install` | install software with Homebrew |
-| `--cask` | this one is a packaged app rather than a command-line formula |
+| `--cask` | this one is a packaged app rather than a command-line formula. Casks only exist on macOS |
 | `session-manager-plugin` | the plugin the AWS CLI uses for Session Manager |
+
+On **Linux**, and on **Windows inside Ubuntu (WSL)**, download AWS's Ubuntu package:
+
+```sh
+curl -fsSL -o session-manager-plugin.deb https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
+```
+
+| Part | What it means |
+|---|---|
+| `curl -fsSL` | download, failing on errors and following redirects |
+| `-o session-manager-plugin.deb` | save it to this file |
+| `…/ubuntu_64bit/session-manager-plugin.deb` | AWS's package for Intel and AMD computers. On an ARM computer, use `ubuntu_arm64` in place of `ubuntu_64bit` |
+
+Then install it:
+
+```sh
+sudo dpkg -i session-manager-plugin.deb
+```
+
+| Part | What it means |
+|---|---|
+| `sudo dpkg -i` | install a downloaded Ubuntu package, as the administrator |
+| `session-manager-plugin.deb` | the file you just downloaded |
 
 ```sh
 session-manager-plugin
@@ -658,9 +683,9 @@ cat: /var/lib/jenkins-home/secrets/initialAdminPassword: No such file or directo
 
 </Step>
 
-<Step title="Open a tunnel to Jenkins from your Mac">
+<Step title="Open a tunnel to Jenkins from your computer">
 
-The console can give you a shell, but it has no button for forwarding a port to your own browser, so this step uses the AWS CLI. In a terminal on your Mac:
+The console can give you a shell, but it has no button for forwarding a port to your own browser, so this step uses the AWS CLI. In a terminal on your computer:
 
 ```sh ph="INSTANCE_ID"
 aws ssm start-session --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080
@@ -672,7 +697,7 @@ aws ssm start-session --target INSTANCE_ID --document-name AWS-StartPortForwardi
 | `--target INSTANCE_ID` | which instance. Replace it with the `instance_id` Terraform printed |
 | `--document-name AWS-StartPortForwardingSession` | the kind of session: forward a port, rather than open a shell |
 | `--parameters portNumber=8080` | the port on the instance, where Jenkins listens |
-| `localPortNumber=8080` | the port on your Mac |
+| `localPortNumber=8080` | the port on your computer |
 
 ```output
 Starting session with SessionId: quickcart-admin-0f1e2d3c4b5a69788
@@ -680,7 +705,7 @@ Port 8080 opened for sessionId quickcart-admin-0f1e2d3c4b5a69788.
 Waiting for connections...
 ```
 
-Leave it running. Open `http://localhost:8080` in your browser. Your Mac passes it through the tunnel, AWS passes it to the SSM agent on the instance, and the agent connects to Jenkins on the instance's loopback address.
+Leave it running. Open `http://localhost:8080` in your browser. Your computer passes it through the tunnel, AWS passes it to the SSM agent on the instance, and the agent connects to Jenkins on the instance's loopback address.
 
 <Mistake title="the session won't start">
 
@@ -690,7 +715,7 @@ SessionManagerPlugin is not found.
 
 **Why:** the plugin isn't installed, or your terminal was open before you installed it.
 
-**The fix:** run the `brew install --cask session-manager-plugin` command above, then open a new terminal window.
+**The fix:** install the plugin as shown above for your system, then open a new terminal window.
 
 </Mistake>
 
@@ -910,7 +935,7 @@ To restore it, you'd create a volume from this snapshot and start a new instance
 
 <Step title="Clean up" cleanup>
 
-In the Mac terminal running the tunnel, press **Ctrl+C** to close it.
+In the terminal running the tunnel, press **Ctrl+C** to close it.
 
 Delete the snapshot first. Terraform didn't create it, so `destroy` won't remove it.
 

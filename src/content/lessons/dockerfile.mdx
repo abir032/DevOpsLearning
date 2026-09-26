@@ -243,7 +243,7 @@ Below is QuickCart's Dockerfile, already built once. Pick what you edit and choo
 
 You'll write QuickCart's order service and its Dockerfile, build it, run it, and watch the cache work and fail. About 30 minutes.
 
-You need Docker Desktop installed and running. [Set up your Mac](/lessons/mac-setup/) covers it. Check with:
+You need Docker Desktop installed and running. [Set up your computer](/lessons/computer-setup/) covers it. Check with:
 
 ```sh
 docker version
@@ -255,7 +255,7 @@ docker version
 
 <See>
 
-Two sections, **Client** and **Server**. If you only see Client and an error like `Cannot connect to the Docker daemon`, Docker Desktop isn't running: open it and wait for it to say it's running.
+Two sections, **Client** and **Server**. If you only see Client and an error like `Cannot connect to the Docker daemon`, Docker isn't running. On macOS and Windows, open Docker Desktop and wait for it to say it's running; on Linux, run `sudo systemctl start docker`.
 
 </See>
 
@@ -373,7 +373,7 @@ Dockerfile*
 | Line | Leaves out |
 |---|---|
 | `.git` | Your git history, which can be large and may hold old secrets |
-| `.venv`, `__pycache__`, `*.pyc` | Python's local files, which belong to your Mac, not the image |
+| `.venv`, `__pycache__`, `*.pyc` | Python's local files, which belong to your computer, not the image |
 | `.env`, `*.pem` | Settings files and keys: secrets |
 | `Dockerfile*`, `.dockerignore` | The build files themselves. Docker still reads them; they just aren't copied into the image |
 
@@ -418,7 +418,7 @@ There are more lines than this, and each has a time on the right. The first buil
 
 <Note title="Building for AWS">
 
-On a Mac with an Apple chip, this builds an image for Arm processors, which is right for running it on your Mac. An image going to AWS needs `--platform linux/amd64` as well. [Storing images: ECR](/lessons/ecr/) does that.
+On a Mac with an Apple chip, this builds an image for Arm processors, which is right for running it on your computer. An image going to AWS needs `--platform linux/amd64` as well. [Storing images: ECR](/lessons/ecr/) does that.
 
 </Note>
 
@@ -430,7 +430,7 @@ If `RUN pip install` comes before `COPY requirements.txt .`, or `.dockerignore` 
 ERROR: Could not open requirements file: [Errno 2] No such file or directory: 'requirements.txt'
 ```
 
-**Why:** each line only sees what earlier lines put into the image. Your folder on your Mac isn't visible to `RUN` at all.
+**Why:** each line only sees what earlier lines put into the image. Your folder on your computer isn't visible to `RUN` at all.
 
 **The fix:** copy the file first, and check `.dockerignore` doesn't list it.
 
@@ -448,7 +448,7 @@ docker run -d -p 8080:8080 --name orders order-service:v1
 |---|---|
 | `docker run` | start a container from an image |
 | `-d` | detached: run in the background and give you the terminal back |
-| `-p 8080:8080` | connect port 8080 on your Mac to port 8080 in the container |
+| `-p 8080:8080` | connect port 8080 on your computer to port 8080 in the container |
 | `--name orders` | call the container `orders`, so later commands can use that name |
 | `order-service:v1` | the image to start |
 
@@ -465,7 +465,7 @@ curl localhost:8080/health
 | Part | What it means |
 |---|---|
 | `curl` | fetch a web address and print the answer |
-| `localhost:8080` | your own Mac, port 8080, which `-p` connects to the container |
+| `localhost:8080` | your own computer, port 8080, which `-p` connects to the container |
 | `/health` | the page to fetch |
 
 ```output

@@ -132,7 +132,7 @@ The pipeline needs AWS permissions to deploy. Never store an access key in Jenki
 |---|---|
 | An agent on EC2 | The agent's **instance profile** gives it a role. The AWS CLI picks up short-lived credentials automatically |
 | One role per environment | The **Pipeline: AWS Steps** plugin's `withAWS(role: 'quickcart-deploy-prod')` assumes a role just for that stage, so a dev build can't touch prod |
-| On your Mac, for learning | Your own SSO login from [Set up your Mac](/lessons/mac-setup/): short-lived, and it expires on its own |
+| On your computer, for learning | Your own SSO login from [Set up your computer](/lessons/computer-setup/): short-lived, and it expires on its own |
 
 ### Timeouts, retries and idempotency
 
@@ -176,7 +176,7 @@ docker pull public.ecr.aws/docker/library/busybox:1.36
 
 | Part | What it means |
 |---|---|
-| `docker pull` | download an image to your Mac |
+| `docker pull` | download an image to your computer |
 | `public.ecr.aws/docker/library/busybox:1.36` | a tiny public image, version 1.36 |
 
 ```sh
@@ -185,7 +185,7 @@ docker pull public.ecr.aws/docker/library/busybox:1.37
 
 | Part | What it means |
 |---|---|
-| `docker pull` | download an image to your Mac |
+| `docker pull` | download an image to your computer |
 | `public.ecr.aws/docker/library/busybox:1.37` | the next version of the same image |
 
 Log Docker in to your registry. This is the one pipe in the lab:
@@ -277,7 +277,7 @@ tag invalid: The image tag 'v1' already exists in the 'quickcart-orders' reposit
 
 <Step title="Give Jenkins your AWS login">
 
-Jenkins on your Mac runs as you, so it can use your SSO login. Nothing secret is stored in Jenkins, and the login expires on its own.
+Jenkins on your computer runs as you, so it can use your SSO login. Nothing secret is stored in Jenkins, and the login expires on its own.
 
 Stop Jenkins in its terminal with **Ctrl+C**. Then sign in:
 
@@ -288,7 +288,7 @@ aws sso login --profile quickcart
 | Part | What it means |
 |---|---|
 | `aws sso login` | open the browser to sign in, and cache short-lived credentials |
-| `--profile quickcart` | the profile you set up in [Set up your Mac](/lessons/mac-setup/) |
+| `--profile quickcart` | the profile you set up in [Set up your computer](/lessons/computer-setup/) |
 
 Start Jenkins again, telling it which profile to use:
 
@@ -300,7 +300,7 @@ AWS_PROFILE=quickcart jenkins-lts --httpListenAddress=127.0.0.1 --httpPort=8080
 |---|---|
 | `AWS_PROFILE=quickcart` | set this variable for Jenkins only. Every build step Jenkins runs inherits it, so the AWS CLI uses your profile |
 | `jenkins-lts` | start Jenkins, as before |
-| `--httpListenAddress=127.0.0.1 --httpPort=8080` | only reachable from this Mac, on port 8080 |
+| `--httpListenAddress=127.0.0.1 --httpPort=8080` | only reachable from this computer, on port 8080 |
 
 ```output
 Jenkins is fully up and running

@@ -107,7 +107,7 @@ QuickCart grows from one laptop to millions of users. At each size, something ne
 
 | Module | What goes wrong for QuickCart | What it teaches |
 |---|---|---|
-| 00 Start here | Nothing yet | This roadmap, safe practice, and your Mac |
+| 00 Start here | Nothing yet | This roadmap, safe practice, and your computer |
 | 01 How software ships | Monthly releases hurt, and nobody knows which change broke things | Small releases, measuring delivery, reliability targets, safe ways to release |
 | 02 The cloud, simply | The backend needs a computer that is always on | Renting servers from AWS, and who is allowed to do what |
 | 03 Networking | The database can be reached from the internet | A private network where you choose what is exposed |
@@ -135,7 +135,7 @@ QuickCart grows from one laptop to millions of users. At each size, something ne
 
 | You need | Why | Where it's covered |
 |---|---|---|
-| A Mac | The setup steps are written for macOS. Linux works with different install commands. On Windows, use WSL, which gives you a Linux terminal | [Set up your Mac](/lessons/mac-setup/) |
+| A computer running macOS, Windows 10 or 11, or Linux | Every command in the course runs in a Unix-style terminal. macOS and Linux have one; Windows gets one through WSL 2 | [Set up your computer](/lessons/computer-setup/) |
 | About 20 GB of free disk space | Docker images and tools take room | The lab below |
 | An AWS account and a payment card | AWS asks for a card even for free use | [How this course works](/lessons/how-this-course-works/) |
 | A small budget | Most labs are free or cost pennies. A few cost a little while they run | Every lab starts with a cost badge |
@@ -159,52 +159,46 @@ Below is QuickCart's route. Choose **Grow QuickCart** to add users. At each stag
 
 <Cost kind="free">nothing in this lab touches AWS.</Cost>
 
-You'll check that your Mac is ready for the course, and write down a plan: which route you'll take, how much time you have, and what you're willing to spend. About 10 minutes.
+You'll check that your computer is ready for the course, and write down a plan: which route you'll take, how much time you have, and what you're willing to spend. About 10 minutes.
 
-Open the **Terminal** app. You'll find it in **Applications → Utilities**, or press <kbd>⌘</kbd> + <kbd>Space</kbd> and type `Terminal`.
+On **macOS**, open the **Terminal** app (search for it with Spotlight). On **Linux**, open your **Terminal**. On **Windows**, you'll set up a terminal in [Set up your computer](/lessons/computer-setup/); for this lab, use the Windows settings described in each step instead.
 
 <Steps>
 
-<Step title="Check your version of macOS">
+<Step title="Check your system and its chip">
+
+On macOS or Linux:
 
 ```sh
-sw_vers
-```
-
-| Part | What it means |
-|---|---|
-| `sw_vers` | print the name and version of the operating system (short for *software versions*) |
-
-```output
-ProductName:		macOS
-ProductVersion:		27.0
-BuildVersion:		26A428
-```
-
-Your version and build will differ. The tools in this course need a recent macOS. Docker Desktop, for example, supports the current version of macOS and the two before it. If your Mac is several years behind, update it first in **System Settings → General → Software Update**.
-
-</Step>
-
-<Step title="Check which kind of chip your Mac has">
-
-```sh
-uname -m
+uname -sm
 ```
 
 | Part | What it means |
 |---|---|
 | `uname` | print information about the system |
-| `-m` | only the machine's hardware type |
+| `-s` | the name of the operating system's kernel: `Darwin` on macOS, `Linux` on Linux |
+| `-m` | the machine's hardware type: which kind of chip |
 
 ```output
-arm64
+Linux x86_64
 ```
 
-`arm64` means an Apple chip (M1 or later). `x86_64` means an Intel chip. Both work for this course. It matters later: a container image built on an Apple chip is built for arm64 by default, and it won't run on an Intel server unless you build it for that. The [Dockerfile lesson](/lessons/dockerfile/) shows how.
+A Mac with an Apple chip prints `Darwin arm64`. On **Windows**, open **Settings** → **System** → **About**: **System type** shows the same thing, such as *64-bit operating system, x64-based processor*.
+
+| You see | It means |
+|---|---|
+| `x86_64` or *x64-based* | An Intel or AMD chip, like most servers on AWS |
+| `arm64` or *ARM-based* | An ARM chip, such as Apple's M-series or some Windows laptops |
+
+Both work for this course. It matters later: a container image built on an ARM chip is built for ARM by default, and it won't run on an Intel or AMD server unless you build it for that. The [Dockerfile lesson](/lessons/dockerfile/) shows how.
+
+Your system should be reasonably up to date. The tools in this course support recent versions of macOS, Windows 11 or Windows 10 (version 22H2), and current Linux releases such as Ubuntu 22.04 or 24.04. If yours is several years behind, update it first.
 
 </Step>
 
 <Step title="Check your free disk space">
+
+On macOS or Linux:
 
 ```sh
 df -h /
@@ -213,15 +207,15 @@ df -h /
 | Part | What it means |
 |---|---|
 | `df` | show how much space is free on your disks (short for *disk free*) |
-| `-h` | human-readable: show sizes like `212Gi` instead of counting blocks |
-| `/` | only the main disk, the one macOS runs from |
+| `-h` | human-readable: show sizes like `212G` instead of counting blocks |
+| `/` | only the main disk, the one your system runs from |
 
 ```output
-Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
-/dev/disk3s1s1   460Gi    11Gi   212Gi     5%    453k  2.2G    0%   /
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2  468G   94G  350G  22% /
 ```
 
-Look at the **Avail** column. Your numbers will differ. The **Used** column often looks strangely small on a Mac, because macOS keeps its own files on a separate part of the disk. **Avail** is the number that matters.
+Look at the **Avail** column. Your numbers will differ, and macOS shows a few more columns, but **Avail** means the same everywhere. On **Windows**, open **File Explorer** → **This PC**: the free space on the **C:** drive is the number that matters.
 
 <Mistake title="not enough space for Docker">
 
@@ -303,8 +297,7 @@ Keep your plan somewhere you'll see it. When you finish a lesson, press **Mark a
 | Every lesson | Problem, idea, see it, do it, check yourself, cheat sheet |
 | Every tool | The answer to one problem at one size. Meet the problem first |
 | Jumping in | Read the lessons listed under **Read first**, then start anywhere |
-| `sw_vers` | Which macOS you have |
-| `uname -m` | `arm64` for an Apple chip, `x86_64` for Intel |
+| `uname -sm` | Your system and chip: `x86_64` for Intel or AMD, `arm64` for ARM |
 | `df -h /` | Free disk space. Look at **Avail**. You want 20 GB or more |
 | Cost | Every lab has a badge. The paid ones have a clean-up step |
 

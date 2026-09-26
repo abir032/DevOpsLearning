@@ -49,8 +49,8 @@
     "def": "An AWS Budgets email sent when your spending passes a threshold. It warns you; it doesn't stop anything." },
   { "term": "Free tier", "lesson": "how-this-course-works", "match": ["free tier"],
     "def": "AWS's free offers. What you get depends on when your account was created. Check Billing and Cost Management, then Free Tier." },
-  { "term": "Homebrew", "lesson": "mac-setup", "match": ["Homebrew"],
-    "def": "A package manager for macOS. It installs and updates command-line tools and apps by name." },
-  { "term": "AWS CLI", "lesson": "mac-setup", "match": ["AWS CLI"],
+  { "term": "Homebrew", "lesson": "computer-setup", "match": ["Homebrew"],
+    "def": "A package manager for macOS and Linux, including Ubuntu on Windows through WSL. It installs and updates command-line tools by name." },
+  { "term": "AWS CLI", "lesson": "computer-setup", "match": ["AWS CLI"],
     "def": "The aws command: AWS from the terminal. It finds credentials in a fixed order and uses the first it finds." }
 ]

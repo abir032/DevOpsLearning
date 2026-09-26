@@ -53,7 +53,7 @@ quickcart/
 | Tool | For |
 |---|---|
 | Terraform, the AWS CLI and git | as in Project 4 |
-| The Session Manager plugin for the AWS CLI | opening Jenkins without an open port. Install it with `brew install --cask session-manager-plugin` |
+| The Session Manager plugin for the AWS CLI | opening Jenkins without an open port. [Jenkins from zero](/lessons/jenkins/) shows how to install it on macOS, Linux and Windows (WSL) |
 | A GitHub account | a **private** repository for the code |
 
 ## Cost
@@ -623,7 +623,7 @@ aws ssm start-session --target CONTROLLER_ID --document-name AWS-StartPortForwar
 | `aws ssm start-session` | open a Session Manager connection to an instance |
 | `--target CONTROLLER_ID` | the controller. Use the `controller_id` output |
 | `--document-name AWS-StartPortForwardingSession` | forward a port, instead of opening a shell |
-| `--parameters portNumber=8080,localPortNumber=8080` | Jenkins' port on the instance appears as port 8080 on your Mac |
+| `--parameters portNumber=8080,localPortNumber=8080` | Jenkins' port on the instance appears as port 8080 on your computer |
 
 ```output
 Starting session with SessionId: you-0a1b2c3d4e5f67890
@@ -678,7 +678,7 @@ Paste it into the page. Choose **Install suggested plugins**, then create the fi
 
 <Step title="Store the agent's SSH key in Jenkins">
 
-The controller has no permission to read the key, on purpose. Read it from **your Mac**, where your admin login can:
+The controller has no permission to read the key, on purpose. Read it from **your computer**, where your admin login can:
 
 ```sh
 aws ssm get-parameter --name /quickcart/jenkins/agent-ssh-key --with-decryption --region us-east-1 --query Parameter.Value --output text
@@ -754,7 +754,7 @@ If you skip this, the `lock` step creates them the first time it's used; declari
 
 <Step title="Make the repository">
 
-Create a new, **private**, empty repository on GitHub called `quickcart`. On your Mac, make the folders:
+Create a new, **private**, empty repository on GitHub called `quickcart`. On your computer, make the folders:
 
 ```sh
 mkdir -p quickcart/app quickcart/ops quickcart/scripts quickcart/jenkins quickcart/ci
@@ -2058,7 +2058,7 @@ SessionManagerPlugin is not found. Please refer to SessionManager Documentation 
 
 **Why:** the AWS CLI needs a separate plugin for Session Manager.
 
-**The fix:** `brew install --cask session-manager-plugin`, then open a new terminal window.
+**The fix:** install the plugin as shown in [Jenkins from zero](/lessons/jenkins/), then open a new terminal window.
 
 </Mistake>
 

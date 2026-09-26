@@ -208,7 +208,7 @@ You'll install Terraform and run the whole loop — init, plan, apply, apply aga
 
 <Step title="Install Terraform">
 
-On a Mac, Terraform comes from HashiCorp's own Homebrew collection. First add the collection:
+With Homebrew, on macOS, Linux or Windows (inside WSL), Terraform comes from HashiCorp's own collection. [Set up your computer](/lessons/computer-setup/) installs Homebrew. First add the collection:
 
 ```sh
 brew tap hashicorp/tap
@@ -242,10 +242,10 @@ terraform version
 
 ```output
 Terraform v1.16.4
-on darwin_arm64
+on linux_amd64
 ```
 
-Yours may be newer. Anything from 1.10 upwards works for this course.
+Yours may be newer. Anything from 1.10 upwards works for this course. The second line names your system: `darwin_arm64` on a Mac with an Apple chip, `linux_amd64` on most Linux and Windows computers.
 
 <Note title="Why not just brew install terraform?">
 

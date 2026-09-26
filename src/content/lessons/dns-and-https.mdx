@@ -342,7 +342,7 @@ Open your hosted zone and copy the four values from its `NS` record.
 
 In your registrar's website, find the domain's **name servers** setting. Replace whatever is there with the four Route 53 name servers, and save. Every registrar's page looks different; search its help pages for "change name servers" or "custom nameservers".
 
-Then check what the world sees, from your Mac's terminal:
+Then check what the world sees, from your computer's terminal:
 
 ```sh ph="example.com"
 dig +short NS example.com
@@ -407,7 +407,7 @@ Now skip to step 8.
 
 <Step title="Path B: make and import a self-signed certificate">
 
-Make a certificate and its private key, in any folder on your Mac:
+Make a certificate and its private key, in any folder on your computer:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -keyout quickcart-key.pem -out quickcart-cert.pem -days 30 -subj "/CN=quickcart.example.com"
@@ -618,7 +618,7 @@ Type `confirm` and choose **Delete**. Then delete the rest, in this order:
 
 A hosted zone can only be deleted once it holds nothing but its `NS` and `SOA` records. If you plan to keep using the domain with Route 53, keep the hosted zone instead, at $0.50 a month.
 
-For path B, delete the two `.pem` files from your Mac.
+For path B, delete the two `.pem` files from your computer.
 
 <See>
 

@@ -36,12 +36,12 @@ export const TRACKS: Record<Track, string> = {
 export const MODULES: Module[] = [
   {
     id: "00", slug: "00-start-here", track: "start", title: "Start here", kind: "lessons",
-    blurb: "What DevOps is for, how this course works, and setting up your Mac.",
+    blurb: "What DevOps is for, how this course works, and setting up your computer.",
     qc: "Meet QuickCart: a food-ordering app with a small team and big plans.",
     lessons: [
       { slug: "roadmap", title: "The roadmap", sum: "Where QuickCart starts, and where it ends up." },
       { slug: "how-this-course-works", title: "How this course works", sum: "The six parts of every lesson, and how to practise safely." },
-      { slug: "mac-setup", title: "Set up your Mac", sum: "Homebrew, the AWS CLI, Docker, Terraform and a safe AWS login." },
+      { slug: "computer-setup", title: "Set up your computer", sum: "Your tools and a safe AWS login, on macOS, Windows or Linux." },
     ],
   },
   {

@@ -149,7 +149,7 @@ Below, a pipeline releases a new version of QuickCart's menu service in steps. F
 
 You'll give Jenkins a canary to run. The service is the `quickcart-menu` Lambda function from [Ways to release](/lessons/release-strategies/), with a `live` alias that can send a share of calls to a second version. The pipeline shifts 25% and then 50% to the new version. At each step it calls the alias until enough calls reach the new version, then compares that version's error rate with the limit. About 40 minutes.
 
-You need the Jenkins on your Mac from [The Jenkinsfile](/lessons/jenkinsfile/), started with `AWS_PROFILE=quickcart` as in [Continuous delivery](/lessons/continuous-delivery/).
+You need the Jenkins on your computer from [The Jenkinsfile](/lessons/jenkinsfile/), started with `AWS_PROFILE=quickcart` as in [Continuous delivery](/lessons/continuous-delivery/).
 
 <Note title="Smaller numbers than production">
 

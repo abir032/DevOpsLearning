@@ -1,7 +1,7 @@
 ---
 time: 30 minutes
 level: Beginner
-before: [mac-setup]
+before: [computer-setup]
 cost: free
 quiz:
   - q: What is the difference between an image and a container?
@@ -129,7 +129,7 @@ So a container **shares the host's kernel** — the core of the operating system
 | Starts in | About a minute: it boots an OS | About a second: it starts a process |
 | Isolation | Strong: separate kernels | Good, but the kernel is shared |
 
-Containers usually run **inside** virtual machines, not instead of them. On AWS, your containers run on EC2 instances, which are virtual machines. On a Mac, Docker Desktop runs a small Linux virtual machine, and your containers share its kernel.
+Containers usually run **inside** virtual machines, not instead of them. On AWS, your containers run on EC2 instances, which are virtual machines. On macOS and Windows, Docker Desktop runs a small Linux virtual machine, and your containers share its kernel. On Linux, containers share your own system's kernel directly.
 
 ### Images are made of layers
 
@@ -220,7 +220,7 @@ Below are four QuickCart apps — orders, menu, payments and delivery — packed
 
 You'll pull a real image, run two containers from it, look inside one, and tidy everything away. About 20 minutes.
 
-You need Docker Desktop installed and running. [Set up your Mac](/lessons/mac-setup/) covers it. The whale icon in the menu bar should say **Docker Desktop is running**.
+You need Docker installed and running. [Set up your computer](/lessons/computer-setup/) covers it. On macOS and Windows, open Docker Desktop and wait until it says it's running. On Linux, the Docker service starts on its own.
 
 <Steps>
 
@@ -247,7 +247,7 @@ This message shows that your installation appears to be working correctly.
 
 Between these lines you'll also see a `Pull complete` line and a `Digest` line, and after them more text explaining what just happened. Notice the first line: you didn't give a tag, so Docker used `latest`.
 
-<Mistake title="Docker Desktop isn't running">
+<Mistake title="Docker isn't running">
 
 ```output title="The command fails with a message like"
 Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
@@ -255,9 +255,9 @@ Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docke
 
 The path in your message may be different.
 
-**Why:** the `docker` command is only a client. It sends your request to the Docker engine, which runs inside Docker Desktop. If Docker Desktop is closed, nothing answers.
+**Why:** the `docker` command is only a client. It sends your request to the Docker engine. On macOS and Windows the engine runs inside Docker Desktop, so if Docker Desktop is closed, nothing answers. On Linux, the engine is a service that has stopped.
 
-**The fix:** open Docker Desktop, wait until it says it's running, and try again.
+**The fix:** on macOS and Windows, open Docker Desktop, wait until it says it's running, and try again. On Linux, run `sudo systemctl start docker`.
 
 </Mistake>
 
@@ -421,7 +421,7 @@ NAME="Debian GNU/Linux"
 VERSION_ID="12"
 ```
 
-There are more lines after these. The image carries Debian's files, even though you're on a Mac. Now ask for the **kernel**:
+There are more lines after these. The image carries Debian's files, whatever system your computer runs. Now ask for the **kernel**:
 
 ```sh
 docker exec web uname -r
@@ -433,7 +433,7 @@ docker exec web uname -r
 
 <See>
 
-A version number ending in `linuxkit`, such as `6.10.14-linuxkit`. That's the kernel of the small Linux virtual machine inside Docker Desktop. Run the same command with `web2` instead of `web` and you get the identical answer: **both containers share one kernel**. Only the files are their own.
+A kernel version number. With Docker Desktop it ends in `linuxkit`, such as `6.10.14-linuxkit`: the kernel of the small Linux virtual machine inside Docker Desktop. On Linux, it's your own system's kernel, such as `6.8.0-45-generic`. Run the same command with `web2` instead of `web` and you get the identical answer: **both containers share one kernel**. Only the files are their own.
 
 </See>
 

@@ -31,7 +31,7 @@ quiz:
     options:
       - t: SSO gives credentials that expire after hours; access keys work until someone deletes them
         why: Right. If an SSO credential leaks, it stops working soon. A leaked access key works for anyone, for as long as it exists.
-      - t: aws configure doesn't work on a Mac
+      - t: aws configure only works on servers, not on laptops
         why: It works everywhere. It's just less safe for a person's everyday login.
       - t: SSO is faster
         why: Speed isn't the difference. Safety is.
@@ -87,17 +87,20 @@ Both of Priya's problems have simple fixes: install everything the same way, and
 
 <Part id="idea">
 
-You need a handful of tools. They all install the same way, with **Homebrew**, a package manager for macOS. You ask for a tool by name, and Homebrew downloads it, installs it and keeps it up to date.
+You need a handful of tools. Almost all of them install the same way, with **Homebrew**, a package manager that runs on macOS and Linux. You ask for a tool by name, and Homebrew downloads it, installs it and keeps it up to date.
+
+On Windows, you'll use **WSL 2**, a real Ubuntu Linux built into Windows, and install Homebrew inside it. That way every command in this course works the same on macOS, Windows and Linux, and matches what runs on the Linux servers you'll build.
 
 ### What you're installing, and why
 
 | Tool | What it does | First used in |
 |---|---|---|
-| Command line developer tools | Apple's basic tools for developers, including a version of git. Homebrew needs them | This lesson |
+| A Unix-style terminal | The Terminal app on macOS and Linux; WSL 2 with Ubuntu on Windows | This lesson |
+| Command line developer tools (macOS only) | Apple's basic tools for developers. Homebrew needs them | This lesson |
 | Homebrew | Installs and updates everything else | This lesson |
 | git | Tracks changes to code | [Measuring delivery](/lessons/dora-metrics/) |
 | AWS CLI v2 | Talks to AWS from the terminal | This lesson |
-| Docker Desktop | Builds and runs containers | [Images and containers](/lessons/images-and-containers/) |
+| Docker | Builds and runs containers: Docker Desktop on macOS and Windows, the Docker engine on Linux | [Images and containers](/lessons/images-and-containers/) |
 | Terraform | Builds AWS resources from code | [Your first resource](/lessons/first-resource/) |
 | kubectl | Talks to Kubernetes clusters | [Kubernetes and EKS](/lessons/kubernetes-and-eks/) |
 | A code editor | Editing files. This course suggests Visual Studio Code, but any editor works | Throughout |
@@ -145,11 +148,21 @@ Your laptop has the `quickcart` profile set up. Turn the other sources on and of
 
 You'll install every tool the course uses, sign in to AWS through IAM Identity Center, and check who you are. About 30 minutes, most of it waiting for downloads.
 
-You need the admin user and access portal from [How this course works](/lessons/how-this-course-works/). Open the **Terminal** app to start.
+You need the admin user and access portal from [How this course works](/lessons/how-this-course-works/). The first two steps are different on macOS, Windows and Linux. **From step 3 on, every command is the same on all three**, and so is every command in the rest of the course.
 
 <Steps>
 
-<Step title="Install Apple's command line tools">
+<Step title="Open a terminal that works like everyone else's">
+
+This course's commands are written for a Unix-style terminal, the kind every Mac and Linux machine has. Windows gets one too, through WSL 2.
+
+| Your system | Do this |
+|---|---|
+| **macOS** | Open the **Terminal** app (search for it with Spotlight). Then install Apple's command line tools, below |
+| **Windows 10 or 11** | Install **WSL 2** with Ubuntu, below. From then on, always use the **Ubuntu** terminal for this course |
+| **Linux** (Ubuntu or Debian) | Open your **Terminal** app. There's nothing to add in this step |
+
+#### On macOS: Apple's command line tools
 
 ```sh
 xcode-select --install
@@ -160,31 +173,124 @@ xcode-select --install
 | `xcode-select` | Apple's tool for managing developer tools |
 | `--install` | install the command line developer tools, without the whole of Xcode |
 
-A window opens asking to install the tools. Choose **Install** and agree to the licence. It takes a few minutes.
+A window opens. Choose **Install** and agree to the licence. If you already have the tools, the terminal says so, and you can go straight on:
+
+```output
+xcode-select: note: Command line tools are already installed.
+```
+
+#### On Windows: WSL 2 with Ubuntu
+
+WSL, the Windows Subsystem for Linux, runs a real Ubuntu Linux inside Windows. Open **PowerShell as administrator**: right-click the Start button, then choose **Terminal (Admin)** or **Windows PowerShell (Admin)**. Then run:
+
+```sh
+wsl --install
+```
+
+| Part | What it means |
+|---|---|
+| `wsl` | the Windows Subsystem for Linux command |
+| `--install` | turn on WSL 2 and install Ubuntu, the default Linux |
+
+Restart Windows when it asks. Afterwards, open **Ubuntu** from the Start menu. The first time, it asks you to choose a Linux user name and password. They are separate from your Windows login; remember the password, because `sudo` asks for it.
 
 <See>
 
-The window says **The software was installed**.
+A terminal window with a prompt like `you@DESKTOP-1A2B3C:~$`. Everything else in this course happens in this Ubuntu window, not in PowerShell.
 
 </See>
 
-If you already have them, the terminal says so instead, and you can go straight on:
+<Mistake title="WSL says virtualisation is turned off">
 
-```output
-xcode-select: note: Command line tools are already installed. Use "Software Update" in System Settings or the softwareupdate command line interface to install updates
+```output title="The install stops with a message like"
+Please enable the Virtual Machine Platform Windows feature and ensure virtualization is enabled in the BIOS.
 ```
+
+**Why:** WSL 2 runs Linux in a lightweight virtual machine, and the computer's firmware has virtualisation switched off.
+
+**The fix:** restart into your computer's BIOS or UEFI settings (the key is usually shown at start-up, often F2 or Del), turn on the setting called **Virtualization Technology**, **Intel VT-x** or **SVM Mode**, and run `wsl --install` again.
+
+</Mistake>
 
 </Step>
 
 <Step title="Install Homebrew">
 
-Homebrew's website, **brew.sh**, offers two ways to install it: a one-line command, and a normal Mac installer package. Use the installer: it's a file you double-click, with nothing to paste.
+**Homebrew** installs every other tool in this course, the same way on macOS and on Linux, including the Ubuntu inside WSL.
 
-1. Go to **brew.sh** and follow the link to the latest release, which is on GitHub.
-2. Download the file ending in `.pkg`.
-3. Double-click it and follow the installer.
+#### On macOS
 
-Then **open a new Terminal window**, so it picks up the new tool, and check:
+Homebrew's website, **brew.sh**, links to its latest release on GitHub. Download the file ending in `.pkg`, double-click it and follow the installer. Then **open a new terminal window**, so it picks up the new tool.
+
+#### On Linux and Windows (inside Ubuntu)
+
+First, install the few things Homebrew needs to build and download software:
+
+```sh
+sudo apt-get update
+```
+
+| Part | What it means |
+|---|---|
+| `sudo` | run the next command as the administrator. It asks for your Linux password |
+| `apt-get update` | refresh Ubuntu's list of available packages |
+
+```sh
+sudo apt-get install -y build-essential procps curl file git
+```
+
+| Part | What it means |
+|---|---|
+| `sudo apt-get install` | install packages from Ubuntu, as the administrator |
+| `-y` | answer yes to "Do you want to continue?" |
+| `build-essential procps curl file git` | compilers, process tools, a downloader, a file-type checker and git: what Homebrew needs |
+
+Download Homebrew's installer to a file, so you can see what you're running:
+
+```sh
+curl -fsSL -o install-homebrew.sh https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | download from a web address |
+| `-fsSL` | fail on errors, stay quiet, and follow redirects |
+| `-o install-homebrew.sh` | save it to this file instead of printing it |
+| `https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh` | Homebrew's official installer |
+
+Run it:
+
+```sh
+bash install-homebrew.sh
+```
+
+| Part | What it means |
+|---|---|
+| `bash` | run a script |
+| `install-homebrew.sh` | the installer you just downloaded |
+
+It asks for your password and for **Enter** to continue, then takes a few minutes. Near the end it says:
+
+```output
+==> Installation successful!
+```
+
+Homebrew on Linux lives in `/home/linuxbrew/.linuxbrew`. Tell your terminal to look there for commands, in the settings file it reads every time it opens:
+
+```sh
+echo 'export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"' >> ~/.bashrc
+```
+
+| Part | What it means |
+|---|---|
+| `echo '…'` | print the text between the single quotes, exactly as written |
+| `export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"` | the line being added: put Homebrew's folder at the front of the list of places to find commands |
+| `>>` | add the printed text to the **end** of a file, instead of showing it. One `>` would replace the whole file |
+| `~/.bashrc` | the settings file your terminal reads when it opens. `~` is your home folder |
+
+Then **open a new terminal window**.
+
+#### Everyone: check it works
 
 ```sh
 brew --version
@@ -204,45 +310,24 @@ Yours may be newer.
 <Mistake title="the terminal can't find brew">
 
 ```output title="The terminal says"
-zsh: command not found: brew
+brew: command not found
 ```
 
-**Why:** on a Mac with an Apple chip, Homebrew lives in `/opt/homebrew/bin`, and the terminal only looks for commands in the folders listed in a setting called `PATH`. The installer adds that folder for new terminal windows, so an old window doesn't know about it.
+On macOS it reads `zsh: command not found: brew`.
 
-**The fix:** close the terminal window and open a new one. If it still fails, add the folder yourself. Create your shell's settings file if it doesn't exist:
+**Why:** the terminal only looks for commands in the folders listed in a setting called `PATH`, and a window that was already open doesn't know about Homebrew's folder.
+
+**The fix:** close the terminal window and open a new one. If it still fails on Linux or WSL, check the `echo` step above ran. On a Mac with an Apple chip, add Homebrew's folder yourself:
 
 ```sh
-touch ~/.zprofile
+echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.zprofile
 ```
 
 | Part | What it means |
 |---|---|
-| `touch` | create the file if it doesn't exist; leave it alone if it does |
-| `~/.zprofile` | a settings file in your home folder that the terminal reads when it opens |
-
-Open it in TextEdit:
-
-```sh
-open -e ~/.zprofile
-```
-
-| Part | What it means |
-|---|---|
-| `open` | open a file, as if you'd double-clicked it |
-| `-e` | in TextEdit |
-| `~/.zprofile` | the file you just made |
-
-Add this line at the end, save, and open a new terminal window:
-
-```sh title="~/.zprofile"
-export PATH="/opt/homebrew/bin:$PATH"
-```
-
-| Part | What it means |
-|---|---|
-| `export PATH=` | set the list of folders the terminal searches for commands |
-| `/opt/homebrew/bin` | Homebrew's folder, put first |
-| `:$PATH` | followed by everything that was already in the list |
+| `echo '…' >>` | add this line to the end of a file |
+| `/opt/homebrew/bin` | where Homebrew lives on a Mac with an Apple chip |
+| `~/.zprofile` | the settings file the Mac terminal reads when it opens |
 
 </Mistake>
 
@@ -259,7 +344,7 @@ brew install git
 | `brew install` | download and install a tool |
 | `git` | the tool's name in Homebrew |
 
-The command line tools already included a git, but Homebrew's is newer and stays up to date. Open a new terminal window, then check:
+Your system may already have a git, but Homebrew's is newer and stays up to date. Open a new terminal window, then check:
 
 ```sh
 git --version
@@ -282,7 +367,7 @@ git config --global user.name "Your Name"
 | Part | What it means |
 |---|---|
 | `git config` | change a git setting |
-| `--global` | for every project on this laptop, not just one |
+| `--global` | for every project on this computer, not just one |
 | `user.name` | the setting: your name as it appears in history |
 | `"Your Name"` | replace with your name. The quotes keep the space in it |
 
@@ -317,28 +402,47 @@ aws --version
 | `aws --version` | print which version of the AWS CLI is installed |
 
 ```output
-aws-cli/2.37.3 Python/3.13.7 Darwin/25.0.0 source/arm64
+aws-cli/2.37.3 Python/3.13.7 Linux/6.6.87 source/x86_64
 ```
 
-Your numbers will differ. What matters is that it starts with `aws-cli/2`. Version 1 is old and works differently.
+Your numbers will differ, and the middle names your system: `Darwin` on a Mac, `Linux` on Linux and WSL. What matters is that it starts with `aws-cli/2`. Version 1 is old and works differently.
 
 </Step>
 
-<Step title="Install Docker Desktop">
+<Step title="Install Docker">
+
+Docker builds and runs containers. How you install it depends on your system:
+
+| Your system | Install |
+|---|---|
+| **macOS** | Run `brew install --cask docker-desktop`. Then open **Docker** from Applications, accept the terms and choose **Use recommended settings** |
+| **Windows** | Download **Docker Desktop for Windows** from docker.com and install it with the **WSL 2** option. Open it, then go to **Settings** → **Resources** → **WSL integration** and turn it on for **Ubuntu**. The `docker` command then works inside your Ubuntu terminal |
+| **Linux** | Install the Docker engine and give yourself permission to use it, with the two commands below |
+
+#### On Linux only
 
 ```sh
-brew install --cask docker-desktop
+sudo apt-get install -y docker.io
 ```
 
 | Part | What it means |
 |---|---|
-| `brew install` | download and install |
-| `--cask` | this is a full Mac app with a window, not just a terminal command |
-| `docker-desktop` | Docker Desktop: the app that runs containers on your Mac |
+| `sudo apt-get install -y` | install a package from Ubuntu, answering yes |
+| `docker.io` | Ubuntu's package of the Docker engine and the `docker` command |
 
-Open **Docker** from your Applications folder. Accept the terms, choose **Use recommended settings**, and enter your Mac password if asked. You can skip signing in to a Docker account. Wait until the whale icon in the menu bar stops animating.
+```sh
+sudo usermod -aG docker "$USER"
+```
 
-Then run a tiny test container:
+| Part | What it means |
+|---|---|
+| `sudo usermod` | change a user account, as the administrator |
+| `-aG docker` | **a**dd them to the **G**roup called `docker`, which may use the Docker engine |
+| `"$USER"` | your own user name, which the terminal fills in |
+
+Log out and back in, so the new group applies. Docker's own documentation also describes installing its newest release from Docker's package repository, if you need a newer version than Ubuntu's.
+
+#### Everyone: run a tiny test container
 
 ```sh
 docker run --rm hello-world
@@ -359,7 +463,7 @@ More lines follow, explaining what just happened.
 
 <Note title="Docker Desktop's licence">
 
-Docker Desktop is free for personal use, education and small businesses. Larger companies need a paid subscription; check Docker's current terms if you'll use it at work. A free alternative is **Colima**, which runs the same `docker` commands: install it with `brew install colima docker`, then start it with `colima start`.
+Docker Desktop, on macOS and Windows, is free for personal use, education and small businesses. Larger companies need a paid subscription; check Docker's current terms if you'll use it at work. On macOS, a free alternative is **Colima**: install it with `brew install colima docker`, then start it with `colima start`. On Linux, the Docker engine is free.
 
 </Note>
 
@@ -371,9 +475,9 @@ Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docke
 
 The exact path in the message may differ.
 
-**Why:** the `docker` command is only a remote control. The engine that runs containers lives inside the Docker Desktop app, and the app isn't open.
+**Why:** the `docker` command is only a remote control. The engine that runs containers isn't running: on macOS and Windows it lives inside the Docker Desktop app, which isn't open; on Linux, the service has stopped.
 
-**The fix:** open Docker from Applications, wait for it to finish starting, and run the command again.
+**The fix:** on macOS and Windows, open Docker Desktop and wait for it to finish starting. On Linux, start the service with `sudo systemctl start docker`. Then run the command again. If Linux says **permission denied** instead, you haven't logged out and back in since adding yourself to the `docker` group.
 
 </Mistake>
 
@@ -413,10 +517,10 @@ terraform version
 
 ```output
 Terraform v1.16.4
-on darwin_arm64
+on linux_amd64
 ```
 
-Yours may be newer.
+Yours may be newer. The second line names your system: `darwin_arm64` on a Mac with an Apple chip, `linux_amd64` on most Linux and Windows computers.
 
 <Mistake title="installing plain terraform">
 
@@ -448,7 +552,7 @@ kubectl version --client
 | Part | What it means |
 |---|---|
 | `kubectl version` | print version information |
-| `--client` | only for this tool on your laptop. Without it, kubectl also tries to contact a cluster, and you don't have one yet |
+| `--client` | only for this tool on your computer. Without it, kubectl also tries to contact a cluster, and you don't have one yet |
 
 ```output
 Client Version: v1.37.1
@@ -456,16 +560,7 @@ Client Version: v1.37.1
 
 A second line gives the version of Kustomize, a tool built into kubectl. Your versions will differ.
 
-If you don't already have a code editor you like, install Visual Studio Code:
-
-```sh
-brew install --cask visual-studio-code
-```
-
-| Part | What it means |
-|---|---|
-| `--cask` | a full Mac app |
-| `visual-studio-code` | Visual Studio Code, a free code editor |
+If you don't already have a code editor you like, install **Visual Studio Code** from its website: it's free on macOS, Windows and Linux. On Windows, also install its **WSL** extension, so it can open and edit the files inside Ubuntu: from the Ubuntu terminal, `code .` then opens the current folder.
 
 </Step>
 
@@ -489,9 +584,9 @@ It asks a series of questions. Answer them like this:
 | SSO session name (Recommended) | `quickcart` |
 | SSO start URL | Your AWS access portal URL |
 | SSO region | `us-east-1` |
-| SSO registration scopes | Press <kbd>Return</kbd> to accept the default |
+| SSO registration scopes | Press <kbd>Enter</kbd> to accept the default |
 
-Your browser opens. Sign in as your admin user if asked, with your MFA, and choose **Allow access**. Back in the terminal, it finds your account and role, then asks three more questions:
+Your browser opens. Sign in as your admin user if asked, with your MFA, and choose **Allow access**. If no browser opens — which can happen inside WSL — the terminal shows a web address and a code: open the address in your browser and enter the code. Back in the terminal, it finds your account and role, then asks three more questions:
 
 | It asks | Enter |
 |---|---|
@@ -590,7 +685,17 @@ secret_key     ****************WXYZ              sso
 
 The layout may differ slightly. The **Type** column is the useful part: `sso` means the keys came from your Identity Center sign-in. If it says `env`, keys in environment variables are winning.
 
-To have it in every new terminal window, add the same `export AWS_PROFILE=quickcart` line to `~/.zprofile`, the way the Homebrew mistake above shows.
+To have it in every new terminal window, add the same line to your terminal's settings file: `~/.bashrc` on Linux and WSL, `~/.zprofile` on macOS. On Linux and WSL:
+
+```sh
+echo 'export AWS_PROFILE=quickcart' >> ~/.bashrc
+```
+
+| Part | What it means |
+|---|---|
+| `echo '…' >>` | add this line to the end of a file |
+| `export AWS_PROFILE=quickcart` | the line: use the `quickcart` profile |
+| `~/.bashrc` | the settings file. On macOS, use `~/.zprofile` instead |
 
 <Mistake title="old keys in the environment win">
 
@@ -613,7 +718,7 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 | `unset` | delete variables from this terminal |
 | `AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` | the three variables that can hold keys |
 
-If they come back in every new window, look for them in `~/.zprofile` or `~/.zshrc` and delete those lines.
+If they come back in every new window, look for them in your terminal's settings file (`~/.bashrc`, `~/.zprofile` or `~/.zshrc`) and delete those lines.
 
 </Mistake>
 
@@ -642,9 +747,9 @@ aws sso login --profile quickcart
 
 <Step title="Clean up" cleanup>
 
-Nothing here costs money. **Keep every tool**: the rest of the course uses them.
+Nothing here costs money. **Keep every tool**: the rest of the course uses them. You can delete the `install-homebrew.sh` file if you downloaded it.
 
-When you finish a session, sign out so the credentials on your laptop stop working straight away, instead of when they expire:
+When you finish a session, sign out so the credentials on your computer stop working straight away, instead of when they expire:
 
 ```sh
 aws sso logout
@@ -652,9 +757,9 @@ aws sso logout
 
 | Part | What it means |
 |---|---|
-| `aws sso logout` | delete the cached sign-in from this laptop. The next command will need `aws sso login` |
+| `aws sso logout` | delete the cached sign-in from this computer. The next command will need `aws sso login` |
 
-It prints nothing when it works. You can also quit Docker Desktop from the whale icon in the menu bar when you aren't using it, to save battery.
+It prints nothing when it works. On macOS and Windows you can also quit Docker Desktop when you aren't using it, to save memory and battery.
 
 </Step>
 
@@ -675,7 +780,7 @@ It prints nothing when it works. You can also quit Docker Desktop from the whale
 | Command | What it does |
 |---|---|
 | `brew install NAME` | Install a terminal tool |
-| `brew install --cask NAME` | Install a Mac app |
+| `brew install --cask NAME` | Install a desktop app (macOS only) |
 | `brew upgrade` | Update everything Homebrew installed |
 | `aws configure sso` | Set up a profile that signs in through IAM Identity Center |
 | `aws sso login --profile quickcart` | Sign in again when the session expires |
@@ -683,6 +788,8 @@ It prints nothing when it works. You can also quit Docker Desktop from the whale
 | `aws sts get-caller-identity` | Who am I, and in which account? |
 | `aws configure list` | Which profile, keys and region are in use, and where from |
 | `export AWS_PROFILE=quickcart` | Use this profile in this terminal |
+| `~/.bashrc` or `~/.zprofile` | Settings your terminal reads when it opens: Linux and WSL, or macOS |
+| `wsl --install` | Windows: install WSL 2 with Ubuntu, from an administrator PowerShell |
 | Credential order | `--profile`, then key variables, then `AWS_PROFILE`, then `default` |
 
 </Cheat>

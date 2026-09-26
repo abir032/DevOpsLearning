@@ -143,7 +143,7 @@ For QuickCart's Jenkins on EC2, that means GitHub must be able to reach Jenkins.
 
 The `/github-webhook/` path is where the GitHub plugin in Jenkins listens. The secret lets Jenkins check that each message really came from GitHub.
 
-In this lesson's lab, Jenkins runs on your Mac, which GitHub can't reach. So you'll use a periodic scan instead: Jenkins checks GitHub every minute. It works the same, just a minute slower.
+In this lesson's lab, Jenkins runs on your computer, which GitHub can't reach. So you'll use a periodic scan instead: Jenkins checks GitHub every minute. It works the same, just a minute slower.
 
 ### The gate must be required
 
@@ -238,20 +238,20 @@ Below is the pipeline a QuickCart pull request goes through. Push a commit that 
 
 <Part id="doit">
 
-<Cost kind="free">Jenkins and every tool run on your Mac, and a public GitHub repository is free. No AWS.</Cost>
+<Cost kind="free">Jenkins and every tool run on your computer, and a public GitHub repository is free. No AWS.</Cost>
 
 You'll put QuickCart's orders service in a GitHub repository, point a multibranch pipeline at it, open a pull request that gets a Terraform plan posted on it, then break a test and watch the merge get blocked. About 60 minutes.
 
-You need the Jenkins on your Mac from [The Jenkinsfile](/lessons/jenkinsfile/), a GitHub account, and Docker Desktop running.
+You need the Jenkins on your computer from [The Jenkinsfile](/lessons/jenkinsfile/), a GitHub account, and Docker running.
 
 <Steps>
 
 <Step title="Install the tools the pipeline uses">
 
-The pipeline runs on your Mac, so the tools it calls must be installed there:
+The pipeline runs on your computer, so the tools it calls must be installed there:
 
 ```sh
-brew install node hadolint trivy terraform gh
+brew install node hadolint trivy gh
 ```
 
 | Part | What it means |
@@ -260,7 +260,7 @@ brew install node hadolint trivy terraform gh
 | `node` | runs the orders service and its tests |
 | `hadolint` | checks Dockerfiles for common mistakes |
 | `trivy` | scans images for known vulnerabilities |
-| `terraform` | for the plan |
+| Terraform | for the plan. You installed it from HashiCorp's tap in [Set up your computer](/lessons/computer-setup/); Homebrew's plain `terraform` is an old version |
 | `gh` | GitHub's command-line tool, used to post the plan on the pull request |
 
 Jenkins only finds tools that are on the `PATH` of the terminal it was started from. So stop Jenkins with **Ctrl+C** in its terminal, and start it again in a **new** terminal window:
@@ -272,7 +272,7 @@ jenkins-lts --httpListenAddress=127.0.0.1 --httpPort=8080
 | Part | What it means |
 |---|---|
 | `jenkins-lts` | start Jenkins, which now inherits a `PATH` that includes the new tools |
-| `--httpListenAddress=127.0.0.1` | only this Mac can reach it |
+| `--httpListenAddress=127.0.0.1` | only this computer can reach it |
 | `--httpPort=8080` | the port for the web page |
 
 <Mistake title="command not found inside a build">
@@ -327,7 +327,7 @@ git clone REPO_URL
 
 | Part | What it means |
 |---|---|
-| `git clone` | copy a repository from GitHub to your Mac |
+| `git clone` | copy a repository from GitHub to your computer |
 | `REPO_URL` | the HTTPS address you copied |
 
 ```sh
@@ -619,7 +619,7 @@ Choose **Save**.
 
 <Note title="Why forks are removed">
 
-The repository is public, so anyone can open a pull request from a fork. With fork discovery on, a stranger's code would run on your Mac, with your tools and your login. Real CI systems either run fork builds on isolated agents with no secrets, or wait for a maintainer to approve them.
+The repository is public, so anyone can open a pull request from a fork. With fork discovery on, a stranger's code would run on your computer, with your tools and your login. Real CI systems either run fork builds on isolated agents with no secrets, or wait for a maintainer to approve them.
 
 </Note>
 

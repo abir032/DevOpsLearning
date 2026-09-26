@@ -27,6 +27,11 @@ export default defineConfig({
       [rehypeGlossary, { terms: GLOSSARY, base: base.replace(/\/$/, "") }],
     ],
   },
+  /* Old addresses that were published once keep working. Astro doesn't add
+     the base path to redirect targets, so it's added here. */
+  redirects: {
+    "/lessons/mac-setup/": `${base.replace(/\/$/, "")}/lessons/computer-setup/`,
+  },
   integrations: [mdx()],
   devToolbar: { enabled: false },
 });

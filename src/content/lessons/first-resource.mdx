@@ -191,7 +191,7 @@ Here is QuickCart's repository in code. Pick a change, and see the plan Terrafor
 
 You'll build QuickCart's image repository with Terraform, change it in place, see a change that would force replacement, and destroy it. About 30 minutes.
 
-You need Terraform (see [Why Terraform](/lessons/why-terraform/)) and a working AWS login in your terminal ([Set up your Mac](/lessons/mac-setup/) covers it). Terraform uses the same login as the AWS CLI. Check it:
+You need Terraform (see [Why Terraform](/lessons/why-terraform/)) and a working AWS login in your terminal ([Set up your computer](/lessons/computer-setup/) covers it). Terraform uses the same login as the AWS CLI. Check it:
 
 ```sh
 aws sts get-caller-identity
@@ -445,7 +445,7 @@ Error: No valid credential sources found
 
 **Why:** the AWS provider couldn't find any login: no profile, no access keys, no role. There's more after this, which varies with your setup.
 
-**The fix:** get `aws sts get-caller-identity` working first. If you use a named profile, set it in this terminal, as [Set up your Mac](/lessons/mac-setup/) shows.
+**The fix:** get `aws sts get-caller-identity` working first. If you use a named profile, set it in this terminal, as [Set up your computer](/lessons/computer-setup/) shows.
 
 </Mistake>
 

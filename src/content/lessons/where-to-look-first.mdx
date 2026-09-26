@@ -231,11 +231,11 @@ Pick the symptom, answer the follow-up question, and see where it leads. Try eve
 
 <Part id="doit">
 
-<Cost kind="free">everything runs on your own Mac.</Cost>
+<Cost kind="free">everything runs on your own computer.</Cost>
 
 You'll make each symptom happen on purpose, on your own machine, so you know them on sight. This lab reproduces the symptoms locally with a tiny web server; the same messages appear, with the same meanings, when the server is in AWS. About 15 minutes.
 
-You need `python3` and `curl`, which come with macOS. You'll use **two terminal windows**.
+You need `python3` and `curl`, which come with macOS and Ubuntu, including Ubuntu on WSL. You'll use **two terminal windows**.
 
 <Steps>
 
@@ -269,7 +269,7 @@ python3 -m http.server 8080 --bind 127.0.0.1
 |---|---|
 | `python3 -m http.server` | run Python's built-in web server, which serves the files in this folder |
 | `8080` | listen on port 8080 |
-| `--bind 127.0.0.1` | only accept connections from this Mac |
+| `--bind 127.0.0.1` | only accept connections from this computer |
 
 ```output
 Serving HTTP on 127.0.0.1 port 8080 (http://127.0.0.1:8080/) ...
@@ -291,7 +291,7 @@ curl -i http://127.0.0.1:8080/
 |---|---|
 | `curl` | make a web request |
 | `-i` | also show the response's status line and headers |
-| `http://127.0.0.1:8080/` | this Mac, port 8080, the top page |
+| `http://127.0.0.1:8080/` | this computer, port 8080, the top page |
 
 ```output title="The first lines"
 HTTP/1.0 200 OK
@@ -361,7 +361,7 @@ curl -v http://127.0.0.1:8080/
 curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Couldn't connect to server
 ```
 
-Your port numbers will differ. **0 ms**: the Mac answered at once that nothing is on port 8080. The network is fine. The process is gone.
+Your port numbers will differ. **0 ms**: your computer answered at once that nothing is on port 8080. The network is fine. The process is gone.
 
 </Step>
 

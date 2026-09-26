@@ -52,7 +52,7 @@ test.describe("start and ship visuals", () => {
   });
 
   test("credential chain: the first source found wins", async ({ page }) => {
-    await open(page, "/lessons/mac-setup/");
+    await open(page, "/lessons/computer-setup/");
     const viz = page.locator('[data-viz="cred-chain"]');
     const out = viz.locator(".cc-out");
     const say = viz.locator(".viz-say");
@@ -171,7 +171,7 @@ test.describe("start and ship visuals", () => {
 });
 
 /* Accessibility of every lesson in modules 00 and 01, in both themes. */
-const SLUGS = ["roadmap", "how-this-course-works", "mac-setup", "devops-lifecycle", "dora-metrics", "slos", "release-strategies", "feature-flags"];
+const SLUGS = ["roadmap", "how-this-course-works", "computer-setup", "devops-lifecycle", "dora-metrics", "slos", "release-strategies", "feature-flags"];
 
 test.describe("start and ship accessibility (axe)", () => {
   for (const scheme of ["light", "dark"] as const) {

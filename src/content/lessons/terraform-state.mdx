@@ -185,7 +185,7 @@ The bucket that holds state can't be created by the Terraform code that needs it
 
 You'll build a tiny Terraform project, move its state into S3, watch the lock refuse a second command, and bring back an old version of the state. About 30 minutes.
 
-You need Terraform 1.10 or later and a working AWS login in your terminal. [Set up your Mac](/lessons/mac-setup/) covers both. Check with:
+You need Terraform 1.10 or later and a working AWS login in your terminal. [Set up your computer](/lessons/computer-setup/) covers both. Check with:
 
 ```sh
 terraform version
@@ -197,10 +197,10 @@ terraform version
 
 ```output
 Terraform v1.16.4
-on darwin_arm64
+on linux_amd64
 ```
 
-Any version from 1.10 upwards works. Yours may be newer.
+Any version from 1.10 upwards works. Yours may be newer, and the second line names your system, such as `darwin_arm64` on a Mac.
 
 <Steps>
 

@@ -358,11 +358,11 @@ Below is a short Jenkinsfile. Pick what the build is for, then step through it. 
 
 <Part id="doit">
 
-<Cost kind="free">Jenkins runs on your Mac. Nothing in AWS is used.</Cost>
+<Cost kind="free">Jenkins runs on your computer. Nothing in AWS is used.</Cost>
 
-You'll run Jenkins on your Mac, create a pipeline, and see parameters, `when`, `parallel`, `input`, a timeout and `post` do their jobs. About 40 minutes. The next three lessons use this same Jenkins, so keep it when you finish.
+You'll run Jenkins on your computer, create a pipeline, and see parameters, `when`, `parallel`, `input`, a timeout and `post` do their jobs. About 40 minutes. The next three lessons use this same Jenkins, so keep it when you finish.
 
-On your Mac, Jenkins' controller and its only agent are the same machine, and builds run on the controller. That's fine for learning on your own. [Jenkins from zero](/lessons/jenkins/) explains why a shared Jenkins must never work this way.
+On your computer, Jenkins' controller and its only agent are the same machine, and builds run on the controller. That's fine for learning on your own. [Jenkins from zero](/lessons/jenkins/) explains why a shared Jenkins must never work this way.
 
 <Steps>
 
@@ -386,7 +386,7 @@ jenkins-lts --httpListenAddress=127.0.0.1 --httpPort=8080
 | Part | What it means |
 |---|---|
 | `jenkins-lts` | start Jenkins in this terminal. It keeps running until you press **Ctrl+C** |
-| `--httpListenAddress=127.0.0.1` | only accept connections from this Mac, not from other machines on your network |
+| `--httpListenAddress=127.0.0.1` | only accept connections from this computer, not from other machines on your network |
 | `--httpPort=8080` | the port for the web page |
 
 Among many lines of log, the first start prints:
@@ -401,7 +401,7 @@ Please use the following password to proceed to installation:
 
 3b9e5c07a1d24f6e8c2b0d9a7f41e635
 
-This may also be found at: /Users/you/.jenkins/secrets/initialAdminPassword
+This may also be found at: /home/you/.jenkins/secrets/initialAdminPassword
 
 *************************************************************
 *************************************************************
@@ -414,7 +414,7 @@ Then, when it's ready:
 Jenkins is fully up and running
 ```
 
-Your password and home folder are different. Copy the password. Leave this terminal open; closing it stops Jenkins. Jenkins keeps everything in `~/.jenkins`, the `JENKINS_HOME` on your Mac.
+Your password and home folder are different. Copy the password. Leave this terminal open; closing it stops Jenkins. Jenkins keeps everything in `~/.jenkins`, the `JENKINS_HOME` on your computer.
 
 <Mistake title="port 8080 is already in use">
 
@@ -423,7 +423,7 @@ java.io.IOException: Failed to start Jetty
 Caused by: java.net.BindException: Address already in use
 ```
 
-**Why:** something else on your Mac is using port 8080, often another local server, or a Jenkins you started earlier with `brew services`.
+**Why:** something else on your computer is using port 8080, often another local server, or a Jenkins you started earlier with `brew services`.
 
 **The fix:** stop the other program, or start Jenkins on another port with `--httpPort=8090` and use that number in the browser.
 
@@ -727,7 +727,17 @@ brew uninstall jenkins-lts
 | `brew uninstall` | remove software Homebrew installed |
 | `jenkins-lts` | Jenkins. Your `~/.jenkins` folder stays until you delete it |
 
-Then delete the `.jenkins` folder in your home folder. In Finder, press **Cmd+Shift+.** to show hidden folders.
+Then delete the `.jenkins` folder in your home folder, which holds every job and setting:
+
+```sh
+rm -rf ~/.jenkins
+```
+
+| Part | What it means |
+|---|---|
+| `rm` | remove files |
+| `-rf` | the whole folder and everything inside it, without asking about each file. There's no undo, so check the name before pressing Enter |
+| `~/.jenkins` | the `.jenkins` folder in your home folder. The dot at the start makes it hidden |
 
 </Step>
 
