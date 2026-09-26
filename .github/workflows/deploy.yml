@@ -24,9 +24,9 @@ jobs:
       SITE_URL: https://abir032.github.io
       SITE_BASE: /DevOpsLearning
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -40,6 +40,7 @@ jobs:
       - name: Check nothing private is published
         env:
           FORBIDDEN_STRINGS: ${{ secrets.FORBIDDEN_STRINGS }}
+        # SITE_URL (set above) tells the check which address is the site's own.
         run: node scripts/check-forbidden.mjs
 
       - name: Check links

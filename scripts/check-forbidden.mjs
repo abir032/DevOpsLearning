@@ -13,7 +13,13 @@ const cfg = JSON.parse(readFileSync(join(ROOT, "forbidden-strings.json"), "utf8"
    ignores, and on CI in the FORBIDDEN_STRINGS secret (a JSON array). */
 const localFile = join(ROOT, "forbidden-strings.local.json");
 if (existsSync(localFile)) cfg.strings.push(...JSON.parse(readFileSync(localFile, "utf8")).strings);
-if (process.env.FORBIDDEN_STRINGS) cfg.strings.push(...JSON.parse(process.env.FORBIDDEN_STRINGS));
+if (process.env.FORBIDDEN_STRINGS) {
+  /* Accept a plain JSON array, or the whole local file pasted as-is. */
+  const v = JSON.parse(process.env.FORBIDDEN_STRINGS);
+  cfg.strings.push(...(Array.isArray(v) ? v : v.strings || []));
+}
+/* The site's own address is always allowed: pages link to themselves. */
+const ownSite = (process.env.SITE_URL || "").replace(/\/$/, "");
 const TEXT = new Set([".html", ".js", ".css", ".json", ".xml", ".txt", ".svg", ".webmanifest"]);
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -38,6 +44,7 @@ for (const file of files(DIST)) {
   for (const r of rules) {
     for (const m of src.matchAll(r.re)) {
       if (r.allow.some((a) => m[0].toLowerCase().includes(a.toLowerCase()))) continue;
+      if (ownSite && m[0].toLowerCase().startsWith(ownSite.toLowerCase())) continue;
       const line = src.slice(0, m.index).split("\n").length;
       hits.push(`${file.slice(ROOT.length + 1)}:${line}  ${r.name}: "${m[0]}"`);
     }
