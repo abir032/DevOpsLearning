@@ -1,0 +1,112 @@
+---
+/*
+ * Alarms: a threshold simulator.
+ * Teaches: threshold + "M out of N" datapoints decide when an alarm fires,
+ * and when it flaps. Missing data needs its own decision.
+ */
+import { SCENARIOS, START, chartSvg, stripHtml, sayHtml } from "../../scripts/alarm-sim-viz";
+const first = sayHtml(START);
+---
+<div class="viz" data-track="cloud" data-viz="alarm-sim">
+  <div class="viz-controls">
+    <div class="as-ctl">
+      <span class="lbl" id="as-sc">The metric: errors per minute</span>
+      <div class="seg wide" role="group" aria-labelledby="as-sc">
+        {Object.entries(SCENARIOS).map(([k, s]) => (
+          <button type="button" data-k="sc" data-v={k} aria-pressed={String(k === START.sc)}>{s.label}</button>
+        ))}
+      </div>
+    </div>
+    <div class="as-ctl">
+      <span class="lbl" id="as-thr">Threshold: more than</span>
+      <div class="seg" role="group" aria-labelledby="as-thr">
+        {["3", "5", "10"].map((v) => <button type="button" data-k="thr" data-v={v} aria-pressed={String(Number(v) === START.thr)}>{v}</button>)}
+      </div>
+    </div>
+    <div class="as-ctl">
+      <span class="lbl" id="as-mn">Datapoints to alarm</span>
+      <div class="seg" role="group" aria-labelledby="as-mn">
+        <button type="button" data-k="mn" data-v="1of1" aria-pressed="true">1 of 1</button>
+        <button type="button" data-k="mn" data-v="2of3" aria-pressed="false">2 of 3</button>
+        <button type="button" data-k="mn" data-v="3of3" aria-pressed="false">3 of 3</button>
+      </div>
+    </div>
+    <div class="as-ctl">
+      <span class="lbl" id="as-miss">Treat missing data as</span>
+      <div class="seg" role="group" aria-labelledby="as-miss">
+        <button type="button" data-k="miss" data-v="missing" aria-pressed="false">missing</button>
+        <button type="button" data-k="miss" data-v="good" aria-pressed="true">good</button>
+        <button type="button" data-k="miss" data-v="bad" aria-pressed="false">bad</button>
+        <button type="button" data-k="miss" data-v="ignore" aria-pressed="false">ignore</button>
+      </div>
+    </div>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole chart</p>
+  <div class="viz-stage">
+    <div class="as-chart" set:html={chartSvg(START)} />
+    <div class="as-strip-wrap">
+      <div class="as-strip-h">Alarm state, minute by minute</div>
+      <ol class="as-strip" set:html={stripHtml(START)} />
+    </div>
+  </div>
+  <div class={"viz-say" + (first.tone ? " " + first.tone : "")} aria-live="polite" set:html={first.html} />
+</div>
+
+<style is:global>
+  [data-viz="alarm-sim"] .viz-controls { align-items: flex-start; }
+  [data-viz="alarm-sim"] .as-ctl { display: flex; flex-direction: column; gap: 5px; }
+  [data-viz="alarm-sim"] .as-chart, [data-viz="alarm-sim"] .as-strip-wrap { min-width: 640px; }
+  [data-viz="alarm-sim"] .as-bg-ok { fill: transparent; }
+  [data-viz="alarm-sim"] .as-bg-alarm { fill: var(--bad-bg); }
+  [data-viz="alarm-sim"] .as-bg-insuf { fill: var(--sunk); }
+  [data-viz="alarm-sim"] .as-grid { stroke: var(--rule); stroke-width: 1; }
+  [data-viz="alarm-sim"] .as-ax { font-family: var(--font); font-size: 11.5px; fill: var(--ink-3); }
+  [data-viz="alarm-sim"] .as-thr { stroke: var(--bad); stroke-width: 2; stroke-dasharray: 7 5; }
+  [data-viz="alarm-sim"] .as-thr-t { font-family: var(--font); font-size: 12px; font-weight: 700; fill: var(--bad); }
+  [data-viz="alarm-sim"] .as-line { fill: none; stroke: var(--cloud); stroke-width: 2.5; stroke-linejoin: round; }
+  [data-viz="alarm-sim"] .as-pt { fill: var(--surface); stroke: var(--cloud); stroke-width: 2.5; }
+  [data-viz="alarm-sim"] .as-pt.over { fill: var(--bad); stroke: var(--bad); }
+  [data-viz="alarm-sim"] .as-miss { font-family: var(--font); font-size: 10.5px; fill: var(--ink-3); font-style: italic; }
+  [data-viz="alarm-sim"] .as-strip-h { font-size: 13px; font-weight: 700; color: var(--ink-2); margin: 4px 0 6px 44px; }
+  [data-viz="alarm-sim"] .as-strip { list-style: none; margin: 0 16px 10px 44px; padding: 0; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 3px; }
+  [data-viz="alarm-sim"] .as-cell { border-radius: 6px; padding: 4px 2px; text-align: center; border: 1px solid var(--rule); background: var(--bg); }
+  [data-viz="alarm-sim"] .as-cell span { display: block; font-size: 11px; color: var(--ink-3); }
+  [data-viz="alarm-sim"] .as-cell b { display: block; font-size: 10.5px; letter-spacing: .01em; }
+  [data-viz="alarm-sim"] .as-cell.ok b { color: var(--ok); }
+  [data-viz="alarm-sim"] .as-cell.alarm { background: var(--bad-bg); border-color: var(--bad); }
+  [data-viz="alarm-sim"] .as-cell.alarm b { color: var(--bad); }
+  [data-viz="alarm-sim"] .as-cell.insuf b { color: var(--ink-2); }
+</style>
+
+<script>
+  import { chartSvg, stripHtml, sayHtml, START, type Cfg } from "../../scripts/alarm-sim-viz";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="alarm-sim"]').forEach((root) => {
+    if (!once(root)) return;
+    const chart = root.querySelector<HTMLElement>(".as-chart")!;
+    const strip = root.querySelector<HTMLElement>(".as-strip")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-k]")];
+    const c: Cfg = { ...START };
+    const get = (k: string) => String((c as unknown as Record<string, string | number>)[k]);
+
+    function render() {
+      press(btns, (b) => get(b.dataset.k!) === b.dataset.v);
+      chart.innerHTML = chartSvg(c);
+      strip.innerHTML = stripHtml(c);
+      const s = sayHtml(c);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = s.html;
+    }
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-k]");
+      if (!b) return;
+      const k = b.dataset.k!, v = b.dataset.v!;
+      if (k === "thr") c.thr = Number(v);
+      else (c as unknown as Record<string, string>)[k] = v;
+      render();
+    });
+  }));
+</script>

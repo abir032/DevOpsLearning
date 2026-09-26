@@ -1,0 +1,100 @@
+---
+/*
+ * Measuring delivery: batch size against the four DORA metrics.
+ * Teaches: smaller batches improve speed AND stability at the same time.
+ * A simple model: the team finishes about 4 changes a working day, and each
+ * change has a 3% chance of causing a problem.
+ */
+interface Row { size: number; freq: string; lead: string; cfr: string; restore: string; g: [number, number, number, number]; say: string }
+const ROWS: Row[] = [
+  { size: 1, freq: "About 4 a day", lead: "Hours", cfr: "3%", restore: "Under an hour", g: [96, 95, 95, 95],
+    say: "Every change ships on its own. If one is bad, it's the only suspect, and undoing it is easy. Fast <b>and</b> stable." },
+  { size: 5, freq: "About 4 a week", lead: "1 to 2 days", cfr: "14%", restore: "About 2 hours", g: [75, 78, 78, 80],
+    say: "Five changes per release. Still quick. A bad release now has five suspects, so it takes a little longer to find the cause." },
+  { size: 20, freq: "About 1 a week", lead: "About a week", cfr: "46%", restore: "Half a day", g: [45, 45, 45, 52],
+    say: "A weekly release. Nearly half of releases now contain at least one bad change, because twenty chances add up. Each problem has twenty suspects." },
+  { size: 60, freq: "About every 3 weeks", lead: "About a month", cfr: "84%", restore: "1 to 2 days", g: [14, 12, 14, 18],
+    say: "Big batches. Most releases contain a bad change, it hides among sixty others, and the fix waits for the next release. Slow <b>and</b> fragile." },
+];
+const first = ROWS[0];
+---
+<div class="viz" data-track="ship" data-viz="batch" data-rows={JSON.stringify(ROWS)}>
+  <div class="viz-controls">
+    <span class="lbl" id="bs-lbl">Changes per release</span>
+    <div class="seg" role="group" aria-labelledby="bs-lbl">
+      {ROWS.map((r, i) => <button type="button" data-i={i} aria-pressed={String(i === 0)}>{r.size}</button>)}
+    </div>
+  </div>
+  <div class="bs">
+    <div class="bs-row" aria-hidden="true"><span class="bs-cap">One release</span><div class="bs-batch" data-n="batch"><i></i></div></div>
+    <div class="bs-grid">
+      {[["Deployment frequency", "How often you release", "speed", first.freq],
+        ["Lead time for changes", "Commit to running in production", "speed", first.lead],
+        ["Change failure rate", "Releases that cause a problem", "stability", first.cfr],
+        ["Time to restore", "From problem to fixed", "stability", first.restore]].map(([name, sub, kind, val], k) => (
+        <div class="bs-card">
+          <div class="bs-h"><b>{name}</b><span class:list={["bs-kind", kind]}>{kind}</span></div>
+          <small>{sub}</small>
+          <div class="bs-val" data-v={k}>{val}</div>
+          <div class="bs-bar"><div data-b={k} style={`width:${first.g[k]}%`}></div></div>
+        </div>
+      ))}
+    </div>
+    <p class="bs-legend">A longer bar is better. A simple model, not real data: about 4 changes finished a day, each with a 3% chance of causing a problem.</p>
+  </div>
+  <div class="viz-say good" aria-live="polite"><span class="step-l">1 change per release</span>{first.say.replace(/<\/?b>/g, "")}</div>
+</div>
+
+<style is:global>
+  [data-viz="batch"] .bs { padding: 14px 16px 4px; }
+  [data-viz="batch"] .bs-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; }
+  [data-viz="batch"] .bs-cap { flex: none; font-size: 13px; font-weight: 800; color: var(--ink-2); line-height: 14px; }
+  [data-viz="batch"] .bs-batch { display: flex; flex-wrap: wrap; gap: 3px; min-height: 14px; }
+  [data-viz="batch"] .bs-batch i { width: 12px; height: 12px; border-radius: 3px; background: var(--ink-3); display: block; }
+  [data-viz="batch"] .bs-batch i.bad { background: var(--bad); outline: 2px solid var(--bad); outline-offset: 1px; }
+  [data-viz="batch"] .bs-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  [data-viz="batch"] .bs-card { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; background: var(--bg); display: flex; flex-direction: column; gap: 2px; }
+  [data-viz="batch"] .bs-h { display: flex; justify-content: space-between; gap: 6px; align-items: flex-start; }
+  [data-viz="batch"] .bs-h b { font-size: 14px; line-height: 1.25; }
+  [data-viz="batch"] .bs-kind { font-size: 11.5px; font-weight: 800; padding: 1px 7px; border-radius: 999px; background: var(--sunk); color: var(--ink-2); }
+  [data-viz="batch"] .bs-card small { color: var(--ink-3); font-size: 12.5px; }
+  [data-viz="batch"] .bs-val { font-size: 21px; font-weight: 900; letter-spacing: -.01em; margin: 6px 0 6px; line-height: 1.15; }
+  [data-viz="batch"] .bs-bar { height: 8px; border-radius: 4px; background: var(--sunk); overflow: hidden; margin-top: auto; }
+  [data-viz="batch"] .bs-bar div { height: 100%; background: var(--ship); border-radius: 4px; transition: width .4s ease; }
+  [data-viz="batch"] .bs-legend { font-size: 13px; color: var(--ink-3); margin: 10px 0 8px; }
+  @media (prefers-reduced-motion: reduce) { [data-viz="batch"] .bs-bar div { transition: none; } }
+  @media (max-width: 760px) { [data-viz="batch"] .bs-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  interface Row { size: number; freq: string; lead: string; cfr: string; restore: string; g: number[]; say: string }
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="batch"]').forEach((root) => {
+    if (!once(root)) return;
+    const rows: Row[] = JSON.parse(root.dataset.rows!);
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-i]")];
+    const batch = root.querySelector<HTMLElement>('[data-n="batch"]')!;
+
+    function show(i: number) {
+      const r = rows[i];
+      press(btns, (b) => Number(b.dataset.i) === i);
+      [r.freq, r.lead, r.cfr, r.restore].forEach((v, k) => {
+        root.querySelector(`[data-v="${k}"]`)!.textContent = v;
+        root.querySelector<HTMLElement>(`[data-b="${k}"]`)!.style.width = r.g[k] + "%";
+      });
+      /* one square per change in a release; in a big batch, show the bad ones hiding among them */
+      const bad = r.size >= 20 ? [7, 33, 51].filter((n) => n < r.size).slice(0, r.size === 20 ? 1 : 2) : [];
+      batch.innerHTML = Array.from({ length: r.size }, (_, n) => `<i class="${bad.includes(n) ? "bad" : ""}"></i>`).join("");
+      tell(say, `${r.size} change${r.size > 1 ? "s" : ""} per release`, r.say, i === 0 ? "good" : i === rows.length - 1 ? "bad" : "");
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-i]");
+      if (b) show(Number(b.dataset.i));
+    });
+  }));
+</script>

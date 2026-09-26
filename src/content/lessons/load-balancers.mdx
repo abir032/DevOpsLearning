@@ -1,0 +1,605 @@
+---
+time: 50 minutes
+level: Beginner
+before: [ec2, security-groups]
+cost: paid
+quiz:
+  - q: What decides which servers a load balancer sends requests to?
+    answer: 1
+    options:
+      - t: Whichever server has the most CPU free
+        why: An ALB doesn't look at CPU. It picks among the targets that are registered and passing their checks.
+      - t: The target group's health checks. Only targets passing them get traffic
+        why: The load balancer asks each target a question every few seconds, like GET /health. Fail it enough times in a row, and the target gets no new requests until it passes again.
+      - t: The order the servers were launched in
+        why: Launch order doesn't matter. Health does.
+      - t: The customer's app chooses a server
+        why: The app only knows the load balancer's address. It never sees the servers behind it.
+  - q: QuickCart's database goes down. With a shallow /health check, what do customers see?
+    answer: 3
+    options:
+      - t: Nothing — everything keeps working
+        why: Pages that need the database fail. The shallow check just doesn't take the servers out for it.
+      - t: A 503 from the load balancer, because every server is removed
+        why: That's what a deep check can cause. A shallow check keeps passing, so the servers stay in.
+      - t: A timeout
+        why: The servers are running and answer quickly. They answer with an error.
+      - t: Errors on pages that need the database, but the servers stay in and can still answer
+        why: Degraded, not down. The servers can show a friendly error, serve what doesn't need the database, and recover the moment it's back. An alarm on the error rate tells a person.
+  - q: Why can a deep health check, one that also queries the database, cause a total outage?
+    answer: 0
+    options:
+      - t: When the database fails, every server fails its check at the same moment, and all of them are taken out together
+        why: The check was meant to ask "is this server broken?". Instead it asks "is everything behind it working?", so one shared problem marks every server bad. With auto scaling, they're all replaced, and the replacements fail too.
+      - t: Deep checks use too much CPU
+        why: A check every few seconds is tiny. The problem is what the answer means, not what it costs.
+      - t: The load balancer can't send deep checks over HTTP
+        why: It can. That's what makes the mistake so easy to make.
+      - t: It can't — deeper checks are always safer
+        why: That's the instinct nearly everyone has. It's why the mistake is so common.
+  - q: The health check interval is 10 seconds and the unhealthy threshold is 2. A server's app crashes. Roughly how long until it stops getting traffic?
+    answer: 2
+    options:
+      - t: Instantly
+        why: The load balancer only knows what its checks tell it. Until the checks fail, it keeps sending requests.
+      - t: 10 seconds
+        why: That's one check. It needs 2 failures in a row.
+      - t: About 20 seconds
+        why: Two failed checks, 10 seconds apart. Requests sent to the crashed server in that window fail. That's the price of not reacting to a single blip.
+      - t: 5 minutes
+        why: Five minutes is the default deregistration delay, a different setting. It's about finishing requests when a server is taken out on purpose.
+  - q: What does the deregistration delay do?
+    answer: 1
+    options:
+      - t: It waits before sending a new server any traffic
+        why: That's slow start, a different setting.
+      - t: When a target is being removed, it stops new requests but lets requests already in progress finish, up to that many seconds
+        why: That's how a server can be taken out for a release or scale-in without customers seeing errors. The default is 300 seconds; QuickCart uses 30.
+      - t: It delays health checks after a failure
+        why: Health checks keep running on their interval.
+      - t: It slows down requests during busy periods
+        why: Nothing in a load balancer deliberately slows requests.
+  - q: What should QuickCart's port 80 listener do once HTTPS is set up?
+    answer: 2
+    options:
+      - t: Forward to the servers, like the 443 listener
+        why: Then anything sent to http:// travels unencrypted, and the padlock is optional.
+      - t: Be deleted, so port 80 is closed
+        why: Then anyone typing the address without https:// gets a connection error, not your site.
+      - t: Redirect every request to HTTPS with a 301
+        why: The browser is sent to the https:// address and remembers it. Nobody gets an error, and nothing travels unencrypted.
+      - t: Return a 403 Forbidden
+        why: That leaves people who typed the plain address stuck on an error page.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first busy weekend">
+
+The QuickCart app talked to its API server using the server's public IP address. One Friday the server was stopped and started to change its size. It came back with a **new IP**. Every copy of the app in the world was now calling an address that went nowhere, until a new app release went out.
+
+The next weekend was busy. One server couldn't keep up, so Priya launched a second. But the app only knew one address, so the second server sat idle while the first one struggled.
+
+</Story>
+
+QuickCart needs **one address that never changes**, in front of however many servers it runs, and something that stops sending customers to a server that has broken.
+
+<Case title="This really happens: the health check that takes everything down">
+
+Teams add a health check, then make it "thorough": it checks the database, the cache and every other service the server depends on. Then one of those shared services has a blip. **Every** server fails its check at the same moment, and the load balancer — or the auto scaling behind it — takes out the whole fleet at once.
+
+AWS describes this pattern in its own engineering guidance (the Amazon Builders' Library article on implementing health checks): a check that's too deep turns a small, partial problem into a complete outage.
+
+</Case>
+
+</Part>
+
+<Part id="idea">
+
+A **load balancer** is one fixed address in front of many servers. Customers only ever talk to it. It passes each request on to one of the servers behind it, and it keeps checking which of those servers are healthy.
+
+Servers can come and go, change size and change address. The address customers use never changes.
+
+### The pieces
+
+AWS's load balancer for websites and APIs is the **Application Load Balancer**, or ALB. It's made of a few parts that you configure separately:
+
+| Piece | What it is | QuickCart's |
+|---|---|---|
+| Load balancer | The front door. It has a DNS name and sits in a **public subnet** in each zone | `quickcart-alb`, in two zones |
+| Listener | A port and protocol it listens on, and what to do with requests that arrive | HTTP on 80, HTTPS on 443 |
+| Rule | A condition on a listener, like "the path starts with `/orders`", and which target group gets those requests | Everything goes to one target group, for now |
+| Target group | A list of servers, **plus the health check** that decides which of them get traffic | `quickcart-web-tg` |
+| Target | One server in the group | Each API server |
+
+A request's path: **customer → listener → rule → target group → one healthy target.**
+
+### Three kinds of load balancer
+
+| Type | Understands | Use it for |
+|---|---|---|
+| **Application (ALB)** | HTTP: paths, hostnames, headers | Websites and APIs. QuickCart's choice |
+| Network (NLB) | Only TCP and UDP connections, not what's in them | Very high traffic, non-HTTP protocols, fixed IP addresses |
+| Gateway | Network packets, sent through a security appliance | Putting firewalls in the path. You'll rarely need it |
+
+### Health checks: who gets traffic
+
+Every few seconds, the load balancer sends each target a small request, like `GET /health`. If the answer is right, the check passes. If it's wrong, slow or missing, it fails.
+
+| Setting | What it means | Default | QuickCart |
+|---|---|---|---|
+| Path | Which URL to ask | `/` | `/health` |
+| Interval | How often to ask | 30 seconds | 10 seconds |
+| Timeout | How long to wait for an answer. Must be less than the interval | 5 seconds | 5 seconds |
+| Unhealthy threshold | Failures in a row before the target gets no traffic | 2 | 2 |
+| Healthy threshold | Passes in a row before it gets traffic again | 5 | 2 |
+| Success codes | Which HTTP status counts as a pass | `200` | `200` |
+
+**How long before a broken server stops getting traffic?** Interval × unhealthy threshold. For QuickCart that's 10 × 2 = **about 20 seconds**. Requests that reach the broken server in that window fail. Checking every second would catch it sooner, but a single slow answer would then pull a healthy server out.
+
+<Key>Health checks decide who gets traffic. Make them answer "is this server broken?" — not "is everything behind it working?"</Key>
+
+### Shallow or deep?
+
+| Check | What `/health` does | When the database fails |
+|---|---|---|
+| **Shallow** | Answers `200` if the app is running. Touches nothing else | Every server stays in. Pages that need the database show an error. **Degraded, not down** |
+| **Deep** | Also queries the database, the cache, other services | Every server fails **at once**. They're all taken out — and with auto scaling, all replaced, and the replacements fail too. **Down** |
+
+QuickCart tested this. They removed the security group rule that let the servers reach the database. `/health` kept answering `200`, and `/` answered `500`. The site was degraded, not down: the servers stayed in, showed a clear error, and recovered the moment the rule was put back. An alarm on the error rate told a person what was wrong. A deep check would have failed all the servers together and turned a database problem into a total outage.
+
+So database problems are a job for **alarms**, which tell a person. Health checks are for **one broken server**, which a machine can fix by replacing it.
+
+<Note title="What an ALB does when every target is unhealthy">
+
+If every registered target in a group fails its checks, an ALB **fails open**: it sends requests to all of them anyway, on the basis that some answer beats none. That softens the problem, but doesn't solve it. The check has stopped telling you anything, and an auto scaling group that trusts it will still start replacing every server.
+
+</Note>
+
+### Taking a server out gently: deregistration delay
+
+When a target is removed on purpose — during a release, or when auto scaling shrinks the group — some requests to it may still be in progress. The **deregistration delay** stops new requests going to the target, but waits for those in progress to finish, up to a limit.
+
+The default is **300 seconds**. That's safe, but it makes every release wait five minutes per batch. QuickCart's API answers in well under a second, so 30 seconds is plenty. This is also called connection draining.
+
+### Status codes that come from the load balancer
+
+When something goes wrong, the code tells you where to look:
+
+| Code | Means | Usually |
+|---|---|---|
+| **502** Bad Gateway | A target was chosen, but the connection failed or the answer was broken | The app crashed or closed the connection |
+| **503** Service Unavailable | There was no target to send it to | The target group is empty |
+| **504** Gateway Timeout | The target took too long to answer | A slow query, or a security group dropping the traffic |
+
+### HTTPS, and sending HTTP to it
+
+The ALB can do the HTTPS work itself, so the servers behind it don't have to. You add a **listener on port 443**, attach a certificate from **AWS Certificate Manager** (free for use with a load balancer), and forward to the target group.
+
+Then the listener on **port 80** changes from *forward* to **redirect**: send the browser to the same address with `https://`, with status **301**, which means "moved for good". Nobody who types the plain address gets an error, and nothing travels unencrypted. [Domain names and HTTPS](/lessons/dns-and-https/) walks through getting the certificate.
+
+### Only the load balancer may talk to the servers
+
+The servers shouldn't accept traffic from the internet directly. Their security group allows port 80 **only from the load balancer's security group**, not from an IP range. [Security groups](/lessons/security-groups/) explains this chain.
+
+| Security group | Allows in |
+|---|---|
+| Load balancer's | 80 and 443 from anywhere |
+| Servers' | 80 from the **load balancer's security group** only |
+
+An ALB always spreads requests across targets in every zone it's in, so if one zone loses servers, the others take all the traffic. By default it takes turns, called round robin. The **least outstanding requests** setting instead sends each request to the target with the fewest in progress, which helps when some requests are much slower than others.
+
+</Part>
+
+<Part id="see">
+
+Three servers sit behind QuickCart's load balancer, in an auto scaling group that replaces unhealthy ones. Send some requests and watch them spread. Then **crash the app on one server** and send again. Finally, **break the database**, and compare a shallow health check with a deep one.
+
+<LbSpread />
+
+**What to notice:** with the database broken and a shallow check, every request failed — but every server stayed in and answered. Switch to a deep check, and the same problem took out every server at once. Nothing about the servers changed. Only the question the health check asked.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $1.75 a day while it runs — delete it after. The load balancer is about $0.0225 an hour plus a small usage charge (LCUs), each `t3.micro` is about $0.0104 an hour, and every public IPv4 address is about $0.005 an hour. These are us-east-1 prices; they change, so check the pricing pages. An hour of this lab costs well under 10 cents.</Cost>
+
+<Note title="A load balancer costs money every hour it exists">
+
+It bills whether or not anyone uses it. Do the **Clean up** step at the end, in the same sitting.
+
+</Note>
+
+You'll put two servers in two zones behind an Application Load Balancer, watch it take turns between them, then break one and watch the health check take it out. About 40 minutes.
+
+You need the `quickcart-ec2-ssm` role from [Servers on EC2](/lessons/ec2/). If you deleted it, create it again as in that lesson's first step. Check the region selector says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create the load balancer's security group">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-alb-sg` |
+| Description | `QuickCart load balancer - HTTP from anywhere` |
+| VPC | The default VPC |
+
+Under **Inbound rules**, choose **Add rule**:
+
+| Type | Source |
+|---|---|
+| **HTTP** | **Anywhere-IPv4** (`0.0.0.0/0`) |
+
+Leave the outbound rule as it is, and choose **Create security group**.
+
+This lab stays on plain HTTP, because a trusted HTTPS certificate needs a domain name. [Domain names and HTTPS](/lessons/dns-and-https/) adds the 443 listener and the redirect.
+
+</Step>
+
+<Step title="Create the servers' security group">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-app-sg` |
+| Description | `QuickCart servers - HTTP from the load balancer only` |
+| VPC | The default VPC |
+
+Under **Inbound rules**, choose **Add rule**:
+
+| Type | Source |
+|---|---|
+| **HTTP** | **Custom**, then start typing `quickcart-alb-sg` and pick it |
+
+Leave the outbound rule, and choose **Create security group**.
+
+<See>
+
+One inbound rule on port 80 whose source is a security group ID starting `sg-`, not an IP range. Only things in `quickcart-alb-sg` can reach these servers.
+
+</See>
+
+</Step>
+
+<Step title="Launch two servers, one in each zone">
+
+<ConsolePath path="EC2 > Instances > Launch instances" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-web-a` |
+| Application and OS Images | **Amazon Linux 2023 AMI**, 64-bit (x86) |
+| Instance type | `t3.micro` |
+| Key pair (login) | **Proceed without a key pair** |
+
+Under **Network settings**, choose **Edit**:
+
+| Field | Enter |
+|---|---|
+| VPC | The default VPC |
+| Subnet | The default subnet in **us-east-1a** |
+| Auto-assign public IP | **Enable** — so the server can reach Systems Manager and download nginx |
+| Firewall (security groups) | **Select existing security group**, then `quickcart-app-sg` |
+
+Under **Advanced details**:
+
+| Field | Enter |
+|---|---|
+| IAM instance profile | `quickcart-ec2-ssm` |
+| Metadata version | **V2 only (token required)** |
+| User data | The script below |
+
+```sh title="user-data.sh"
+#!/bin/bash
+dnf install -y nginx
+hostname > /usr/share/nginx/html/index.html
+echo ok > /usr/share/nginx/html/health
+systemctl enable --now nginx
+```
+
+| Line | What it does |
+|---|---|
+| `#!/bin/bash` | Run this as a bash script |
+| `dnf install -y nginx` | Install the nginx web server, answering yes automatically |
+| `hostname > /usr/share/nginx/html/index.html` | Make the home page the server's own name, so you can see **which** server answered |
+| `echo ok > /usr/share/nginx/html/health` | Create a page at `/health` that just says `ok`. This is the shallow health check: if nginx can answer, it passes |
+| `systemctl enable --now nginx` | Start nginx now, and on every boot |
+
+Choose **Launch instance**. Then launch a second one the same way, with only two differences:
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-web-b` |
+| Subnet | The default subnet in **us-east-1b** |
+
+<See>
+
+Two instances, `quickcart-web-a` in us-east-1a and `quickcart-web-b` in us-east-1b, both **Running**.
+
+</See>
+
+</Step>
+
+<Step title="Create the target group and its health check">
+
+<ConsolePath path="EC2 > Target groups > Create target group" />
+
+| Field | Enter |
+|---|---|
+| Choose a target type | **Instances** |
+| Target group name | `quickcart-web-tg` |
+| Protocol : Port | **HTTP** : `80` |
+| IP address type | **IPv4** |
+| VPC | The default VPC |
+| Protocol version | **HTTP1** |
+| Health check protocol | **HTTP** |
+| Health check path | `/health` |
+
+Open **Advanced health check settings**:
+
+| Field | Enter |
+|---|---|
+| Health check port | **Traffic port** |
+| Healthy threshold | `2` |
+| Unhealthy threshold | `2` |
+| Timeout | `5` seconds |
+| Interval | `10` seconds |
+| Success codes | `200` |
+
+Choose **Next**. Tick both `quickcart-web-a` and `quickcart-web-b`, check the port says `80`, and choose **Include as pending below**. Then choose **Create target group**.
+
+Now shorten the deregistration delay. Open `quickcart-web-tg`, go to the **Attributes** tab, and choose **Edit**:
+
+| Field | Enter |
+|---|---|
+| Deregistration delay | `30` seconds |
+
+Choose **Save changes**.
+
+<See>
+
+On the **Targets** tab, both instances with health status **Unused**, and a note that the target group isn't used by any load balancer yet. Health checks only start once a load balancer uses the group.
+
+</See>
+
+</Step>
+
+<Step title="Create the load balancer">
+
+<ConsolePath path="EC2 > Load balancers > Create load balancer" />
+
+Under **Application Load Balancer**, choose **Create**.
+
+| Field | Enter |
+|---|---|
+| Load balancer name | `quickcart-alb` |
+| Scheme | **Internet-facing** |
+| Load balancer IP address type | **IPv4** |
+| VPC | The default VPC |
+| Availability Zones and subnets | Tick **us-east-1a** and **us-east-1b**, each with its default subnet |
+| Security groups | `quickcart-alb-sg`. **Remove** the `default` group |
+
+Under **Listeners and routing**:
+
+| Protocol | Port | Default action |
+|---|---|---|
+| **HTTP** | `80` | Forward to `quickcart-web-tg` |
+
+Choose **Create load balancer**.
+
+<See>
+
+`quickcart-alb` with state **Provisioning**. After a few minutes it becomes **Active**. On its **Details** tab is a **DNS name** ending in `elb.amazonaws.com`. Copy it.
+
+</See>
+
+</Step>
+
+<Step title="Check both targets are healthy">
+
+<ConsolePath path="EC2 > Target groups > quickcart-web-tg > Targets" />
+
+<See>
+
+Both targets go from **Initial** to **Healthy** within about half a minute.
+
+</See>
+
+<Mistake title="targets stay unhealthy with Request timed out">
+
+```output title="Health status details"
+Request timed out
+```
+
+**Why:** the health checks never reach nginx. Almost always, the servers' security group doesn't allow port 80 from the load balancer's security group — for example, the source was set to the wrong group, or to your own IP.
+
+**The fix:** open `quickcart-app-sg` and check its inbound rule: **HTTP**, source `quickcart-alb-sg`. The next check picks up the change.
+
+</Mistake>
+
+<Mistake title="targets unhealthy with a 404">
+
+```output title="Health status details"
+Health checks failed with these codes: [404]
+```
+
+**Why:** the load balancer reached nginx, but there's no page at the health check path. The path is misspelled in the target group, or the user data didn't create the file.
+
+**The fix:** check that the health check path is exactly `/health`. If it is, connect to the server with Session Manager and read `/var/log/cloud-init-output.log`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Watch it take turns">
+
+In a terminal on your Mac, ask the load balancer for its home page. Replace `ALB_DNS_NAME` with the DNS name you copied:
+
+```sh ph="ALB_DNS_NAME"
+curl --connect-timeout 10 http://ALB_DNS_NAME/
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request and print the answer |
+| `--connect-timeout 10` | give up after 10 seconds if nothing answers, instead of waiting over a minute |
+| `http://ALB_DNS_NAME/` | the load balancer's address. Paste yours in place of `ALB_DNS_NAME` |
+
+```output
+ip-172-31-20-15.ec2.internal
+```
+
+That's the name of the server that answered. Run the same command four or five more times.
+
+<See>
+
+The answer switches between two names: one for each server. Your names will differ, but each is the server's private address written with dashes. Match them to your instances in the console's **Private IPv4 addresses** column.
+
+</See>
+
+<Mistake title="curl waits, then gives up">
+
+```output
+curl: (28) Failed to connect to ALB_DNS_NAME port 80 after 10002 ms: Timeout was reached
+```
+
+Your load balancer's name appears in place of `ALB_DNS_NAME`, and the milliseconds will differ slightly.
+
+**Why:** the load balancer's own security group doesn't let your request in. A timeout almost always means something in the network dropped the traffic, not that the app is broken.
+
+**The fix:** check `quickcart-alb-sg` has an inbound **HTTP** rule from `0.0.0.0/0`, and that the load balancer is using that group, not `default`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Break one server and watch it drop out">
+
+<ConsolePath path="EC2 > Instances > quickcart-web-a > Connect > Session Manager" />
+
+Choose **Connect**, and in the terminal stop the web server:
+
+```sh
+sudo systemctl stop nginx
+```
+
+| Part | What it means |
+|---|---|
+| `sudo` | run as root |
+| `systemctl stop` | stop a running service |
+| `nginx` | the web server, and with it the `/health` page |
+
+Now go back to **Target groups → quickcart-web-tg → Targets** and refresh.
+
+<See>
+
+Within about 20 seconds — two failed checks, 10 seconds apart — `quickcart-web-a` shows **Unhealthy**, with a reason like **Health checks failed**.
+
+</See>
+
+Run your `curl` command a few more times from your Mac.
+
+<See>
+
+Every answer now comes from the same server: the one in us-east-1b. The load balancer only sends traffic to targets that pass their checks. If you were quick enough to run `curl` during those first 20 seconds, you may also have seen a `502 Bad Gateway`: a request that went to the broken server before the checks caught up.
+
+</See>
+
+Bring it back:
+
+```sh
+sudo systemctl start nginx
+```
+
+| Part | What it means |
+|---|---|
+| `systemctl start` | start the service again |
+| `nginx` | the web server |
+
+<See>
+
+After two passing checks, about 20 seconds, `quickcart-web-a` is **Healthy** again, and `curl` switches between both names once more.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Delete things in this order. The load balancer first, because it's the most expensive, and because the security groups can't be deleted while it uses them.
+
+<ConsolePath path="EC2 > Load balancers > quickcart-alb > Actions > Delete load balancer" />
+
+Type `confirm` and choose **Delete**.
+
+<ConsolePath path="EC2 > Target groups > quickcart-web-tg > Actions > Delete" />
+
+Choose **Yes, delete**.
+
+<ConsolePath path="EC2 > Instances > quickcart-web-a and quickcart-web-b > Instance state > Terminate instance" />
+
+Tick both instances first. Newer consoles call it **Terminate (delete) instance**. Confirm it.
+
+<ConsolePath path="EC2 > Security Groups > quickcart-app-sg > Actions > Delete security groups" />
+
+Delete `quickcart-app-sg` first, then `quickcart-alb-sg`: the first one refers to the second.
+
+<Mistake title="the security group won't delete">
+
+```output title="The console shows a message like"
+resource has a dependent object
+```
+
+**Why:** something still uses the group. The load balancer's network interfaces take a few minutes to disappear after you delete it, and a terminated instance holds on to its group until it's fully **Terminated**. Or `quickcart-app-sg` still refers to `quickcart-alb-sg`.
+
+**The fix:** wait a few minutes, delete `quickcart-app-sg` before `quickcart-alb-sg`, and try again.
+
+</Mistake>
+
+Keep the `quickcart-ec2-ssm` role for the next lesson; roles are free.
+
+<See>
+
+No load balancers, no target groups, both instances **Terminated**, and neither security group left. Nothing is billing.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Load balancer | One fixed address in front of many servers |
+| ALB | For HTTP: can route by path and hostname, and do HTTPS |
+| Listener | A port and protocol, and what to do with requests on it |
+| Target group | The servers, plus the health check that picks who gets traffic |
+| Health check | A small request every few seconds. Fail enough in a row: no traffic |
+| Time to take a broken server out | Interval × unhealthy threshold. 10 s × 2 = about 20 s |
+| Shallow check | "Is this server broken?" — use this |
+| Deep check | "Is everything behind it working?" — one shared failure takes out every server |
+| Deregistration delay | Lets in-progress requests finish. Default 300 s; QuickCart uses 30 s |
+| 502 / 503 / 504 | Broken answer / no target / too slow |
+| Port 80 listener | Redirect to HTTPS, 301 |
+| Servers' security group | Port 80 from the load balancer's security group only |
+| Timed out? | Check the security groups first |
+
+</Cheat>
+
+</Part>

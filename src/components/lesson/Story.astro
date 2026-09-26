@@ -1,0 +1,6 @@
+---
+/* The QuickCart part of "The problem". */
+interface Props { who?: string }
+const { who = "QuickCart" } = Astro.props;
+---
+<div class="story"><div class="who">{who}</div><slot /></div>

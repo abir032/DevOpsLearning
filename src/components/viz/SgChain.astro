@@ -1,0 +1,256 @@
+---
+/*
+ * Security groups: the chain load balancer → app → database.
+ * Teaches: a request that times out was dropped by the network, not the code.
+ * A code bug fails fast; a missing security group rule fails slowly.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="sg-chain">
+  <div class="viz-controls">
+    <span class="lbl" id="sgc-lbl">What's wrong</span>
+    <div class="seg wide" role="group" aria-labelledby="sgc-lbl">
+      <button type="button" data-fault="none" aria-pressed="true">Nothing: every rule is right</button>
+      <button type="button" data-fault="port" aria-pressed="false">App rule allows port 80, not 8080</button>
+      <button type="button" data-fault="db" aria-pressed="false">Database rule deleted</button>
+      <button type="button" data-fault="out" aria-pressed="false">App outbound rule deleted</button>
+      <button type="button" data-fault="bug" aria-pressed="false">A bug in the code</button>
+    </div>
+    <button class="btn line" type="button" data-act="send">Send a request</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole chain</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 330" role="img" aria-labelledby="sgc-title">
+      <title id="sgc-title">A customer's phone sends a request to the load balancer, which forwards it to an app server, which queries the database. Each of the three has its own security group with its own rules.</title>
+      <path class="vz-wire" d="M130 150 L180 150" />
+      <path class="vz-wire" d="M310 150 L395 150" />
+      <path class="vz-wire" d="M525 150 L610 150" />
+
+      <rect data-n="phone" class="vz-node" x="16" y="118" width="114" height="64" rx="10" />
+      <text class="vz-t" x="73" y="146" text-anchor="middle">Customer</text>
+      <text class="vz-s" x="73" y="163" text-anchor="middle">the QuickCart app</text>
+
+      <rect class="vz-sub" x="160" y="50" width="170" height="210" rx="10" />
+      <text class="vz-s" x="172" y="70" font-weight="700">quickcart-alb-sg</text>
+      <rect data-n="lb" class="vz-node" x="180" y="125" width="130" height="50" rx="8" />
+      <text class="vz-t" x="245" y="147" text-anchor="middle">Load balancer</text>
+      <text class="vz-s" x="245" y="163" text-anchor="middle">public subnet</text>
+      <text data-n="r-alb" class="vz-r" x="172" y="226">in: 443 from 0.0.0.0/0</text>
+      <text class="vz-r" x="172" y="244">out: all traffic</text>
+
+      <rect class="vz-sub" x="370" y="50" width="180" height="210" rx="10" />
+      <text class="vz-s" x="382" y="70" font-weight="700">quickcart-app-sg</text>
+      <rect data-n="app" class="vz-node" x="395" y="125" width="130" height="50" rx="8" />
+      <text class="vz-t" x="460" y="147" text-anchor="middle">App server</text>
+      <text class="vz-s" x="460" y="163" text-anchor="middle">listens on 8080</text>
+      <text data-n="r-app" class="vz-r" x="382" y="226">in: 8080 from alb-sg</text>
+      <text data-n="r-out" class="vz-r" x="382" y="244">out: all traffic</text>
+
+      <rect class="vz-sub" x="590" y="50" width="174" height="210" rx="10" />
+      <text class="vz-s" x="602" y="70" font-weight="700">quickcart-db-sg</text>
+      <rect data-n="db" class="vz-node" x="612" y="125" width="130" height="50" rx="8" />
+      <text class="vz-t" x="677" y="147" text-anchor="middle">Database</text>
+      <text class="vz-s" x="677" y="163" text-anchor="middle">listens on 5432</text>
+      <text data-n="r-db" class="vz-r" x="602" y="226">in: 5432 from app-sg</text>
+      <text class="vz-r" x="602" y="244">out: all traffic</text>
+
+      <text class="vz-label" x="16" y="296">Customer has waited</text>
+      <text data-n="clock" class="sgc-clock" x="16" y="320">0.00 s</text>
+      <text class="vz-label" x="300" y="296">What the customer gets</text>
+      <text data-n="result" class="sgc-result" x="300" y="320">nothing sent yet</text>
+
+      <g data-n="x" opacity="0"><line class="vz-x" x1="0" y1="0" x2="16" y2="16" /><line class="vz-x" x1="16" y1="0" x2="0" y2="16" /></g>
+      <circle data-n="dot" class="vz-dot" r="8" cx="130" cy="150" opacity="0" />
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Every rule is right. Choose <b>Send a request</b> to follow an order through the three security groups. Then break a rule and send another.</div>
+</div>
+
+<style is:global>
+  [data-viz="sg-chain"] .sgc-clock { font-family: var(--mono); font-size: 20px; font-weight: 700; fill: var(--ink); }
+  [data-viz="sg-chain"] .sgc-clock.slow { fill: var(--bad); }
+  [data-viz="sg-chain"] .sgc-result { font-family: var(--font); font-size: 16px; font-weight: 700; fill: var(--ink-2); }
+  [data-viz="sg-chain"] .sgc-result.ok { fill: var(--ok); }
+  [data-viz="sg-chain"] .sgc-result.bad { fill: var(--bad); }
+  [data-viz="sg-chain"] .vz-node.wait { stroke: var(--warn); stroke-width: 2.5; fill: var(--warn-bg); }
+  [data-viz="sg-chain"] .vz-r.bad { text-decoration: line-through; }
+</style>
+
+<script>
+  import { beat, moveDot, press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Fault = "none" | "port" | "db" | "out" | "bug";
+
+  const RULES: Record<Fault, [string, string, boolean][]> = {
+    none: [],
+    port: [["r-app", "in: 80 from alb-sg", true]],
+    db: [["r-db", "in: (no rules)", true]],
+    out: [["r-out", "out: (no rules)", true]],
+    bug: [],
+  };
+  const FAULT_SAY: Record<Fault, string> = {
+    none: "Every rule is right. Each security group lets in only the one before it, on one port.",
+    port: "The app's rule now allows <b>port 80</b>. The load balancer still sends to <b>8080</b>, because that's where the app listens. Send a request.",
+    db: "The database's security group has <b>no inbound rules</b>. Someone deleted the rule while tidying up. Send a request.",
+    out: "The app's security group has <b>no outbound rules</b>. Its inbound rule is still fine. Send a request.",
+    bug: "Every rule is right, but the latest release has a bug: the order handler crashes. Send a request, and compare how fast it fails.",
+  };
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="sg-chain"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const dot = q<SVGCircleElement>("dot");
+      const x = q<SVGGElement>("x");
+      const clock = q<SVGTextElement>("clock");
+      const result = q<SVGTextElement>("result");
+      const nodes = ["phone", "lb", "app", "db"].map((n) => q<SVGRectElement>(n));
+      const [phone, lb, app, db] = nodes;
+      const ruleEls: Record<string, [SVGTextElement, string]> = {};
+      for (const r of ["r-alb", "r-app", "r-out", "r-db"]) ruleEls[r] = [q<SVGTextElement>(r), q<SVGTextElement>(r).textContent || ""];
+      const faultBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-fault]")];
+      let fault: Fault = "none";
+      let run = 0;
+      let raf = 0;
+
+      function clear() {
+        nodes.forEach((n) => n.classList.remove("lit", "hit", "okk", "wait"));
+        dot.setAttribute("opacity", "0");
+        dot.setAttribute("class", "vz-dot");
+        x.setAttribute("opacity", "0");
+        cancelAnimationFrame(raf);
+        clock.textContent = "0.00 s";
+        clock.setAttribute("class", "sgc-clock");
+        result.textContent = "nothing sent yet";
+        result.setAttribute("class", "sgc-result");
+      }
+      function busy(on: boolean) {
+        root.querySelectorAll<HTMLButtonElement>("[data-act=send],[data-fault]").forEach((b) => (b.disabled = on));
+      }
+      function setFault(f: Fault) {
+        fault = f;
+        run++;
+        busy(false);
+        press(faultBtns, (b) => b.dataset.fault === f);
+        for (const [el, text] of Object.values(ruleEls)) { el.textContent = text; el.setAttribute("class", "vz-r"); }
+        for (const [n, text, bad] of RULES[f]) {
+          ruleEls[n][0].textContent = text;
+          ruleEls[n][0].setAttribute("class", bad ? "vz-r bad" : "vz-r");
+        }
+        clear();
+        tell(say, "Changed", FAULT_SAY[f]);
+      }
+      function blockAt(px: number, py: number) {
+        x.setAttribute("transform", `translate(${px - 8} ${py - 8})`);
+        x.setAttribute("opacity", "1");
+      }
+      /* Run the "customer has waited" clock from one value to another. */
+      function wait(from: number, to: number, ms: number, live: () => boolean): Promise<void> {
+        const show = (s: number) => { clock.textContent = s.toFixed(2) + " s"; };
+        if (to > 5) clock.setAttribute("class", "sgc-clock slow");
+        if (reduced()) { show(to); return beat(400); }
+        return new Promise((res) => {
+          let t0: number | null = null;
+          const frame = (ts: number) => {
+            if (!live()) return res();
+            t0 ??= ts;
+            const k = Math.min(1, (ts - t0) / ms);
+            show(from + (to - from) * k);
+            if (k < 1) raf = requestAnimationFrame(frame); else res();
+          };
+          raf = requestAnimationFrame(frame);
+        });
+      }
+
+      async function send() {
+        const me = ++run; busy(true); clear();
+        const live = () => me === run;
+        phone.classList.add("lit");
+        tell(say, "Step 1", "The customer taps <b>Place order</b>. The request goes to the load balancer on port 443.");
+        await moveDot(dot, [[130, 150], [180, 150]]); if (!live()) return;
+        lb.classList.add("lit");
+        await wait(0, 0.02, 200, live); if (!live()) return;
+        tell(say, "Step 2", "<code>quickcart-alb-sg</code> allows <b>443 from 0.0.0.0/0</b>, so the load balancer accepts it and forwards it to an app server on port 8080.");
+        await beat(700); if (!live()) return;
+
+        if (fault === "port") {
+          await moveDot(dot, [[310, 150], [366, 150]]); if (!live()) return;
+          blockAt(380, 150);
+          lb.classList.add("wait");
+          tell(say, "Step 3: dropped", "<code>quickcart-app-sg</code> has no rule for port 8080. The packet is <b>silently dropped</b>. No error goes back. The load balancer doesn't know why; it just hears nothing, and keeps waiting.");
+          await wait(0.02, 10, 2600, live); if (!live()) return;
+          lb.classList.replace("wait", "hit");
+          result.textContent = "504 Gateway Timeout";
+          result.setAttribute("class", "sgc-result bad");
+          tell(say, "Step 4: timed out", "After <b>10 seconds</b> the load balancer gives up connecting and returns <b>504 Gateway Timeout</b>. Soon its health checks fail the same way and the server is marked unhealthy. A slow failure like this is a <b>network</b> problem. The app never saw the request, so its logs are empty.", "bad");
+          busy(false); return;
+        }
+
+        await moveDot(dot, [[310, 150], [395, 150]]); if (!live()) return;
+        app.classList.add("lit");
+        await wait(0.02, 0.04, 200, live); if (!live()) return;
+
+        if (fault === "bug") {
+          app.classList.replace("lit", "hit");
+          tell(say, "Step 3: the code crashed", "<code>quickcart-app-sg</code> allowed 8080 from the load balancer, so the request <b>arrived</b>. Then the order handler threw an error.");
+          await beat(700); if (!live()) return;
+          dot.setAttribute("class", "vz-dot bot");
+          await moveDot(dot, [[395, 150], [310, 150], [180, 150], [130, 150]], 520); if (!live()) return;
+          await wait(0.04, 0.05, 150, live); if (!live()) return;
+          result.textContent = "500 Internal Server Error";
+          result.setAttribute("class", "sgc-result bad");
+          tell(say, "Step 4: failed fast", "The customer gets <b>500 Internal Server Error</b> in <b>0.05 seconds</b>. A fast error means the network delivered the request and something answered. Look in the <b>app's logs</b>: the stack trace is there.", "bad");
+          busy(false); return;
+        }
+
+        tell(say, "Step 3", "<code>quickcart-app-sg</code> allows <b>8080 from quickcart-alb-sg</b>, so the app accepts it. To save the order, the app now opens a connection to the database on port 5432.");
+        await beat(700); if (!live()) return;
+
+        if (fault === "out" || fault === "db") {
+          const atApp = fault === "out";
+          if (atApp) { await beat(200); blockAt(537, 150); }
+          else { await moveDot(dot, [[525, 150], [586, 150]]); if (!live()) return; blockAt(600, 150); }
+          app.classList.replace("lit", "wait");
+          tell(say, "Step 4: dropped", atApp
+            ? "The app's security group has <b>no outbound rule</b>, so the connection the app starts is dropped before it leaves. Replies to the load balancer would still get out, because security groups are stateful. New connections the app starts don't."
+            : "<code>quickcart-db-sg</code> has no rule allowing 5432 from the app. The packet is <b>silently dropped</b>. The app waits for an answer that never comes.");
+          await wait(0.04, 30, 3000, live); if (!live()) return;
+          app.classList.replace("wait", "hit");
+          dot.setAttribute("class", "vz-dot bot");
+          await moveDot(dot, [[395, 150], [310, 150], [180, 150], [130, 150]], 520); if (!live()) return;
+          result.textContent = "500 after 30 seconds";
+          result.setAttribute("class", "sgc-result bad");
+          tell(say, "Step 5: timed out", "The app's database driver gives up after its connect timeout, here <b>30 seconds</b>, and the customer finally gets an error. The app's log says <b>connection timed out</b>, not a stack trace from your code. A slow failure like this is a <b>network</b> problem: check the security groups on both ends.", "bad");
+          busy(false); return;
+        }
+
+        await moveDot(dot, [[525, 150], [612, 150]]); if (!live()) return;
+        db.classList.add("okk");
+        await wait(0.04, 0.07, 250, live); if (!live()) return;
+        tell(say, "Step 4", "<code>quickcart-db-sg</code> allows <b>5432 from quickcart-app-sg</b>. The database saves the order. Its reply goes back without any outbound rule: security groups are stateful and remember the connection.");
+        await beat(700); if (!live()) return;
+        dot.setAttribute("class", "vz-dot back");
+        await moveDot(dot, [[612, 150], [525, 150], [395, 150], [310, 150], [180, 150], [130, 150]], 520); if (!live()) return;
+        await wait(0.07, 0.08, 150, live); if (!live()) return;
+        phone.classList.replace("lit", "okk");
+        result.textContent = "200 OK: order confirmed";
+        result.setAttribute("class", "sgc-result ok");
+        tell(say, "Step 5 of 5", "<b>Order confirmed</b> in 0.08 seconds. Each hop was allowed by exactly one rule, and each rule names the security group before it, not an address range.", "good");
+        busy(false);
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.fault) setFault(b.dataset.fault as Fault);
+        else if (b.dataset.act === "send") send();
+        else if (b.dataset.act === "reset") setFault("none");
+      });
+      stops.push(() => { run++; cancelAnimationFrame(raf); });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

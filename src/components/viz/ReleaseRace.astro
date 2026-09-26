@@ -1,0 +1,114 @@
+---
+/*
+ * Ways to release: rolling, blue/green and canary, side by side.
+ * Teaches: the three differ in how they move traffic, which decides how much
+ * of the user base a bad version reaches before it is stopped.
+ */
+import { PLANS, col } from "../../scripts/release-race";
+const first = PLANS.map((p) => col(p, p.good[0], false, 0)).join("");
+---
+<div class="viz" data-track="ship" data-viz="release">
+  <div class="viz-controls">
+    <span class="lbl" id="rr-lbl">The new version is</span>
+    <div class="seg" role="group" aria-labelledby="rr-lbl">
+      <button type="button" data-v="good" aria-pressed="true">Good</button>
+      <button type="button" data-v="bad" aria-pressed="false">Bad</button>
+    </div>
+    <button class="btn line" type="button" data-a="play">Release it</button>
+    <button class="btn" type="button" data-a="next">Next step</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see all three</p>
+  <div class="viz-stage">
+    <div class="rr" data-n="cols" set:html={first} />
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>All three are running version 1. Choose <b>Release it</b> to release version 2 in three different ways at once.</div>
+</div>
+
+<style is:global>
+  [data-viz="release"] .rr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 6px 4px 10px; min-width: 660px; }
+  [data-viz="release"] .rr-col { border: 1px solid var(--rule); border-radius: 10px; background: var(--bg); padding: 11px 12px; display: flex; flex-direction: column; gap: 8px; }
+  [data-viz="release"] .rr-col h3 { margin: 0; font-size: 15.5px; font-weight: 800; }
+  [data-viz="release"] .rr-sub { font-size: 12.5px; color: var(--ink-3); margin-top: -6px; }
+  [data-viz="release"] .rr-lab { font-size: 12px; font-weight: 800; color: var(--ink-2); }
+  [data-viz="release"] .rr-servers { display: flex; flex-wrap: wrap; gap: 5px; min-height: 30px; }
+  [data-viz="release"] .rr-s { width: 38px; height: 28px; border-radius: 6px; display: grid; place-items: center; font-size: 11.5px; font-weight: 800; border: 2px solid var(--ink-3); color: var(--ink-2); background: var(--surface); transition: background .25s, border-color .25s; }
+  [data-viz="release"] .rr-s.new { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); }
+  [data-viz="release"] .rr-s.bad { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+  [data-viz="release"] .rr-s.idle { border-style: dashed; }
+  [data-viz="release"] .rr-s.gone { border-style: dotted; border-color: var(--rule-2); color: var(--ink-3); background: transparent; }
+  [data-viz="release"] .rr-bar { height: 16px; border-radius: 8px; background: var(--ink-3); overflow: hidden; position: relative; }
+  [data-viz="release"] .rr-bar div { height: 100%; width: 0; background: var(--ok); transition: width .45s ease; }
+  [data-viz="release"] .rr-bar.bad div { background: var(--bad); }
+  [data-viz="release"] .rr-pct { font-size: 13px; color: var(--ink-2); }
+  [data-viz="release"] .rr-pct b { color: var(--ink); }
+  [data-viz="release"] .rr-note { font-size: 13.5px; min-height: 58px; line-height: 1.4; }
+  [data-viz="release"] .rr-peak { font-size: 13px; font-weight: 800; border-top: 1px dashed var(--rule-2); padding-top: 7px; color: var(--ink-2); }
+  [data-viz="release"] .rr-peak.hit { color: var(--bad); }
+  @media (prefers-reduced-motion: reduce) { [data-viz="release"] .rr-bar div, [data-viz="release"] .rr-s { transition: none; } }
+</style>
+
+<script>
+  import { LAST, PLANS, col } from "../../scripts/release-race";
+  import { press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="release"]').forEach((root) => {
+      if (!once(root)) return;
+      const cols = root.querySelector<HTMLElement>('[data-n="cols"]')!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const play = root.querySelector<HTMLButtonElement>('[data-a="play"]')!;
+      const next = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+      const vBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-v]")];
+      let bad = false;
+      let i = 0;
+      let timer: ReturnType<typeof setInterval> | null = null;
+
+      function render() {
+        const peaks = PLANS.map((p) => Math.max(...(bad ? p.bad : p.good).slice(0, i + 1).map((s) => s.pct)));
+        cols.innerHTML = PLANS.map((p, k) => col(p, (bad ? p.bad : p.good)[i], bad, peaks[k])).join("");
+        next.disabled = i >= LAST;
+        play.disabled = i >= LAST;
+        if (i === 0) {
+          tell(say, "Ready", `All three are running version 1. The new version is <b>${bad ? "bad" : "good"}</b>. Choose <b>Release it</b> or <b>Next step</b>.`);
+        } else if (i < LAST) {
+          tell(say, `Step ${i} of ${LAST}`, PLANS.map((p) => `<b>${p.name}:</b> ${(bad ? p.bad : p.good)[i].note}`).join(" "), "");
+        } else if (bad) {
+          tell(say, `Step ${LAST} of ${LAST}: the bad version was stopped`, `How many customers it reached at once: rolling <b>${peaks[0]}%</b>, blue/green <b>${peaks[1]}%</b>, canary <b>${peaks[2]}%</b>. Blue/green undid it fastest, but only after everyone was hit. The canary caught it while it touched 1 customer in 10.`, "bad");
+        } else {
+          tell(say, `Step ${LAST} of ${LAST}: everyone is on version 2`, "All three got there. Rolling needed no extra servers. Blue/green needed twice the servers for a while, but switched in one move. Canary took longest, and checked the new version at every step.", "good");
+        }
+      }
+      function stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+        play.textContent = "Release it";
+      }
+      function step() {
+        if (i < LAST) { i++; render(); }
+        if (i >= LAST) stop();
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.v) {
+          bad = b.dataset.v === "bad";
+          press(vBtns, (x) => x === b);
+          stop(); i = 0; render();
+        } else if (b.dataset.a === "next") { stop(); step(); }
+        else if (b.dataset.a === "reset") { stop(); i = 0; render(); }
+        else if (b.dataset.a === "play") {
+          if (timer) { stop(); return; }
+          play.textContent = "Pause";
+          step();
+          timer = setInterval(step, reduced() ? 3200 : 2400);
+        }
+      });
+      stops.push(stop);
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

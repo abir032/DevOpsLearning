@@ -1,0 +1,765 @@
+---
+time: 60 minutes
+level: Intermediate
+before: [jenkins]
+cost: free
+quiz:
+  - q: A stage has when { branch 'main' }. In QuickCart's multibranch job, which builds run it?
+    answer: 2
+    options:
+      - t: Every build, because when is only a hint
+        why: when is a real condition. If it's false, the stage is skipped.
+      - t: Pull requests that target main
+        why: A pull request's build has BRANCH_NAME set to something like PR-42, so branch 'main' is false. Use changeRequest() for pull requests.
+      - t: Only builds of the main branch itself
+        why: Right. branch compares the pattern with BRANCH_NAME, which is main only for the main branch's own builds.
+      - t: None, because branch only works in scripted pipelines
+        why: It's a declarative condition. It just needs a multibranch job, which is what sets BRANCH_NAME.
+  - q: The Unit tests stage fails. What happens to the stages after it, and to post?
+    answer: 1
+    options:
+      - t: The later stages run anyway, then post runs
+        why: Declarative stops at the first failed stage. Later stages are skipped.
+      - t: The later stages are skipped; post still runs, including always, failure and cleanup
+        why: Right. post is where you report and tidy up, so it runs whatever happened. success doesn't run, because the build failed.
+      - t: Everything stops, including post
+        why: post runs even when a stage fails. That's its whole point.
+      - t: Jenkins retries the failed stage three times
+        why: Only if you wrap it in retry. By default, a failure is final.
+  - q: A pipeline has agent any at the top and an input step that waits for approval over a weekend. What's the problem?
+    answer: 3
+    options:
+      - t: input doesn't work with agent any
+        why: It works. The problem is what it holds on to while it waits.
+      - t: Jenkins cancels any input after one hour
+        why: There's no built-in limit. It waits until someone answers, or until a timeout you set.
+      - t: The approval will be logged under the wrong name
+        why: Jenkins records who approved it correctly.
+      - t: The build holds an executor all weekend, doing nothing
+        why: Right. With agent none at the top and an agent only on the stages that do work, a waiting input holds no executor. Add a timeout too.
+  - q: You add a parameters block to a Jenkinsfile and choose Build Now. The build ignores your choice of TARGET. Why?
+    answer: 0
+    options:
+      - t: Jenkins only learns about the parameters when it reads the Jenkinsfile, during the first build. That build runs with the defaults
+        why: Right. After that first run, the job shows Build with Parameters.
+      - t: Parameters only work in multibranch jobs
+        why: They work in any Pipeline job.
+      - t: You must restart Jenkins after adding parameters
+        why: No restart is needed; one build is.
+      - t: choice parameters are read-only
+        why: They are chosen when the build starts, like any other parameter.
+  - q: Which line prints the value of the environment variable APP_NAME correctly and safely inside sh?
+    answer: 2
+    options:
+      - t: sh "echo $APP_NAME"
+        why: In double quotes, Groovy tries to fill in $APP_NAME itself before the shell runs. That works for plain variables, but it's the habit that leaks secrets, and it breaks on shell variables Groovy doesn't know.
+      - t: sh 'echo ${params.APP_NAME}'
+        why: In single quotes Groovy fills in nothing, so the shell receives ${params.APP_NAME}, which isn't valid shell and fails with a bad substitution error.
+      - t: sh 'echo "$APP_NAME"'
+        why: Right. Single quotes pass the text to the shell unchanged, and the shell reads APP_NAME from the environment that the environment block set.
+      - t: echo APP_NAME
+        why: That prints the words APP_NAME. And echo on its own is the Jenkins step, not the shell.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a Friday deploy">
+
+QuickCart's deploy job lived in the Jenkins web page. On Thursday, Priya opened its settings and added a line to the build script that cleared a cache before deploying. She typed a folder name wrong.
+
+On Friday afternoon, the deploy failed halfway. The job's settings showed only the current version. Nobody could see what it had been before, who had changed it, or why. The stg and prod jobs had been copied from each other two years earlier and had drifted apart since, so the working stg job was no help either.
+
+Priya fixed it by guessing. It took an hour, during which nothing could be deployed.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Pipelines built by clicking in the Jenkins web page, with shell scripts pasted into text boxes. They work, until someone edits one. There's no review, no history, no way to test a change before it's live, and no way to have a different version of the pipeline on a branch. Teams end up afraid to touch their own build jobs.
+
+</Case>
+
+A **Jenkinsfile** fixes this by putting the pipeline in the repository, next to the code.
+
+</Part>
+
+<Part id="idea">
+
+A Jenkinsfile is a text file called `Jenkinsfile`, at the root of the repository. It describes the pipeline: what runs, in what order, on which agent, and what happens when something fails. Jenkins reads it from the same commit it's building.
+
+That one change gives the pipeline everything code already has:
+
+| Pipeline in the web page | Pipeline in a Jenkinsfile |
+|---|---|
+| Changed by editing a text box | Changed by a pull request, reviewed like code |
+| One version, the current one | Full history in git: who, what, when, why |
+| A change is live for everyone at once | A branch can try a new pipeline without affecting `main` |
+| Copied between jobs, then drifts | One file, used by every branch |
+| Lost with the Jenkins server | In git, with the code |
+
+<YouKnow title="You already know this: a Fastfile">
+
+If you've used fastlane, you've written a `Fastfile`: a lane for tests, a lane for a TestFlight build, checked into the repository so the whole team runs the same steps. A Jenkinsfile is the same idea for the server. Each **stage** is like a lane's action, and Jenkins is the machine that runs it on every push.
+
+</YouKnow>
+
+<Key>The pipeline lives in the repository, next to the code it builds, and changes the same way: by pull request.</Key>
+
+There are two ways to write one. **Declarative** starts with `pipeline {` and has a fixed structure that Jenkins checks before it runs anything. **Scripted** starts with `node {` and is plain Groovy code. This course uses declarative: it's easier to read, and mistakes are caught before a build starts. When you need a little real code, a `script { }` block inside a step lets you write some.
+
+### The smallest useful Jenkinsfile
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+    stages {
+        stage('Test') {
+            steps {
+                sh './test.sh'
+            }
+        }
+    }
+}
+```
+
+| Line | What it means |
+|---|---|
+| `pipeline { }` | Everything is inside this block. It's what makes it declarative |
+| `agent any` | Run on any agent with a free executor |
+| `stages { }` | The list of stages, run from top to bottom |
+| `stage('Test') { }` | One named stage. The name is what you see on the build page |
+| `steps { }` | What the stage actually does, one step after another |
+| `sh './test.sh'` | Run a shell command on the agent. If it exits with anything but 0, the stage fails |
+
+### agent: where it runs
+
+| You write | It means | Use it when |
+|---|---|---|
+| `agent any` | Any agent with a free executor | Every agent has the tools you need |
+| `agent none` | No agent for the pipeline as a whole. Each stage says its own | Some stages wait, like an approval, and shouldn't hold an executor while they do |
+| `agent { label 'linux' }` | Any agent with that label | Some agents have tools others don't |
+| `agent { docker { image 'node:22-alpine' } }` | Start that container on an agent and run the steps inside it. Needs the **Docker Pipeline** plugin and Docker on the agent | Each project needs different tools, and you don't want to install them all on every agent |
+
+`agent` can also go inside a single stage. Then that stage runs there, whatever the top says.
+
+### stages, stage and steps
+
+`stages` holds one or more `stage` blocks. Each `stage` has `steps`. Common steps:
+
+| Step | What it does |
+|---|---|
+| `sh 'command'` | Run a shell command on the agent |
+| `echo 'text'` | Print a line in the build log. Jenkins' own step, no shell involved |
+| `writeFile file: 'x.txt', text: 'hello'` | Write a file in the workspace |
+| `archiveArtifacts artifacts: 'out/*.txt'` | Keep files from the build, downloadable from the build page |
+| `junit 'reports/*.xml'` | Read test results, so Jenkins shows which tests failed |
+| `retry(3) { }` | Try the steps inside up to 3 times |
+| `timeout(time: 2, unit: 'MINUTES') { }` | Stop the steps inside if they run too long |
+| `script { }` | A small piece of scripted Groovy, for logic declarative can't express |
+
+The folder a build runs in on the agent is called the **workspace**. Jenkins checks your code out into it before the first stage.
+
+### environment: variables for every step
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+    environment {
+        APP_NAME = 'quickcart-orders'
+        REGION   = 'us-east-1'
+    }
+    stages {
+        stage('Show') {
+            steps {
+                sh 'echo "Building $APP_NAME for $REGION"'
+            }
+        }
+    }
+}
+```
+
+Every name in `environment` becomes an environment variable for every step. Put it inside a `stage` instead, and it applies only there. Jenkins adds its own too:
+
+| Variable | Holds |
+|---|---|
+| `BUILD_NUMBER` | This build's number: 1, 2, 3 |
+| `BRANCH_NAME` | The branch being built, in a multibranch job: `main`, `feature/coupons`, `PR-42` |
+| `CHANGE_ID` | The pull request's number, only on a pull request build |
+| `GIT_COMMIT` | The full commit hash being built |
+| `WORKSPACE` | The folder the build runs in |
+
+### Quotes: who fills in the $
+
+This trips everyone up once. A Jenkinsfile is Groovy, and Groovy and the shell both use `$` for variables.
+
+| You write | Who replaces `$NAME` | Use it for |
+|---|---|---|
+| `sh 'echo "$APP_NAME"'` | The **shell**, from its environment. Groovy leaves single-quoted text alone | Environment variables and secrets. The safe default |
+| `echo "Deploying ${params.TARGET}"` | **Groovy**, before the step runs | Groovy values like `params` and `env`, in Jenkins steps like `echo` |
+| `sh "echo ${SECRET}"` | Groovy, so the secret becomes part of the command text | Never. Jenkins warns you, because the secret can leak |
+
+### parameters: questions asked when the build starts
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+    parameters {
+        choice(name: 'TARGET', choices: ['dev', 'stg', 'prod'], description: 'Where to deploy')
+        booleanParam(name: 'RUN_SLOW_TESTS', defaultValue: false, description: 'Also run the slow tests')
+        string(name: 'RELEASE_NOTE', defaultValue: 'Routine release', description: 'One line about this release')
+    }
+    stages {
+        stage('Show') {
+            steps {
+                echo "Target: ${params.TARGET}, slow tests: ${params.RUN_SLOW_TESTS}"
+            }
+        }
+    }
+}
+```
+
+| Type | Shows as | You read it as |
+|---|---|---|
+| `choice` | A drop-down. The first choice is the default | `params.TARGET` |
+| `booleanParam` | A tick box | `params.RUN_SLOW_TESTS`, `true` or `false` |
+| `string` | A one-line text box | `params.RELEASE_NOTE` |
+
+The job's button changes from **Build Now** to **Build with Parameters**, but only after Jenkins has read the Jenkinsfile once. You'll see that in the lab.
+
+### options: rules for the whole run
+
+| Option | What it does | If you leave it out |
+|---|---|---|
+| `timeout(time: 15, unit: 'MINUTES')` | Abort the build if it runs longer | A hung step can hold an executor forever |
+| `timestamps()` | A time on every log line. Needs the **Timestamper** plugin | You can't tell which step was slow |
+| `disableConcurrentBuilds()` | Only one build of this branch at a time; the next waits | Two deploys of the same thing can run at once and collide |
+| `buildDiscarder(logRotator(numToKeepStr: '20'))` | Keep only the last 20 builds | Old builds pile up until the controller's disk is full |
+| `ansiColor('xterm')` | Show colour codes as colours. Needs the **AnsiColor** plugin | Tools that print colour show codes like `[32m` |
+| `retry(2)` | Run the whole pipeline again if it fails | A failure is final, which is usually what you want |
+| `skipDefaultCheckout()` | Don't check the code out automatically | Code is checked out before the first stage |
+
+`options` can also go inside a stage. A `timeout` there limits only that stage, and if the stage has an `input`, it limits the wait too.
+
+### when: should this stage run?
+
+A stage with a `when` block runs only if its condition is true. If it's false, the stage is **skipped**, which isn't a failure.
+
+| Condition | True when |
+|---|---|
+| `branch 'main'` | This is a build of the `main` branch. Also takes patterns like `'release/*'` |
+| `changeRequest()` | This is a build of a pull request |
+| `changeRequest target: 'main'` | This is a pull request into `main` |
+| `tag 'v*'` | This build is for a git tag matching the pattern |
+| `expression { params.TARGET == 'prod' }` | The Groovy code inside returns true |
+| `environment name: 'REGION', value: 'us-east-1'` | That environment variable has that value |
+| `not { }`, `allOf { }`, `anyOf { }` | Combine conditions |
+
+`branch`, `changeRequest` and `tag` need a **multibranch** job, because that's what tells Jenkins which branch or pull request it's building. In a plain Pipeline job they're always false. [Continuous integration](/lessons/continuous-integration/) sets up a multibranch job.
+
+Two settings change *when* the check happens. `beforeAgent true` checks before an agent is found, so a skipped stage never waits for one. `beforeInput true` checks before asking for approval, so nobody is asked about a stage that would be skipped anyway.
+
+### input: wait for a person
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent none
+    stages {
+        stage('Build') {
+            agent any
+            steps {
+                echo 'Building'
+            }
+        }
+        stage('Deploy to prod') {
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+            input {
+                message 'Deploy to production?'
+                ok 'Deploy'
+                submitter 'release-managers'
+            }
+            agent any
+            steps {
+                echo 'Deploying'
+            }
+        }
+    }
+}
+```
+
+| Line | What it means |
+|---|---|
+| `agent none` | No executor for the pipeline as a whole |
+| `agent any` in **Build** | This stage takes an executor, and gives it back when it ends |
+| `options` → `timeout(time: 30, …)` | If nobody answers in 30 minutes, the build is aborted |
+| `input` → `message` | The question shown on the build page |
+| `ok 'Deploy'` | The label on the button that says yes. There's always an **Abort** button too |
+| `submitter 'release-managers'` | Only these users or groups may answer. Leave it out and anyone who can run the job can |
+| `agent any` in **Deploy to prod** | The executor is taken only **after** the approval |
+
+Written this way, a build waiting for approval over a weekend holds no executor. With `agent any` at the top, it would hold one the whole time.
+
+### parallel: stages side by side
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+    stages {
+        stage('Checks') {
+            failFast true
+            parallel {
+                stage('Unit tests') {
+                    steps {
+                        sh 'echo "Unit tests passed"'
+                    }
+                }
+                stage('Lint') {
+                    steps {
+                        sh 'echo "Lint passed"'
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+`parallel` runs the stages inside it at the same time, each with its own executor if it has its own agent. `failFast true` stops the others as soon as one fails, so you don't wait for work that no longer matters.
+
+### post: what happens afterwards
+
+`post` runs after the stages, whatever happened. Each block inside runs only if its condition matches.
+
+| Block | Runs when |
+|---|---|
+| `always` | Every time. Save test reports here |
+| `success` | The build passed |
+| `failure` | The build failed. Tell the team here |
+| `unstable` | Tests failed but the build carried on. `junit` marks a build unstable when tests fail |
+| `aborted` | Someone, or a timeout, stopped it |
+| `changed` | The result is different from the last build's |
+| `fixed` | This build passed, and the last one didn't |
+| `cleanup` | Last of all, after every other `post` block. Delete the workspace here |
+
+They run in a fixed order: `always` first, then the ones that match the result, then `cleanup`. `post` can also go inside a stage, for things that belong to that stage.
+
+</Part>
+
+<Part id="see">
+
+Below is a short Jenkinsfile. Pick what the build is for, then step through it. Try a pull request, then `main`, then make the tests fail.
+
+<JenkinsfileRun />
+
+**What to notice:** the same file gives three different pipelines. A feature branch only tests. A pull request also plans. Only `main` builds and deploys. And when a stage fails, the stages after it are skipped, but `post` still runs.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">Jenkins runs on your Mac. Nothing in AWS is used.</Cost>
+
+You'll run Jenkins on your Mac, create a pipeline, and see parameters, `when`, `parallel`, `input`, a timeout and `post` do their jobs. About 40 minutes. The next three lessons use this same Jenkins, so keep it when you finish.
+
+On your Mac, Jenkins' controller and its only agent are the same machine, and builds run on the controller. That's fine for learning on your own. [Jenkins from zero](/lessons/jenkins/) explains why a shared Jenkins must never work this way.
+
+<Steps>
+
+<Step title="Install and start Jenkins">
+
+```sh
+brew install jenkins-lts
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | install software with Homebrew |
+| `jenkins-lts` | the long-term support version of Jenkins. Homebrew installs the Java it needs too |
+
+Start it in a terminal window of its own:
+
+```sh
+jenkins-lts --httpListenAddress=127.0.0.1 --httpPort=8080
+```
+
+| Part | What it means |
+|---|---|
+| `jenkins-lts` | start Jenkins in this terminal. It keeps running until you press **Ctrl+C** |
+| `--httpListenAddress=127.0.0.1` | only accept connections from this Mac, not from other machines on your network |
+| `--httpPort=8080` | the port for the web page |
+
+Among many lines of log, the first start prints:
+
+```output
+*************************************************************
+*************************************************************
+*************************************************************
+
+Jenkins initial setup is required. An admin user has been created and a password generated.
+Please use the following password to proceed to installation:
+
+3b9e5c07a1d24f6e8c2b0d9a7f41e635
+
+This may also be found at: /Users/you/.jenkins/secrets/initialAdminPassword
+
+*************************************************************
+*************************************************************
+*************************************************************
+```
+
+Then, when it's ready:
+
+```output
+Jenkins is fully up and running
+```
+
+Your password and home folder are different. Copy the password. Leave this terminal open; closing it stops Jenkins. Jenkins keeps everything in `~/.jenkins`, the `JENKINS_HOME` on your Mac.
+
+<Mistake title="port 8080 is already in use">
+
+```output title="Jenkins stops with"
+java.io.IOException: Failed to start Jetty
+Caused by: java.net.BindException: Address already in use
+```
+
+**Why:** something else on your Mac is using port 8080, often another local server, or a Jenkins you started earlier with `brew services`.
+
+**The fix:** stop the other program, or start Jenkins on another port with `--httpPort=8090` and use that number in the browser.
+
+</Mistake>
+
+</Step>
+
+<Step title="Finish the setup">
+
+Open `http://localhost:8080` and go through the setup pages:
+
+| Page | Do this |
+|---|---|
+| **Unlock Jenkins** | Paste the password. Choose **Continue** |
+| **Customize Jenkins** | **Install suggested plugins**. They include Pipeline, Git, Credentials Binding and Timestamper |
+| **Create First Admin User** | A username and a password you'll remember |
+| **Instance Configuration** | Leave `http://localhost:8080/`. Choose **Save and Finish**, then **Start using Jenkins** |
+
+</Step>
+
+<Step title="Create the pipeline">
+
+Choose **New Item**.
+
+| Field | Enter |
+|---|---|
+| Enter an item name | `quickcart-pipeline` |
+| Type | **Pipeline** |
+
+Choose **OK**, scroll to **Pipeline**, leave **Definition** as **Pipeline script**, and paste this into **Script**:
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'TARGET', choices: ['dev', 'stg', 'prod'], description: 'Where to deploy')
+        booleanParam(name: 'RUN_SLOW_TESTS', defaultValue: false, description: 'Also run the slow tests')
+        string(name: 'RELEASE_NOTE', defaultValue: 'Routine release', description: 'One line about this release')
+    }
+
+    environment {
+        APP_NAME = 'quickcart-orders'
+        VERSION  = "1.0.${env.BUILD_NUMBER}"
+    }
+
+    options {
+        timeout(time: 15, unit: 'MINUTES')
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                echo "Building ${env.APP_NAME} version ${env.VERSION}"
+                writeFile file: 'out/version.txt', text: "${env.APP_NAME} ${env.VERSION}\n"
+            }
+        }
+
+        stage('Tests') {
+            parallel {
+                stage('Unit tests') {
+                    steps {
+                        sh 'echo "Unit tests passed for $APP_NAME"'
+                    }
+                }
+                stage('Slow tests') {
+                    when {
+                        expression { params.RUN_SLOW_TESTS }
+                    }
+                    steps {
+                        sh 'sleep 5'
+                        echo 'Slow tests passed'
+                    }
+                }
+            }
+        }
+
+        stage('Only on main') {
+            when {
+                branch 'main'
+            }
+            steps {
+                echo 'This only runs in a multibranch job, on main'
+            }
+        }
+
+        stage('Deploy') {
+            when {
+                expression { params.TARGET != 'prod' }
+            }
+            steps {
+                echo "Deploying ${env.VERSION} to ${params.TARGET}"
+            }
+        }
+
+        stage('Deploy to prod') {
+            when {
+                beforeInput true
+                expression { params.TARGET == 'prod' }
+            }
+            options {
+                timeout(time: 5, unit: 'MINUTES')
+            }
+            input {
+                message 'Deploy to production?'
+                ok 'Deploy'
+            }
+            steps {
+                echo "Deploying ${env.VERSION} to prod: ${params.RELEASE_NOTE}"
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'out/version.txt'
+        }
+        success {
+            echo 'The pipeline passed'
+        }
+        failure {
+            echo 'The pipeline failed: tell the team'
+        }
+        cleanup {
+            deleteDir()
+        }
+    }
+}
+```
+
+Every directive is explained in [the idea](#idea). The parts that are new here:
+
+| Line | What it means |
+|---|---|
+| `VERSION = "1.0.${env.BUILD_NUMBER}"` | Double quotes, so Groovy fills in the build number: build 3 is version `1.0.3` |
+| `writeFile file: 'out/version.txt', …` | Make a small file, standing in for what a real build produces |
+| `stage('Tests')` → `parallel` | Unit tests and slow tests run side by side |
+| `expression { params.RUN_SLOW_TESTS }` | The slow tests run only if the box was ticked |
+| `stage('Only on main')` | Here to show that `branch` is always false in a plain Pipeline job |
+| `expression { params.TARGET != 'prod' }` | dev and stg deploy straight away |
+| `beforeInput true` | Check the condition before asking, so dev builds never ask for approval |
+| Stage `options` → `timeout(time: 5, …)` | Nobody answers in 5 minutes, the build is aborted |
+| `archiveArtifacts` in `post` → `always` | Keep `version.txt`, even if a later stage failed |
+| `deleteDir()` in `post` → `cleanup` | Empty the workspace at the very end |
+
+Choose **Save**.
+
+</Step>
+
+<Step title="Run it once, and meet the parameters">
+
+Choose **Build Now**. When it finishes, open build **#1** and choose **Console Output**. Among the lines you'll see:
+
+```output title="The console output includes"
+Building quickcart-orders version 1.0.1
+Unit tests passed for quickcart-orders
+Stage "Slow tests" skipped due to when conditional
+Stage "Only on main" skipped due to when conditional
+Deploying 1.0.1 to dev
+The pipeline passed
+Finished: SUCCESS
+```
+
+Every line also starts with a time, from `timestamps()`. Go back to the job page.
+
+<See>
+
+The button now says **Build with Parameters**. Before build #1, Jenkins didn't know the Jenkinsfile had parameters, because it hadn't read it yet.
+
+</See>
+
+<Mistake title="the first build ignores your parameters">
+
+**Why:** Jenkins learns a pipeline's parameters by running it. The first build after you add or change a `parameters` block runs with the old parameters, or with the defaults.
+
+**The fix:** expect it. Run the job once after changing parameters, then choose **Build with Parameters**.
+
+</Mistake>
+
+</Step>
+
+<Step title="Deploy to prod, with approval">
+
+Choose **Build with Parameters**:
+
+| Field | Enter |
+|---|---|
+| TARGET | `prod` |
+| RUN_SLOW_TESTS | ticked |
+| RELEASE_NOTE | `Coupons at checkout` |
+
+Choose **Build**. Open the running build's **Console Output**.
+
+<See>
+
+The slow tests run next to the unit tests this time, and **Deploy** is skipped. Then the build stops and waits, with the question **Deploy to production?** and two links: **Deploy** and **Abort**.
+
+</See>
+
+Choose **Deploy**.
+
+```output title="The console output includes"
+Deploying 1.0.2 to prod: Coupons at checkout
+The pipeline passed
+Finished: SUCCESS
+```
+
+Run it once more with `prod`, and this time don't answer. After 5 minutes:
+
+```output title="The console output ends with"
+Cancelling nested steps due to timeout
+Finished: ABORTED
+```
+
+Nobody forgot a build that waits forever: the timeout ended it for you.
+
+</Step>
+
+<Step title="Make a stage fail">
+
+Choose **Configure**, and change the **Unit tests** step so it fails:
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+    stages {
+        stage('Unit tests') {
+            steps {
+                sh 'echo "1 test failed" && exit 1'
+            }
+        }
+        stage('Deploy') {
+            steps {
+                echo 'Deploying'
+            }
+        }
+    }
+    post {
+        success {
+            echo 'The pipeline passed'
+        }
+        failure {
+            echo 'The pipeline failed: tell the team'
+        }
+    }
+}
+```
+
+This shorter pipeline replaces the long one, so the failure is easy to see.
+
+| Part | What it means |
+|---|---|
+| `echo "1 test failed"` | print a line, as a test tool would |
+| `&&` | run the next command only if this one succeeded |
+| `exit 1` | end the shell with code 1, which means failure. Jenkins fails the stage |
+
+Choose **Save**, then **Build Now**.
+
+```output title="The console output includes"
+1 test failed
+Stage "Deploy" skipped due to earlier failure(s)
+The pipeline failed: tell the team
+ERROR: script returned exit code 1
+Finished: FAILURE
+```
+
+**Deploy** never ran. `failure` did; `success` didn't.
+
+<Mistake title="a typo in the Jenkinsfile">
+
+If you mistype a directive, for example `stepss` instead of `steps`, the build fails before any stage runs:
+
+```output title="The console output includes"
+org.codehaus.groovy.control.MultipleCompilationErrorsException: startup failed:
+WorkflowScript: 5: Unknown stage section "stepss". Starting with version 0.5, steps in a stage must be in a ‘steps’ block.
+```
+
+**Why:** Jenkins checks a declarative pipeline's structure before it runs it. That's one of the reasons to prefer declarative.
+
+**The fix:** the message gives the line number after `WorkflowScript:`. Fix that line. To try a change without saving it, open a finished build and choose **Replay**: it runs the pipeline again with your edits, just once.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Keep Jenkins and `~/.jenkins`: the next three lessons use them. To stop Jenkins for now, press **Ctrl+C** in its terminal. Start it again later with the same `jenkins-lts` command; your jobs and settings are still there.
+
+When you've finished the course and want it gone:
+
+```sh
+brew uninstall jenkins-lts
+```
+
+| Part | What it means |
+|---|---|
+| `brew uninstall` | remove software Homebrew installed |
+| `jenkins-lts` | Jenkins. Your `~/.jenkins` folder stays until you delete it |
+
+Then delete the `.jenkins` folder in your home folder. In Finder, press **Cmd+Shift+.** to show hidden folders.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Directive | Remember |
+|---|---|
+| `pipeline { }` | Declarative. Checked before it runs |
+| `agent` | `any`, `none`, `{ label 'x' }`, `{ docker { image 'x' } }`. Per stage too |
+| `stages` / `stage` / `steps` | Top to bottom. The first failure skips the rest |
+| `environment` | Variables for every step. Read them in `sh` with single quotes |
+| `parameters` | `choice`, `booleanParam`, `string`. Read as `params.NAME`. Active after one run |
+| `options` | `timeout`, `timestamps()`, `disableConcurrentBuilds()`, `buildDiscarder(logRotator(numToKeepStr: '20'))` |
+| `when` | `branch`, `changeRequest()`, `tag`, `expression { }`. `beforeAgent`, `beforeInput` |
+| `input` | `message`, `ok`, `submitter`. Put a `timeout` on the stage. Use `agent none` at the top |
+| `parallel` | Side by side. `failFast true` |
+| `post` | `always`, `success`, `failure`, `unstable`, `aborted`, `changed`, `fixed`, then `cleanup` last |
+| Quotes | `'…'` the shell fills in `$VAR`. `"…"` Groovy fills in `${…}`. Secrets: single quotes only |
+| Replay | Try an edited pipeline once, without saving it |
+
+</Cheat>
+
+</Part>

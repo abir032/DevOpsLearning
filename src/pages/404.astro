@@ -1,0 +1,16 @@
+---
+import Base from "../layouts/Base.astro";
+import { href } from "../data/curriculum";
+---
+<Base title="Page not found" description="This page doesn't exist.">
+  <div class="page">
+    <div class="read">
+      <header class="mod-hero" data-track="ship">
+        <span class="num">404</span>
+        <h1>This stop isn't on the route</h1>
+        <p>The page may have moved. Try searching, or go back to the route map.</p>
+      </header>
+      <p><a class="btn primary" href={href("/")}>Back to the route map</a></p>
+    </div>
+  </div>
+</Base>

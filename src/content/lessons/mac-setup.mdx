@@ -1,0 +1,690 @@
+---
+time: 45 minutes
+level: Beginner
+before: [how-this-course-works]
+cost: free
+quiz:
+  - q: You have AWS_PROFILE=quickcart set, but you also exported old access keys as AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY earlier in the same terminal. Which does the CLI use?
+    answer: 1
+    options:
+      - t: The quickcart profile, because you named it
+        why: AWS_PROFILE is checked after the key variables. The keys are found first, so the profile is never looked at.
+      - t: The old keys in the environment variables
+        why: Right. Key variables come before AWS_PROFILE. This is how people end up running commands in the wrong account without noticing.
+      - t: Neither. The CLI stops with an error because they conflict
+        why: The CLI doesn't treat it as a conflict. It takes the first credentials it finds and stops looking.
+      - t: Both, one after the other
+        why: A command only ever runs as one identity.
+  - q: What does aws sts get-caller-identity tell you?
+    answer: 2
+    options:
+      - t: Every permission you have
+        why: It says who you are, not what you can do. Permissions come from the policies attached to that identity.
+      - t: Your password
+        why: It never shows secrets.
+      - t: Which account and which identity your commands are running as
+        why: Right. Run it whenever you're unsure. It needs no permissions, so it works for any valid credentials.
+      - t: Whether your region is set correctly
+        why: It doesn't show the region. aws configure list does.
+  - q: Why does this course use aws configure sso instead of aws configure with access keys?
+    answer: 0
+    options:
+      - t: SSO gives credentials that expire after hours; access keys work until someone deletes them
+        why: Right. If an SSO credential leaks, it stops working soon. A leaked access key works for anyone, for as long as it exists.
+      - t: aws configure doesn't work on a Mac
+        why: It works everywhere. It's just less safe for a person's everyday login.
+      - t: SSO is faster
+        why: Speed isn't the difference. Safety is.
+      - t: Access keys can't use a region
+        why: Both ways let you set a default region.
+  - q: The next morning, every AWS command fails with "Token has expired and refresh failed". What do you do?
+    answer: 3
+    options:
+      - t: Run aws configure sso again from the start
+        why: That works, but it's more than you need. Your profile is fine; only the sign-in has expired.
+      - t: Create access keys so it stops happening
+        why: The expiry is the safety feature. Long-lived keys would remove it.
+      - t: Reinstall the AWS CLI
+        why: Nothing is wrong with the CLI. Your sign-in expired, as designed.
+      - t: Run aws sso login --profile quickcart
+        why: Right. It signs you in again through the browser, with MFA, and the profile works for another session.
+  - q: Why install Terraform from hashicorp/tap rather than plain brew install terraform?
+    answer: 1
+    options:
+      - t: The tap version is free and the other is paid
+        why: Both are free to use for this course.
+      - t: Homebrew's own collection stopped updating Terraform after its licence changed, so HashiCorp's tap has the current versions
+        why: Right. Homebrew only packages open-source software in its main collection. Terraform's newer licence isn't, so the up-to-date builds come from HashiCorp's own tap.
+      - t: The tap is faster to download
+        why: Speed isn't the reason. Being current is.
+      - t: There's no difference
+        why: One is kept up to date and the other isn't.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a new laptop">
+
+Priya joins QuickCart. On her first day she installs the tools from a list in a chat thread: one from a website, one with a script she pasted, one from Homebrew. It takes the whole day.
+
+On her second day, she runs a command to delete a test bucket. It fails: the bucket doesn't exist. She checks, and her terminal is signed in to a different AWS account entirely, using access keys she'd pasted into her shell from an old tutorial the week before.
+
+That time the mistake was harmless. With a different command, it wouldn't have been.
+
+</Story>
+
+<Case title="A very common mistake: the right command, the wrong account">
+
+Engineers often have credentials for more than one AWS account on the same laptop: a test account, a staging account, production. A command that is safe in the test account, like deleting everything with a certain name, gets run in a terminal still signed in to production.
+
+Nothing warns you. The CLI does exactly what you asked, in whichever account it found credentials for. This is why careful teams make signing in explicit, and check who they are before running anything destructive.
+
+</Case>
+
+Both of Priya's problems have simple fixes: install everything the same way, and know exactly where your AWS credentials come from.
+
+</Part>
+
+<Part id="idea">
+
+You need a handful of tools. They all install the same way, with **Homebrew**, a package manager for macOS. You ask for a tool by name, and Homebrew downloads it, installs it and keeps it up to date.
+
+### What you're installing, and why
+
+| Tool | What it does | First used in |
+|---|---|---|
+| Command line developer tools | Apple's basic tools for developers, including a version of git. Homebrew needs them | This lesson |
+| Homebrew | Installs and updates everything else | This lesson |
+| git | Tracks changes to code | [Measuring delivery](/lessons/dora-metrics/) |
+| AWS CLI v2 | Talks to AWS from the terminal | This lesson |
+| Docker Desktop | Builds and runs containers | [Images and containers](/lessons/images-and-containers/) |
+| Terraform | Builds AWS resources from code | [Your first resource](/lessons/first-resource/) |
+| kubectl | Talks to Kubernetes clusters | [Kubernetes and EKS](/lessons/kubernetes-and-eks/) |
+| A code editor | Editing files. This course suggests Visual Studio Code, but any editor works | Throughout |
+
+### How the AWS CLI knows who you are
+
+Every AWS command has to prove who's asking. The CLI finds credentials by looking in several places, **in a fixed order**, and uses the first one it finds. It never looks further.
+
+| Order | Where it looks | What sets it |
+|---|---|---|
+| 1 | The `--profile` option on the command | You, each time you type a command |
+| 2 | The environment variables `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | `export` in your terminal, or a tool you ran |
+| 3 | The `AWS_PROFILE` environment variable, which names a profile | `export AWS_PROFILE=quickcart` |
+| 4 | The profile called `default` in `~/.aws/credentials` or `~/.aws/config` | `aws configure`, often from years ago |
+
+A **profile** is a named set of settings in `~/.aws/config`: which account, which role, which region. The `~` means your home folder. You'll make one profile, called `quickcart`, that signs in through IAM Identity Center. Its credentials expire after a few hours, so there's nothing long-lived on your laptop to leak.
+
+There's a longer list in the AWS documentation, with things that only matter on servers. These four are the ones that trip people up on a laptop.
+
+<YouKnow title="You already know this: .env files">
+
+Most tools that read a `.env` file won't overwrite a variable that's already set in your shell. So a stale `export API_URL=http://localhost:3000` from last week quietly beats the value in the file, and you spend an hour wondering why the app talks to the wrong server.
+
+AWS credentials behave the same way. A key left in an environment variable beats the profile you think you're using.
+
+</YouKnow>
+
+<Key>The AWS CLI uses the first credentials it finds, in a fixed order. When in doubt, run aws sts get-caller-identity before anything that changes things.</Key>
+
+</Part>
+
+<Part id="see">
+
+Your laptop has the `quickcart` profile set up. Turn the other sources on and off, and see which one the CLI uses, and what `aws sts get-caller-identity` would print.
+
+<CredChain />
+
+**What to notice:** turning on the old keys doesn't cause an error. The output looks perfectly normal. Only the **Account** line gives it away. That's why checking who you are is a habit, not a one-off.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">installing tools and signing in cost nothing.</Cost>
+
+You'll install every tool the course uses, sign in to AWS through IAM Identity Center, and check who you are. About 30 minutes, most of it waiting for downloads.
+
+You need the admin user and access portal from [How this course works](/lessons/how-this-course-works/). Open the **Terminal** app to start.
+
+<Steps>
+
+<Step title="Install Apple's command line tools">
+
+```sh
+xcode-select --install
+```
+
+| Part | What it means |
+|---|---|
+| `xcode-select` | Apple's tool for managing developer tools |
+| `--install` | install the command line developer tools, without the whole of Xcode |
+
+A window opens asking to install the tools. Choose **Install** and agree to the licence. It takes a few minutes.
+
+<See>
+
+The window says **The software was installed**.
+
+</See>
+
+If you already have them, the terminal says so instead, and you can go straight on:
+
+```output
+xcode-select: note: Command line tools are already installed. Use "Software Update" in System Settings or the softwareupdate command line interface to install updates
+```
+
+</Step>
+
+<Step title="Install Homebrew">
+
+Homebrew's website, **brew.sh**, offers two ways to install it: a one-line command, and a normal Mac installer package. Use the installer: it's a file you double-click, with nothing to paste.
+
+1. Go to **brew.sh** and follow the link to the latest release, which is on GitHub.
+2. Download the file ending in `.pkg`.
+3. Double-click it and follow the installer.
+
+Then **open a new Terminal window**, so it picks up the new tool, and check:
+
+```sh
+brew --version
+```
+
+| Part | What it means |
+|---|---|
+| `brew` | Homebrew's command |
+| `--version` | print which version is installed |
+
+```output
+Homebrew 7.0.6
+```
+
+Yours may be newer.
+
+<Mistake title="the terminal can't find brew">
+
+```output title="The terminal says"
+zsh: command not found: brew
+```
+
+**Why:** on a Mac with an Apple chip, Homebrew lives in `/opt/homebrew/bin`, and the terminal only looks for commands in the folders listed in a setting called `PATH`. The installer adds that folder for new terminal windows, so an old window doesn't know about it.
+
+**The fix:** close the terminal window and open a new one. If it still fails, add the folder yourself. Create your shell's settings file if it doesn't exist:
+
+```sh
+touch ~/.zprofile
+```
+
+| Part | What it means |
+|---|---|
+| `touch` | create the file if it doesn't exist; leave it alone if it does |
+| `~/.zprofile` | a settings file in your home folder that the terminal reads when it opens |
+
+Open it in TextEdit:
+
+```sh
+open -e ~/.zprofile
+```
+
+| Part | What it means |
+|---|---|
+| `open` | open a file, as if you'd double-clicked it |
+| `-e` | in TextEdit |
+| `~/.zprofile` | the file you just made |
+
+Add this line at the end, save, and open a new terminal window:
+
+```sh title="~/.zprofile"
+export PATH="/opt/homebrew/bin:$PATH"
+```
+
+| Part | What it means |
+|---|---|
+| `export PATH=` | set the list of folders the terminal searches for commands |
+| `/opt/homebrew/bin` | Homebrew's folder, put first |
+| `:$PATH` | followed by everything that was already in the list |
+
+</Mistake>
+
+</Step>
+
+<Step title="Install git and tell it who you are">
+
+```sh
+brew install git
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | download and install a tool |
+| `git` | the tool's name in Homebrew |
+
+The command line tools already included a git, but Homebrew's is newer and stays up to date. Open a new terminal window, then check:
+
+```sh
+git --version
+```
+
+| Part | What it means |
+|---|---|
+| `git --version` | print which version of git runs when you type `git` |
+
+```output
+git version 2.51.0
+```
+
+Yours may be newer. Now tell git your name and email, which it records with every change you save. Put your own in place of the highlighted values:
+
+```sh ph="Your Name"
+git config --global user.name "Your Name"
+```
+
+| Part | What it means |
+|---|---|
+| `git config` | change a git setting |
+| `--global` | for every project on this laptop, not just one |
+| `user.name` | the setting: your name as it appears in history |
+| `"Your Name"` | replace with your name. The quotes keep the space in it |
+
+```sh ph="you@example.com"
+git config --global user.email "you@example.com"
+```
+
+| Part | What it means |
+|---|---|
+| `user.email` | the setting: the email recorded with your changes |
+| `"you@example.com"` | replace with your email |
+
+</Step>
+
+<Step title="Install the AWS CLI">
+
+```sh
+brew install awscli
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | download and install a tool |
+| `awscli` | the AWS command line tool, version 2 |
+
+```sh
+aws --version
+```
+
+| Part | What it means |
+|---|---|
+| `aws --version` | print which version of the AWS CLI is installed |
+
+```output
+aws-cli/2.37.3 Python/3.13.7 Darwin/25.0.0 source/arm64
+```
+
+Your numbers will differ. What matters is that it starts with `aws-cli/2`. Version 1 is old and works differently.
+
+</Step>
+
+<Step title="Install Docker Desktop">
+
+```sh
+brew install --cask docker-desktop
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | download and install |
+| `--cask` | this is a full Mac app with a window, not just a terminal command |
+| `docker-desktop` | Docker Desktop: the app that runs containers on your Mac |
+
+Open **Docker** from your Applications folder. Accept the terms, choose **Use recommended settings**, and enter your Mac password if asked. You can skip signing in to a Docker account. Wait until the whale icon in the menu bar stops animating.
+
+Then run a tiny test container:
+
+```sh
+docker run --rm hello-world
+```
+
+| Part | What it means |
+|---|---|
+| `docker run` | start a container from an image, downloading the image first if needed |
+| `--rm` | delete the container when it finishes, so nothing is left behind |
+| `hello-world` | a tiny image that prints a message and exits |
+
+```output
+Hello from Docker!
+This message shows that your installation appears to be working correctly.
+```
+
+More lines follow, explaining what just happened.
+
+<Note title="Docker Desktop's licence">
+
+Docker Desktop is free for personal use, education and small businesses. Larger companies need a paid subscription; check Docker's current terms if you'll use it at work. A free alternative is **Colima**, which runs the same `docker` commands: install it with `brew install colima docker`, then start it with `colima start`.
+
+</Note>
+
+<Mistake title="Docker isn't running">
+
+```output title="The terminal says"
+Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+```
+
+The exact path in the message may differ.
+
+**Why:** the `docker` command is only a remote control. The engine that runs containers lives inside the Docker Desktop app, and the app isn't open.
+
+**The fix:** open Docker from Applications, wait for it to finish starting, and run the command again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Install Terraform">
+
+Terraform comes from HashiCorp's own collection of Homebrew packages, called a **tap**. First, add the tap:
+
+```sh
+brew tap hashicorp/tap
+```
+
+| Part | What it means |
+|---|---|
+| `brew tap` | add another collection of packages to Homebrew |
+| `hashicorp/tap` | HashiCorp's collection |
+
+Then install from it:
+
+```sh
+brew install hashicorp/tap/terraform
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | download and install |
+| `hashicorp/tap/terraform` | Terraform, from HashiCorp's tap specifically |
+
+```sh
+terraform version
+```
+
+| Part | What it means |
+|---|---|
+| `terraform version` | print which version of Terraform is installed |
+
+```output
+Terraform v1.16.4
+on darwin_arm64
+```
+
+Yours may be newer.
+
+<Mistake title="installing plain terraform">
+
+If you run `brew install terraform` without the tap, you get Homebrew's own copy, which stopped at an old version.
+
+**Why:** Homebrew's main collection only includes open-source software. When Terraform's licence changed in 2023, Homebrew stopped updating it there.
+
+**The fix:** remove the old copy with `brew uninstall terraform`, then install from the tap as above.
+
+</Mistake>
+
+</Step>
+
+<Step title="Install kubectl and a code editor">
+
+```sh
+brew install kubectl
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | download and install |
+| `kubectl` | the command line tool for Kubernetes |
+
+```sh
+kubectl version --client
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl version` | print version information |
+| `--client` | only for this tool on your laptop. Without it, kubectl also tries to contact a cluster, and you don't have one yet |
+
+```output
+Client Version: v1.37.1
+```
+
+A second line gives the version of Kustomize, a tool built into kubectl. Your versions will differ.
+
+If you don't already have a code editor you like, install Visual Studio Code:
+
+```sh
+brew install --cask visual-studio-code
+```
+
+| Part | What it means |
+|---|---|
+| `--cask` | a full Mac app |
+| `visual-studio-code` | Visual Studio Code, a free code editor |
+
+</Step>
+
+<Step title="Connect the AWS CLI to your admin user">
+
+Find your **AWS access portal URL** first: it's in **IAM Identity Center → Dashboard → Settings summary**, and ends in `awsapps.com/start`. Then:
+
+```sh
+aws configure sso
+```
+
+| Part | What it means |
+|---|---|
+| `aws configure` | set up how the CLI connects to AWS |
+| `sso` | through IAM Identity Center, which used to be called AWS SSO |
+
+It asks a series of questions. Answer them like this:
+
+| It asks | Enter |
+|---|---|
+| SSO session name (Recommended) | `quickcart` |
+| SSO start URL | Your AWS access portal URL |
+| SSO region | `us-east-1` |
+| SSO registration scopes | Press <kbd>Return</kbd> to accept the default |
+
+Your browser opens. Sign in as your admin user if asked, with your MFA, and choose **Allow access**. Back in the terminal, it finds your account and role, then asks three more questions:
+
+| It asks | Enter |
+|---|---|
+| Default client Region | `us-east-1` |
+| CLI default output format | `json` |
+| Profile name | `quickcart` |
+
+```output title="It finishes with"
+To use this profile, specify the profile name using --profile, as shown:
+
+aws sts get-caller-identity --profile quickcart
+```
+
+The wording may differ slightly between versions. Everything you entered is saved in `~/.aws/config`. It looks like this, with your own portal address in place of the highlighted value. There are no keys in it.
+
+```ini title="~/.aws/config" ph="START_URL"
+[profile quickcart]
+sso_session = quickcart
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+region = us-east-1
+output = json
+
+[sso-session quickcart]
+sso_start_url = START_URL
+sso_region = us-east-1
+sso_registration_scopes = sso:account:access
+```
+
+| Setting | What it means |
+|---|---|
+| `[profile quickcart]` | the start of a profile named `quickcart` |
+| `sso_session` | which sign-in session this profile uses |
+| `sso_account_id` | your 12-digit account ID |
+| `sso_role_name` | the permission set you were given |
+| `region` and `output` | where commands run, and how results are printed |
+| `[sso-session quickcart]` | how to sign in: your portal address and its region |
+
+</Step>
+
+<Step title="Check who you are">
+
+```sh
+aws sts get-caller-identity --profile quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `aws sts` | the Security Token Service, which deals with identities |
+| `get-caller-identity` | say who is making this request. It needs no permissions, so it always works when credentials are valid |
+| `--profile quickcart` | use the `quickcart` profile |
+
+```output
+{
+    "UserId": "AROA3EXAMPLEEXAMPLE1:maya",
+    "Account": "111122223333",
+    "Arn": "arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_AdministratorAccess_1a2b3c4d5e6f7a8b/maya"
+}
+```
+
+Your account number, ID and name will be yours. Check two things: **Account** is your account, and the **Arn** contains `AWSReservedSSO_AdministratorAccess`, which means you're signed in through Identity Center, not with keys.
+
+</Step>
+
+<Step title="Make quickcart the profile for this terminal">
+
+Typing `--profile quickcart` every time is tiring. Set it once for the terminal window:
+
+```sh
+export AWS_PROFILE=quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `export` | set a variable for this terminal window and every command started from it |
+| `AWS_PROFILE=quickcart` | tell the AWS CLI, Terraform and other tools to use the `quickcart` profile |
+
+Now ask the CLI where each of its settings comes from:
+
+```sh
+aws configure list
+```
+
+| Part | What it means |
+|---|---|
+| `aws configure list` | show the profile, keys and region in use, and where each one came from |
+
+```output
+      Name                    Value             Type    Location
+      ----                    -----             ----    --------
+   profile                quickcart              env    ['AWS_PROFILE', 'AWS_DEFAULT_PROFILE']
+access_key     ****************ABCD              sso
+secret_key     ****************WXYZ              sso
+    region                us-east-1      config-file    ~/.aws/config
+```
+
+The layout may differ slightly. The **Type** column is the useful part: `sso` means the keys came from your Identity Center sign-in. If it says `env`, keys in environment variables are winning.
+
+To have it in every new terminal window, add the same `export AWS_PROFILE=quickcart` line to `~/.zprofile`, the way the Homebrew mistake above shows.
+
+<Mistake title="old keys in the environment win">
+
+If `aws configure list` shows this:
+
+```output
+access_key     ****************QRST              env
+```
+
+**Why:** `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set in this terminal, maybe from a tutorial. They come before `AWS_PROFILE`, so the CLI uses them and ignores your profile.
+
+**The fix:** remove them from this terminal:
+
+```sh
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+```
+
+| Part | What it means |
+|---|---|
+| `unset` | delete variables from this terminal |
+| `AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` | the three variables that can hold keys |
+
+If they come back in every new window, look for them in `~/.zprofile` or `~/.zshrc` and delete those lines.
+
+</Mistake>
+
+<Mistake title="the next morning, everything fails">
+
+```output title="Any command says"
+Error when retrieving token from sso: Token has expired and refresh failed
+```
+
+**Why:** that's the safety feature working. Your sign-in lasts a limited time, then expires.
+
+**The fix:** sign in again. Your browser opens, as before:
+
+```sh
+aws sso login --profile quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `aws sso login` | sign in again through IAM Identity Center |
+| `--profile quickcart` | for the `quickcart` profile's session |
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing here costs money. **Keep every tool**: the rest of the course uses them.
+
+When you finish a session, sign out so the credentials on your laptop stop working straight away, instead of when they expire:
+
+```sh
+aws sso logout
+```
+
+| Part | What it means |
+|---|---|
+| `aws sso logout` | delete the cached sign-in from this laptop. The next command will need `aws sso login` |
+
+It prints nothing when it works. You can also quit Docker Desktop from the whale icon in the menu bar when you aren't using it, to save battery.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command | What it does |
+|---|---|
+| `brew install NAME` | Install a terminal tool |
+| `brew install --cask NAME` | Install a Mac app |
+| `brew upgrade` | Update everything Homebrew installed |
+| `aws configure sso` | Set up a profile that signs in through IAM Identity Center |
+| `aws sso login --profile quickcart` | Sign in again when the session expires |
+| `aws sso logout` | Sign out now |
+| `aws sts get-caller-identity` | Who am I, and in which account? |
+| `aws configure list` | Which profile, keys and region are in use, and where from |
+| `export AWS_PROFILE=quickcart` | Use this profile in this terminal |
+| Credential order | `--profile`, then key variables, then `AWS_PROFILE`, then `default` |
+
+</Cheat>
+
+</Part>

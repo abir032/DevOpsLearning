@@ -1,0 +1,125 @@
+---
+/*
+ * Set up your Mac: how the AWS CLI finds credentials.
+ * Teaches: the CLI checks places in a fixed order and uses the first one that
+ * has credentials. Everything after it is never looked at.
+ */
+---
+<div class="viz" data-track="start" data-viz="cred-chain">
+  <div class="viz-controls">
+    <span class="lbl" id="cc-lbl">On this laptop</span>
+    <div class="seg wide" role="group" aria-labelledby="cc-lbl">
+      <button type="button" data-src="flag" aria-pressed="false">Add --profile quickcart to the command</button>
+      <button type="button" data-src="env" aria-pressed="false">Old keys in environment variables</button>
+      <button type="button" data-src="awsprofile" aria-pressed="true">AWS_PROFILE=quickcart</button>
+      <button type="button" data-src="file" aria-pressed="false">Old keys in ~/.aws/credentials</button>
+    </div>
+  </div>
+  <div class="cc">
+    <div>
+      <p class="cc-h">Where the CLI looks, in order</p>
+      <ol class="cc-chain">
+        <li data-row="flag"><b>1. The <code>--profile</code> option</b><span>on the command you typed</span><em>Checked: nothing here</em></li>
+        <li data-row="env"><b>2. Key environment variables</b><span><code>AWS_ACCESS_KEY_ID</code> and <code>AWS_SECRET_ACCESS_KEY</code></span><em>Checked: nothing here</em></li>
+        <li data-row="awsprofile" class="win"><b>3. The <code>AWS_PROFILE</code> variable</b><span>names a profile to use</span><em>Used: this one wins</em></li>
+        <li data-row="file" class="cc-skip"><b>4. The <code>default</code> profile</b><span>in <code>~/.aws/credentials</code> or <code>~/.aws/config</code></span><em>Never looked at</em></li>
+      </ol>
+    </div>
+    <div>
+      <p class="cc-h">What you'd see</p>
+      <pre class="plan-out cc-out" aria-label="Command and output" data-n="out"><span class="d">$ aws sts get-caller-identity</span>
+{`{
+    "UserId": "AROA3EXAMPLEEXAMPLE1:maya",
+    "Account": "111122223333",
+    "Arn": "arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_AdministratorAccess_1a2b3c4d5e6f7a8b/maya"
+}`}</pre>
+    </div>
+  </div>
+  <div class="viz-say good" aria-live="polite"><span class="step-l">AWS_PROFILE wins</span>Nothing earlier is set, so the CLI uses the profile that <code>AWS_PROFILE</code> names: <b>quickcart</b>. Turn the other sources on and off to see which one wins.</div>
+</div>
+
+<style is:global>
+  [data-viz="cred-chain"] .cc { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 14px; padding: 14px 16px 4px; }
+  [data-viz="cred-chain"] .cc-h { font-size: 14px; font-weight: 800; color: var(--ink-2); margin: 0 0 8px; }
+  [data-viz="cred-chain"] .cc-chain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+  [data-viz="cred-chain"] .cc-chain li { border: 1px solid var(--rule); border-radius: 9px; padding: 7px 10px; background: var(--bg); display: flex; flex-direction: column; gap: 1px; transition: border-color .2s, background .2s; }
+  [data-viz="cred-chain"] .cc-chain b { font-size: 14px; }
+  [data-viz="cred-chain"] .cc-chain span { font-size: 12.5px; color: var(--ink-3); }
+  [data-viz="cred-chain"] .cc-chain em { font-style: normal; font-size: 12.5px; font-weight: 800; color: var(--ink-3); }
+  [data-viz="cred-chain"] .cc-chain li.win { border-color: var(--line); border-width: 2px; background: var(--surface); }
+  [data-viz="cred-chain"] .cc-chain li.win em { color: var(--ok); }
+  [data-viz="cred-chain"] .cc-chain li.win.risky { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="cred-chain"] .cc-chain li.win.risky em { color: var(--bad); }
+  [data-viz="cred-chain"] .cc-chain li.cc-skip { border-style: dashed; background: transparent; }
+  [data-viz="cred-chain"] .cc-out { margin: 0 0 10px; min-height: 150px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  @media (prefers-reduced-motion: reduce) { [data-viz="cred-chain"] .cc-chain li { transition: none; } }
+  @media (max-width: 760px) { [data-viz="cred-chain"] .cc { grid-template-columns: minmax(0, 1fr); } }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  /* What each source would sign you in as. */
+  const SSO = { user: "AROA3EXAMPLEEXAMPLE1:maya", acct: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_AdministratorAccess_1a2b3c4d5e6f7a8b/maya" };
+  const ENV = { user: "AIDAEXAMPLEEXAMPLE12", acct: "123456789012", arn: "arn:aws:iam::123456789012:user/tutorial-user" };
+  const FILE = { user: "AIDAEXAMPLEEXAMPLE34", acct: "111122223333", arn: "arn:aws:iam::111122223333:user/old-admin" };
+
+  const json = (w: typeof SSO) =>
+    `{\n    "UserId": "${w.user}",\n    "Account": "${w.acct}",\n    "Arn": "${w.arn}"\n}`;
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="cred-chain"]').forEach((root) => {
+    if (!once(root)) return;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const out = root.querySelector<HTMLElement>('[data-n="out"]')!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-src]")];
+    const rows = [...root.querySelectorAll<HTMLElement>("[data-row]")];
+    const on = new Set<string>(["awsprofile"]);
+
+    function render() {
+      press(btns, (b) => on.has(b.dataset.src!));
+      const order = ["flag", "env", "awsprofile", "file"];
+      const winner = order.find((k) => on.has(k));
+      const wi = winner ? order.indexOf(winner) : order.length;
+      rows.forEach((r, i) => {
+        const k = r.dataset.row!;
+        r.classList.toggle("win", k === winner);
+        r.classList.toggle("risky", k === winner && (k === "env" || k === "file"));
+        r.classList.toggle("cc-skip", i > wi);
+        const em = r.querySelector("em")!;
+        em.textContent = k === winner ? "Used: this one wins"
+          : i > wi ? (on.has(k) ? "Set, but never looked at" : "Never looked at")
+          : "Checked: nothing here";
+      });
+      const cmd = '<span class="d">$ aws sts get-caller-identity' + (on.has("flag") ? " --profile quickcart" : "") + "</span>\n";
+      if (winner === "flag" || winner === "awsprofile") {
+        out.innerHTML = cmd + json(SSO);
+        tell(say, winner === "flag" ? "The --profile option wins" : "AWS_PROFILE wins",
+          (winner === "flag"
+            ? "The option on the command comes first, so the CLI uses the <b>quickcart</b> profile and ignores everything else. "
+            : "Nothing earlier is set, so the CLI uses the profile that <code>AWS_PROFILE</code> names: <b>quickcart</b>. ")
+          + "That profile signs in through IAM Identity Center, so the credentials expire after a few hours. This is the safe setup.", "good");
+      } else if (winner === "env") {
+        out.innerHTML = cmd + json(ENV);
+        tell(say, "Old environment keys win",
+          "Keys in environment variables come before <code>AWS_PROFILE</code>. The CLI uses them and never looks at your profile. Look at the account: <b>123456789012</b>, not yours. Every command now runs against the wrong account, with no warning.", "bad");
+      } else if (winner === "file") {
+        out.innerHTML = cmd + json(FILE);
+        tell(say, "The default profile wins",
+          "Nothing names a profile, so the CLI falls back to <b>default</b>, which holds old long-lived keys for an IAM user. Right account, but keys that never expire, sitting in a file.", "bad");
+      } else {
+        out.innerHTML = cmd + "\nUnable to locate credentials. You can configure credentials by running \"aws configure\".";
+        tell(say, "Nothing found",
+          "The CLI looked everywhere and found nothing, so it stops. Your SSO profile exists, but nothing tells the CLI to use it. Add <code>--profile quickcart</code>, or set <code>AWS_PROFILE</code>.", "");
+      }
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-src]");
+      if (!b) return;
+      const k = b.dataset.src!;
+      if (on.has(k)) on.delete(k); else on.add(k);
+      render();
+    });
+  }));
+</script>

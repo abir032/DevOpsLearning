@@ -1,0 +1,1607 @@
+---
+time: 5 to 7 hours, plus waiting for the database and certificate
+cost: about $6.50 a day while it runs, including Project 1's network; delete it after
+---
+
+On launch night, QuickCart's single server fell over at 7pm, and the app went down with it. This project builds the opposite: an environment where losing a server, or a whole zone, costs seconds of errors instead of an outage, and heals itself with nobody watching.
+
+You'll build it by hand on top of Project 1's network, then **break it on purpose** and measure what customers would have seen: how many requests failed, and how long recovery took. "It seemed fine" doesn't count. Numbers do.
+
+## What you'll have at the end
+
+Choose a failure to see what the environment does about it. Then switch the database between Single-AZ and Multi-AZ and lose the zone again.
+
+<SelfHealingMap />
+
+| Piece | Name | What it's for |
+|---|---|---|
+| Everything from Project 1 | `quickcart-vpc` and the rest | The network, endpoints, security groups and roles |
+| Secret | `quickcart/db` | The database login, never in code or in the launch template |
+| Database | `quickcart-db`, MySQL on RDS | Every order, in the data subnets |
+| App files | in `quickcart-assets-111122223333`, under `app/` | The app, its service file and its log settings. New servers copy them at boot |
+| Certificate | in Certificate Manager | HTTPS. Two paths: your own domain, or self-signed |
+| Launch template | `quickcart-app-lt` | The recipe every app server is built from |
+| Target group | `quickcart-tg` | Which servers get traffic, and the health check that decides |
+| Load balancer | `quickcart-alb` | One HTTPS address in front of every server, in both zones |
+| Auto scaling group | `quickcart-asg` | Keeps 4 servers running across two zones, and replaces any that fail |
+| Logs, alarms and email | `/quickcart/app`, 4 alarms, `quickcart-alerts` | Knowing about a problem before a customer tells you |
+
+## Before you start
+
+You need **Project 1's network, built and passing its checks**: the VPC, subnets, route tables, NAT gateway, endpoints, the four security groups, the `quickcart-assets-111122223333` bucket and `quickcart-app-role`. If you cleaned it up, rebuild stages 1 to 9 of [Project 1](/projects/01-network-by-hand/) first. The test server and flow logs are optional.
+
+Read these first:
+
+| Lesson | What you need from it |
+|---|---|
+| [Servers on EC2](/lessons/ec2/) | Images, instance types and user data |
+| [Load balancers](/lessons/load-balancers/) | Listeners, target groups and health checks |
+| [Auto scaling](/lessons/auto-scaling/) | Desired, minimum and maximum, and replacing failed servers |
+| [Managed databases: RDS](/lessons/rds/) | Subnet groups, Single-AZ and Multi-AZ, backups |
+| [Secrets](/lessons/secrets/) | Why the password lives in Secrets Manager |
+| [Domain names and HTTPS](/lessons/dns-and-https/) | Certificates, and pointing a name at a load balancer |
+| [Logs and metrics](/lessons/logs-and-metrics/) and [Alarms that actually fire](/lessons/alarms/) | Log groups, metric filters and alarms |
+
+You need:
+
+- The console, signed in as in Project 1, with the region set to **US East (N. Virginia) us-east-1**.
+- **AWS CloudShell**, the terminal built into the console: the icon at the top of any console page. It has the AWS CLI, `curl` and `openssl` already installed. You'll use it to run the failure tests from outside the VPC, like a customer.
+- For the trusted-certificate path: a domain you control. Registering one through **Route 53 → Registered domains** costs a few dollars a year for the cheaper endings. Without one, take the self-signed path in stage 5.
+
+## Cost
+
+<Cost kind="paid">about $6.50 a day while everything runs, including Project 1's network. Delete it when you're done.</Cost>
+
+| Resource | Rough price in us-east-1 | For this project |
+|---|---|---|
+| Project 1's network: the NAT gateway, its address and the interface endpoints | see Project 1 | about $3.20 a day |
+| Application Load Balancer | about $0.0225 an hour, plus about $0.008 per capacity unit-hour | about $0.60 a day at test traffic |
+| The load balancer's public addresses | about $0.005 an hour each, one per zone | about $0.24 a day |
+| 4 app servers, `t3.micro`, with 8 GB disks | about $0.0104 an hour each, plus a little for disks | about $1.10 a day |
+| RDS MySQL `db.t4g.micro`, Single-AZ, 20 GB | about $0.016 an hour, plus about $0.12 per GB-month of storage | about $0.50 a day. **Multi-AZ roughly doubles it** |
+| Secrets Manager: 2 secrets | about $0.40 a month each | about 3 cents a day |
+| CloudWatch: 4 alarms and a little log data | about $0.10 per alarm a month; about $0.50 per GB of logs | pennies |
+| SNS email notifications | the first 1,000 emails a month are free | $0 |
+| Public certificate from Certificate Manager | free | $0 |
+| Route 53, trusted path only | about $0.50 a month for the hosted zone, plus the domain's yearly fee | about 2 cents a day, plus the domain |
+
+Some of this may be covered by the AWS free tier on a new account. Prices change; check the AWS pricing pages.
+
+<Note title="Start the database early, and don't leave this running">
+
+The **NAT gateway**, **interface endpoints**, **load balancer**, **database** and **four servers** all bill by the hour, traffic or not. The database takes 10 to 20 minutes to create, so start it (stage 3) and do stages 4 and 5 while it builds. When you finish, the clean-up takes everything down in the right order. Don't leave it running overnight "to finish tomorrow": that's most of a day's cost for nothing.
+
+</Note>
+
+## Stage 1: Check the network from Project 1
+
+Two minutes of checking now saves an hour of confusion later.
+
+<Steps>
+
+<Step title="Check the four things Project 2 depends on">
+
+| Where | Check |
+|---|---|
+| **VPC → Subnets** | Six `quickcart-` subnets, three in each zone. app-a and app-b use their own route tables, whose `0.0.0.0/0` goes to the NAT gateway |
+| **VPC → NAT gateways** | `quickcart-nat-a` is **Available** |
+| **VPC → Endpoints** | Five endpoints, all **Available** |
+| **VPC → Security groups** → `quickcart-app-sg` → **Outbound rules** | **All traffic** to `0.0.0.0/0`. Without it, new servers can't finish booting |
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+Every row above checks out. If anything is missing, go back to that stage of Project 1 before going on.
+
+</See>
+
+## Stage 2: The database password
+
+The password has to reach the app without ever appearing in the launch template, in git, or in a file someone might screenshot. It lives in Secrets Manager, and the app reads it at boot through the endpoint from Project 1.
+
+<Steps>
+
+<Step title="Make a strong password">
+
+The Secrets Manager console has no password generator for this kind of secret, so use the CLI in CloudShell. Open **CloudShell** from the console's top bar and run:
+
+```sh
+aws secretsmanager get-random-password --password-length 24 --exclude-punctuation --query RandomPassword --output text
+```
+
+| Part | What it means |
+|---|---|
+| `aws secretsmanager get-random-password` | ask Secrets Manager to generate a random password. It stores nothing |
+| `--password-length 24` | 24 characters long |
+| `--exclude-punctuation` | letters and numbers only. RDS refuses some symbols in a master password, such as `/`, `@` and quotes |
+| `--query RandomPassword --output text` | print only the password, as plain text |
+
+```output
+q7RkT2vWm9xLp4ZsN8cYh3Ja
+```
+
+Yours is different. Copy it; you'll paste it twice in the next few minutes, then never need it again.
+
+</Step>
+
+<Step title="Store it as a secret">
+
+<ConsolePath path="Secrets Manager > Secrets > Store a new secret" />
+
+| Field | Enter |
+|---|---|
+| Secret type | **Other type of secret** |
+| Key/value pairs | Key `username`, value `quickcart_admin`. Choose **Add row**: key `password`, value the password you just generated |
+| Encryption key | **aws/secretsmanager** |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Secret name | `quickcart/db` |
+| Description | `Master login for quickcart-db` |
+
+Choose **Next**, leave rotation off, choose **Next**, then **Store**.
+
+The database's address isn't in the secret. An address isn't secret, and it goes in the app's settings instead.
+
+</Step>
+
+<Step title="Let the app role read it">
+
+In Project 1, the role could read only `quickcart/test`. Add this secret, and nothing else.
+
+<ConsolePath path="IAM > Roles > quickcart-app-role > Permissions > quickcart-read-secret > Edit" />
+
+Replace the JSON with this, using your own account ID:
+
+```json title="quickcart-read-secret" ph="111122223333"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheAppSecrets",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": [
+        "arn:aws:secretsmanager:us-east-1:111122223333:secret:quickcart/test-*",
+        "arn:aws:secretsmanager:us-east-1:111122223333:secret:quickcart/db-*"
+      ]
+    }
+  ]
+}
+```
+
+| Part | What it means |
+|---|---|
+| `"Resource": [ ]` | a list, so one statement can cover two named secrets |
+| `quickcart/db-*` | the new secret. The `-*` matches the six random characters AWS adds to its ARN |
+
+Choose **Next**, then **Save changes**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart/db` in the **Secrets** list. On `quickcart-app-role`, the `quickcart-read-secret` policy lists two resources, both ending in `-*`.
+
+</See>
+
+## Stage 3: The database
+
+<Steps>
+
+<Step title="Create a subnet group for the data subnets">
+
+A subnet group tells RDS which subnets it may use. RDS insists on two zones, even for a Single-AZ database.
+
+<ConsolePath path="Aurora and RDS > Subnet groups > Create DB subnet group" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-db-subnets` |
+| Description | `QuickCart data subnets` |
+| VPC | `quickcart-vpc` |
+| Availability Zones | `us-east-1a` and `us-east-1b` |
+| Subnets | `quickcart-data-a` (`10.0.21.0/24`) and `quickcart-data-b` (`10.0.22.0/24`), **and nothing else** |
+
+Choose **Create**. The subnet list shows every subnet in the chosen zones. Tick a public one by mistake and RDS could place the database somewhere routable.
+
+</Step>
+
+<Step title="Create the database">
+
+<ConsolePath path="Aurora and RDS > Databases > Create database" />
+
+| Field | Enter |
+|---|---|
+| Database creation method | **Standard create** |
+| Engine type | **MySQL** |
+| Engine version | The default: the newest **MySQL 8.4** version offered |
+| Templates | **Dev/Test**. If your account only lets you choose **Free tier**, choose that |
+| Deployment options | **Single-AZ DB instance deployment (1 instance)**. See the note below |
+| DB instance identifier | `quickcart-db` |
+| Master username | `quickcart_admin` |
+| Credentials management | **Self managed** |
+| Master password, Confirm master password | The password from stage 2 |
+| DB instance class | **Burstable classes** → `db.t4g.micro` |
+| Storage type | **General Purpose SSD (gp3)** |
+| Allocated storage | `20` GiB |
+| Enable storage autoscaling | Unticked |
+| Compute resource | **Don't connect to an EC2 compute resource** |
+| Virtual private cloud (VPC) | `quickcart-vpc` |
+| DB subnet group | `quickcart-db-subnets` |
+| Public access | **No** |
+| VPC security group (firewall) | **Choose existing** → `quickcart-db-sg`. Remove `default` |
+| Availability Zone | **No preference** |
+| Database authentication | **Password authentication** |
+
+Open **Additional configuration** near the bottom. It's easy to miss, and one setting in it matters:
+
+| Field | Enter |
+|---|---|
+| Initial database name | `quickcart`. **Don't skip this.** Without it, RDS creates a server with no database inside, and the app fails later with `Unknown database` |
+| Backup retention period | `1` day |
+| Enable encryption | Ticked, with the default key |
+| Enable deletion protection | Unticked, so you can clean up |
+
+Leave everything else at its default, and choose **Create database**. It takes 10 to 20 minutes. Carry on with stages 4 and 5 while it builds.
+
+<Note title="Single-AZ or Multi-AZ: be honest about which you built">
+
+**Multi-AZ** keeps a synchronised standby copy in the other zone. If the primary's zone fails, RDS points the same address at the standby, typically within one to two minutes, with no change to the app. It roughly doubles the database's cost.
+
+Some account plans don't allow it. On AWS's free plan, for example, the production templates and both Multi-AZ options may be greyed out. That's a limit of the plan, not a mistake in your setup.
+
+This guide builds **Single-AZ**, so everyone can follow it. The consequence matters later: a Single-AZ database lives in **one** zone. The zone failure test in *Prove it* then proves that the **app tier** survives losing a zone. It does **not** prove the data tier does. If your account allows Multi-AZ and you're happy to pay double for the database, choose **Multi-AZ DB instance deployment (2 instances)** here, and *Prove it* includes a failover test for you.
+
+</Note>
+
+</Step>
+
+<Step title="Copy the database's address">
+
+When the status reads **Available**:
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Connectivity & security" />
+
+<See>
+
+An **Endpoint** like `quickcart-db.abcdefghijkl.us-east-1.rds.amazonaws.com`, on port `3306`. Copy it. This guide calls it `DB_ENDPOINT`.
+
+</See>
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart-db` with **Status: Available**, **Engine: MySQL Community**, **Size: db.t4g.micro**, and on **Connectivity & security**: **Publicly accessible: No**, **VPC security groups: quickcart-db-sg**, and **Subnet group: quickcart-db-subnets**. On **Configuration**, **DB name: quickcart**.
+
+</See>
+
+## Stage 4: The app files
+
+Every new server needs the app. Instead of pasting the whole app into the launch template, you put five files in the S3 bucket. At boot, each server copies them through the free S3 endpoint, using the role's read-only access to that one bucket.
+
+On your Mac, make a folder called `quickcart-app` and create these five files in it.
+
+<Steps>
+
+<Step title="The settings">
+
+The four settings the app needs. None of them is a password. Put your own database address in place of `DB_ENDPOINT`:
+
+```ini title="settings.env" ph="DB_ENDPOINT"
+AWS_REGION=us-east-1
+SECRET_ID=quickcart/db
+DB_HOST=DB_ENDPOINT
+DB_NAME=quickcart
+```
+
+| Setting | What it is |
+|---|---|
+| `AWS_REGION` | The region of the secret |
+| `SECRET_ID` | The name of the secret that holds the database login |
+| `DB_HOST` | The database's address, from stage 3 |
+| `DB_NAME` | The database inside the server |
+
+Keeping them in one file means the app and the seeding script below always agree.
+
+</Step>
+
+<Step title="The app">
+
+A small web app with three pages. `/` counts the orders in the database. `/health` says the server is alive, and doesn't touch the database, on purpose. `/burn` keeps the CPU busy for five seconds, to test scaling. Every request writes one line of JSON to a log file.
+
+```python title="app.py"
+"""QuickCart's orders app for Project 2."""
+import json
+import logging
+import os
+import ssl
+import time
+import urllib.request
+
+import boto3
+import pymysql
+from flask import Flask, jsonify
+
+REGION = os.environ["AWS_REGION"]
+SECRET_ID = os.environ["SECRET_ID"]
+DB_HOST = os.environ["DB_HOST"]
+DB_NAME = os.environ["DB_NAME"]
+
+METADATA = "http://169.254.169.254/latest/"
+
+
+def metadata(path):
+    """Ask the instance metadata service (IMDSv2) about this server."""
+    token_request = urllib.request.Request(
+        METADATA + "api/token",
+        method="PUT",
+        headers={"X-aws-ec2-metadata-token-ttl-seconds": "300"},
+    )
+    token = urllib.request.urlopen(token_request, timeout=2).read().decode()
+    request = urllib.request.Request(
+        METADATA + "meta-data/" + path,
+        headers={"X-aws-ec2-metadata-token": token},
+    )
+    return urllib.request.urlopen(request, timeout=2).read().decode()
+
+
+INSTANCE_ID = metadata("instance-id")
+ZONE = metadata("placement/availability-zone")
+
+log = logging.getLogger("quickcart")
+handler = logging.FileHandler("/var/log/app/app.log")
+handler.setFormatter(logging.Formatter("%(message)s"))
+log.addHandler(handler)
+log.setLevel(logging.INFO)
+
+
+def write_log(level="INFO", **fields):
+    """Write one line of JSON, so CloudWatch can filter on any field."""
+    fields["level"] = level
+    fields["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fields["instance_id"] = INSTANCE_ID
+    fields["zone"] = ZONE
+    log.info(json.dumps(fields))
+
+
+secrets = boto3.client("secretsmanager", region_name=REGION)
+db_login = None
+
+TLS = ssl.create_default_context()
+TLS.check_hostname = False
+TLS.verify_mode = ssl.CERT_NONE
+
+
+def login():
+    """Read the database login from Secrets Manager once, then reuse it."""
+    global db_login
+    if db_login is None:
+        value = secrets.get_secret_value(SecretId=SECRET_ID)["SecretString"]
+        db_login = json.loads(value)
+        write_log(event="secret_loaded")
+    return db_login
+
+
+def connect():
+    """A fresh, encrypted connection per request, giving up after 3 seconds."""
+    user = login()
+    return pymysql.connect(
+        host=DB_HOST,
+        user=user["username"],
+        password=user["password"],
+        database=DB_NAME,
+        ssl=TLS,
+        connect_timeout=3,
+        read_timeout=3,
+    )
+
+
+app = Flask(__name__)
+
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", instance_id=INSTANCE_ID, zone=ZONE)
+
+
+@app.get("/")
+def orders():
+    started = time.time()
+    try:
+        with connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM orders")
+                (count,) = cursor.fetchone()
+        took = int((time.time() - started) * 1000)
+        write_log(route="/", status=200, latency_ms=took, orders=count)
+        return jsonify(instance_id=INSTANCE_ID, zone=ZONE, orders=count)
+    except Exception as error:
+        took = int((time.time() - started) * 1000)
+        write_log(
+            level="ERROR",
+            route="/",
+            status=500,
+            latency_ms=took,
+            error_type=type(error).__name__,
+            message=str(error)[:300],
+        )
+        return jsonify(error="database_unavailable", instance_id=INSTANCE_ID, zone=ZONE), 500
+
+
+@app.get("/burn")
+def burn():
+    started = time.time()
+    while time.time() - started < 5:
+        pow(3, 200000)
+    write_log(route="/burn", status=200, latency_ms=5000)
+    return jsonify(burned=True, instance_id=INSTANCE_ID, zone=ZONE)
+```
+
+| Part | What it does |
+|---|---|
+| `os.environ[...]` | Reads the four settings, which the service file loads from `settings.env` |
+| `metadata()` | Asks the server's metadata service for its own instance ID and zone, using the token that IMDSv2 requires. Every response and log line includes them, so you can see which server answered |
+| `write_log()` | Writes each event as one line of JSON. CloudWatch can then filter on `level`, `error_type` or any other field |
+| `TLS` | Encrypt the connection to the database. It doesn't check the database's certificate, because that needs AWS's RDS certificate bundle on the server. Inside a private subnet, behind the security group chain, that's an acceptable trade for a project. In production, download the bundle and verify it: [Managed databases: RDS](/lessons/rds/) shows how |
+| `login()` | Reads the database login from Secrets Manager the first time it's needed, then keeps it in memory |
+| `connect()` | A fresh database connection per request, which gives up after 3 seconds instead of hanging |
+| `/health` | Says "ok" without touching the database. **Shallow on purpose:** see below |
+| `/` | Counts the orders. If anything fails, it logs the error type and message, and returns a 500 |
+| `/burn` | Five seconds of pure CPU work, to push the CPU up |
+
+**Why `/health` doesn't check the database.** A health check that queries the database sounds more thorough. But if the database has a problem, **every** server fails its check at the same moment. The load balancer then removes all of them, and a database problem becomes a total outage, with the auto scaling group replacing perfectly healthy servers in a loop. The health check answers one question: *is this server able to serve?* Whether the database is reachable is a job for an alarm and a human.
+
+**Why encrypt at all?** MySQL 8.4, the version RDS offers by default, signs users in with a method that needs either an encrypted connection or an extra library to send the password safely. Encrypting is the simpler and safer of the two.
+
+</Step>
+
+<Step title="The seeding script">
+
+The app expects an `orders` table. This script creates the database and tables if they're missing, and adds a few sample orders. Running it twice does no harm.
+
+```python title="seed.py"
+"""Create QuickCart's database, tables and a few sample orders. Safe to run twice."""
+import json
+import ssl
+
+import boto3
+import pymysql
+
+settings = {}
+with open("/opt/app/settings.env") as file:
+    for line in file:
+        line = line.strip()
+        if line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            settings[key] = value
+
+secrets = boto3.client("secretsmanager", region_name=settings["AWS_REGION"])
+secret = secrets.get_secret_value(SecretId=settings["SECRET_ID"])
+login = json.loads(secret["SecretString"])
+
+tls = ssl.create_default_context()
+tls.check_hostname = False
+tls.verify_mode = ssl.CERT_NONE
+
+conn = pymysql.connect(
+    host=settings["DB_HOST"],
+    user=login["username"],
+    password=login["password"],
+    ssl=tls,
+    connect_timeout=5,
+    autocommit=True,
+)
+
+statements = [
+    "CREATE DATABASE IF NOT EXISTS " + settings["DB_NAME"],
+    "USE " + settings["DB_NAME"],
+    """CREATE TABLE IF NOT EXISTS customers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS orders (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        customer_id INT NOT NULL,
+        amount DECIMAL(10, 2) NOT NULL,
+        status ENUM('pending', 'paid', 'refunded', 'cancelled') NOT NULL DEFAULT 'pending',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customers (id)
+    )""",
+    """INSERT IGNORE INTO customers (id, name, email) VALUES
+        (1, 'Ana', 'ana@example.com'),
+        (2, 'Kofi', 'kofi@example.com'),
+        (3, 'Noor', 'noor@example.com')""",
+    """INSERT IGNORE INTO orders (id, customer_id, amount, status) VALUES
+        (1, 1, 24.50, 'paid'),
+        (2, 1, 12.00, 'paid'),
+        (3, 2, 31.75, 'pending'),
+        (4, 2, 8.20, 'refunded'),
+        (5, 3, 45.00, 'paid')""",
+]
+
+with conn:
+    with conn.cursor() as cursor:
+        for statement in statements:
+            cursor.execute(statement)
+        cursor.execute("SELECT COUNT(*) FROM orders")
+        (count,) = cursor.fetchone()
+
+print("orders in the database:", count)
+```
+
+| Part | What it does |
+|---|---|
+| Reading `settings.env` | Uses the same four settings as the app, so there's one place to change them |
+| `get_secret_value` | Reads the login from Secrets Manager, so you never type the password |
+| `CREATE DATABASE IF NOT EXISTS` | Creates the `quickcart` database if RDS didn't |
+| `CREATE TABLE IF NOT EXISTS` | Two tables: customers, and their orders. Each order must belong to a real customer (`FOREIGN KEY`) |
+| `INSERT IGNORE` with fixed `id`s | Adds the sample rows, and silently skips any that already exist. That's what makes running it twice safe |
+| `print(…)` | Shows how many orders there are at the end |
+
+</Step>
+
+<Step title="The service file">
+
+This tells Linux how to run the app, and restarts it if it crashes:
+
+```ini title="quickcart-app.service"
+[Unit]
+Description=QuickCart orders app
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/opt/app/settings.env
+WorkingDirectory=/opt/app
+ExecStart=/usr/local/bin/gunicorn --workers 2 --bind 0.0.0.0:80 app:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+| Line | What it does |
+|---|---|
+| `After=network-online.target` | Start only once the network is up |
+| `EnvironmentFile=/opt/app/settings.env` | Load the four settings as environment variables for the app |
+| `WorkingDirectory=/opt/app` | Run from the folder the app is copied into |
+| `ExecStart=… gunicorn --workers 2 --bind 0.0.0.0:80 app:app` | Run the app with gunicorn, a production web server: 2 worker processes, on port 80, which is the port the target group checks. `app:app` means "the `app` object in `app.py`" |
+| `Restart=always` | If the app crashes, start it again |
+| `WantedBy=multi-user.target` | Start it at every boot |
+
+</Step>
+
+<Step title="The log settings">
+
+This tells the CloudWatch agent which log files to send to CloudWatch:
+
+```json title="cloudwatch-agent.json"
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/app/app.log",
+            "log_group_name": "/quickcart/app",
+            "log_stream_name": "{instance_id}"
+          },
+          {
+            "file_path": "/var/log/cloud-init-output.log",
+            "log_group_name": "/quickcart/bootstrap",
+            "log_stream_name": "{instance_id}"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+| Setting | What it does |
+|---|---|
+| `file_path` | Which file on the server to follow |
+| `log_group_name` | Where it goes in CloudWatch. The agent creates the group if it doesn't exist |
+| `log_stream_name` `{instance_id}` | One stream per server, named after it, so you can see which server wrote what |
+| The second file, `cloud-init-output.log` | Everything the boot script printed. When a server fails to boot, the reason is in here |
+
+</Step>
+
+<Step title="Upload the five files">
+
+<ConsolePath path="S3 > quickcart-assets-111122223333 > Create folder" />
+
+Name the folder `app` and choose **Create folder**. Open it, choose **Upload**, add all five files, and choose **Upload**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+The bucket's `app/` folder holds exactly five files: `app.py`, `cloudwatch-agent.json`, `quickcart-app.service`, `seed.py` and `settings.env`. Open `settings.env`, choose **Open**, and check that the `DB_HOST` line has your real database address, not `DB_ENDPOINT`.
+
+</See>
+
+## Stage 5: The certificate
+
+The load balancer won't accept an HTTPS listener without a certificate. There are two ways to get one. Choose one path and follow only that one.
+
+| | Path A: a domain you own | Path B: self-signed |
+|---|---|---|
+| What you need | A domain, with its DNS in Route 53 | Nothing |
+| Cost | Free certificate; the domain costs a few dollars a year | Free |
+| Browsers | Trusted: a padlock, no warning | A full-page warning. Test tools must skip checking with `curl -k` |
+| Renewal | Automatic, as long as the validation record stays in DNS | None: it expires after the 30 days you give it |
+| Fit for real customers | Yes | **Never.** It's encrypted, but nothing proves who's on the other end |
+
+Path B teaches everything this project is about. What it can't show you is the trust part of HTTPS, which [Domain names and HTTPS](/lessons/dns-and-https/) covers.
+
+<Steps>
+
+<Step title="Path A: request a public certificate">
+
+<ConsolePath path="Certificate Manager > Request certificate" />
+
+| Field | Enter |
+|---|---|
+| Certificate type | **Request a public certificate** |
+| Fully qualified domain name | `shop.example.com`, using your own domain |
+| Allow export | **Disable export**. Exportable certificates cost extra, and the load balancer doesn't need one |
+| Validation method | **DNS validation** |
+| Key algorithm | **RSA 2048** |
+
+Choose **Request**. Open the certificate, choose **Create records in Route 53**, and then **Create records**.
+
+**Why DNS validation:** Certificate Manager renews the certificate automatically for as long as that record exists. Email validation needs a person to click a link at each renewal.
+
+</Step>
+
+<Step title="Path B: make a self-signed certificate">
+
+In **CloudShell**:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout quickcart.key -out quickcart.crt -subj "/CN=shop.example.com" -addext "subjectAltName=DNS:shop.example.com"
+```
+
+| Part | What it means |
+|---|---|
+| `openssl req -x509` | make a certificate that signs itself, instead of a request for someone else to sign |
+| `-newkey rsa:2048` | make a new 2048-bit RSA private key to go with it |
+| `-nodes` | don't protect the key with a passphrase: the load balancer has no way to type one |
+| `-days 30` | valid for 30 days |
+| `-keyout quickcart.key`, `-out quickcart.crt` | the files to write: the private key and the certificate |
+| `-subj "/CN=shop.example.com"` | the name the certificate is for |
+| `-addext "subjectAltName=DNS:shop.example.com"` | the same name in the field that browsers and tools actually check |
+
+It prints a few lines of dots and plus signs as it generates the key. Now print each file, to copy it:
+
+```sh
+cat quickcart.crt
+```
+
+| Part | What it means |
+|---|---|
+| `cat` | print a file's contents |
+| `quickcart.crt` | the certificate |
+
+```output
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUX1c3m4p8Yq2vR0bT9k6Hn5d0aWUwDQYJKoZIhvcNAQEL
+-----END CERTIFICATE-----
+```
+
+Yours has many more lines between the first and last. Then:
+
+<ConsolePath path="Certificate Manager > Import certificate" />
+
+| Field | Enter |
+|---|---|
+| Certificate body | Everything `cat quickcart.crt` printed, including the `BEGIN` and `END` lines |
+| Certificate private key | Everything `cat quickcart.key` prints, the same way |
+| Certificate chain | Leave empty: a self-signed certificate has no chain |
+
+Choose **Next**, then **Import**. The private key is now stored in Certificate Manager. Delete the local copy with `rm quickcart.key` once the import succeeds.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+In **Certificate Manager**, the certificate for `shop.example.com` (with your own name on path A) shows **Status: Issued**. On path A that can take a few minutes after the DNS record is created. On path B it's **Issued** straight away, and its **Type** says **Imported**.
+
+</See>
+
+## Stage 6: The launch template
+
+The launch template is the recipe every app server is built from. Get it right, and the auto scaling group needs no more attention.
+
+<Steps>
+
+<Step title="Create the template">
+
+<ConsolePath path="EC2 > Launch templates > Create launch template" />
+
+| Field | Enter |
+|---|---|
+| Launch template name | `quickcart-app-lt` |
+| Template version description | `v1: app from S3` |
+| Auto Scaling guidance | Ticked |
+| Application and OS Images | **Quick Start → Amazon Linux → Amazon Linux 2023 AMI**, 64-bit (x86) |
+| Instance type | `t3.micro` |
+| Key pair name | **Don't include in launch template**. You'll use Session Manager |
+| Subnet | **Don't include in launch template**. The auto scaling group chooses |
+| Firewall (security groups) | **Select existing security group** → `quickcart-app-sg` |
+
+Open **Advanced details**:
+
+| Field | Enter |
+|---|---|
+| IAM instance profile | `quickcart-app-role` |
+| Metadata accessible | **Enabled** |
+| Metadata version | **V2 only (token required)**. This blocks a whole class of attack in which a vulnerable web app is tricked into fetching the server's credentials |
+| User data | The script below |
+
+</Step>
+
+<Step title="The boot script">
+
+This runs once, as root, the first time each server starts. Put your own bucket name in place of the highlighted account number:
+
+```sh title="User data" ph="111122223333"
+#!/bin/bash
+set -euxo pipefail
+dnf install -y python3-pip amazon-cloudwatch-agent
+pip3 install flask pymysql boto3 gunicorn
+mkdir -p /opt/app /var/log/app
+aws s3 cp s3://quickcart-assets-111122223333/app/ /opt/app/ --recursive --region us-east-1
+cp /opt/app/quickcart-app.service /etc/systemd/system/quickcart-app.service
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/app/cloudwatch-agent.json
+systemctl daemon-reload
+systemctl enable --now quickcart-app
+```
+
+| Line | What it does |
+|---|---|
+| `#!/bin/bash` | Run this with bash |
+| `set -euxo pipefail` | Stop at the first error, and print each command before running it. Both help when you read the boot log |
+| `dnf install -y …` | Install pip and the CloudWatch agent. The packages come through the NAT gateway |
+| `pip3 install …` | Install the app's Python libraries: Flask, the MySQL driver, the AWS SDK and gunicorn |
+| `mkdir -p /opt/app /var/log/app` | Make the app's folder and its log folder |
+| `aws s3 cp … --recursive` | Copy the five files from the bucket, through the S3 gateway endpoint. The role's credentials are used automatically |
+| `cp … /etc/systemd/system/` | Put the service file where Linux looks for services. It loads `settings.env` from `/opt/app` |
+| `amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:…` | Load the log settings (`fetch-config`) for an EC2 server (`-m ec2`), and start the agent (`-s`) |
+| `systemctl daemon-reload` | Make Linux read the new service file |
+| `systemctl enable --now quickcart-app` | Start the app now, and at every boot |
+
+Choose **Create launch template**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart-app-lt` in **Launch templates**, **Latest version: 1**. Open it, then the **Details** of version 1: **Security groups** shows `quickcart-app-sg`, **IAM instance profile** shows `quickcart-app-role`, and **Advanced details** shows **Metadata version: V2 only (token required)**.
+
+</See>
+
+## Stage 7: The target group
+
+A target group isn't a network resource. It has no address. It answers two questions: which servers get traffic, and are they healthy **right now**? Every setting below is a choice you should be able to explain.
+
+<Steps>
+
+<Step title="Create it">
+
+<ConsolePath path="EC2 > Target groups > Create target group" />
+
+| Field | Enter |
+|---|---|
+| Choose a target type | **Instances** |
+| Target group name | `quickcart-tg` |
+| Protocol : Port | **HTTP** : `80` |
+| IP address type | **IPv4** |
+| VPC | `quickcart-vpc`. A target group can never move to another VPC, so check this one |
+| Protocol version | **HTTP1** |
+| Health check protocol | **HTTP** |
+| Health check path | `/health` |
+
+Open **Advanced health check settings**:
+
+| Setting | Enter | Why |
+|---|---|---|
+| Health check port | **Traffic port** | Check the same port that real requests use |
+| Healthy threshold | `2` | Two passes in a row before a server gets traffic |
+| Unhealthy threshold | `2` | Two failures in a row before it's removed. One would react to a single blip |
+| Timeout | `5` seconds | A slower answer counts as a failure. Must be less than the interval |
+| Interval | `10` seconds | How often each server is checked |
+| Success codes | `200` | Only a real 200 counts; a redirect or an error fails |
+
+Choose **Next**. Register **no** targets: the auto scaling group does that. Choose **Create target group**.
+
+**The number to remember:** a dead server is noticed after interval × unhealthy threshold = 10 × 2 = **about 20 seconds**, plus up to one more interval. Requests sent to it in that window fail. That's the ceiling you'll measure against in *Prove it*.
+
+</Step>
+
+<Step title="Shorten the drain time">
+
+<ConsolePath path="EC2 > Target groups > quickcart-tg > Attributes > Edit" />
+
+| Field | Enter |
+|---|---|
+| Deregistration delay | `30` seconds |
+
+Choose **Save changes**.
+
+When a server is removed on purpose, the load balancer stops sending it **new** requests but waits this long for requests already in progress to finish. The default is 300 seconds, which makes every test and every scale-in drag. 30 is plenty for requests that take milliseconds.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart-tg` with **Target type: Instance**, **Protocol : Port: HTTP: 80**, **VPC: quickcart-vpc**, and on **Health checks**: path `/health`, healthy 2, unhealthy 2, timeout 5, interval 10, success codes 200. **Attributes** shows a deregistration delay of 30 seconds. There are no targets yet.
+
+</See>
+
+## Stage 8: The load balancer
+
+<Steps>
+
+<Step title="Create the load balancer">
+
+<ConsolePath path="EC2 > Load balancers > Create load balancer > Application Load Balancer > Create" />
+
+| Field | Enter |
+|---|---|
+| Load balancer name | `quickcart-alb` |
+| Scheme | **Internet-facing** |
+| Load balancer IP address type | **IPv4** |
+| VPC | `quickcart-vpc` |
+| Availability Zones and subnets | Tick **us-east-1a** → `quickcart-public-a` and **us-east-1b** → `quickcart-public-b` |
+| Security groups | `quickcart-alb-sg`. Remove `default` |
+
+Under **Listeners and routing**, change the first listener:
+
+| Field | Enter |
+|---|---|
+| Protocol | **HTTPS** |
+| Port | `443` |
+| Default action | **Forward to target groups** → `quickcart-tg` |
+| Security policy | Leave the recommended default |
+| Default SSL/TLS server certificate | **From ACM** → the certificate from stage 5 |
+
+Choose **Create load balancer**. It takes a few minutes to become **Active**.
+
+</Step>
+
+<Step title="Redirect plain HTTP to HTTPS">
+
+<ConsolePath path="EC2 > Load balancers > quickcart-alb > Listeners and rules > Add listener" />
+
+| Field | Enter |
+|---|---|
+| Protocol : Port | **HTTP** : `80` |
+| Default action | **Redirect to URL** |
+| Redirect | **URI parts**: Protocol **HTTPS**, Port `443` |
+| Status code | **301 - Permanently moved** |
+
+Choose **Add**. Someone who types the address without `https://` now gets sent to HTTPS, instead of an error or, worse, an unencrypted page.
+
+</Step>
+
+<Step title="Path A only: point your name at the load balancer">
+
+<ConsolePath path="Route 53 > Hosted zones > example.com > Create record" />
+
+| Field | Enter |
+|---|---|
+| Record name | `shop` |
+| Record type | **A** |
+| Alias | On |
+| Route traffic to | **Alias to Application and Classic Load Balancer** → **US East (N. Virginia)** → `quickcart-alb` |
+| Routing policy | **Simple routing** |
+| Evaluate target health | **Yes** |
+
+Choose **Create records**. An alias record follows the load balancer's addresses as they change, which a record with a fixed address never would.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart-alb` with **State: Active**, in two zones, with two listeners: **HTTPS:443** forwarding to `quickcart-tg`, and **HTTP:80** redirecting to HTTPS. Copy its **DNS name**, like `quickcart-alb-1234567890.us-east-1.elb.amazonaws.com`. On path B, that's the address you'll test against. The target group still has no targets, so for now the address returns `503`.
+
+</See>
+
+## Stage 9: The auto scaling group
+
+This is the part that makes the environment heal itself. It keeps the right number of servers running, registers them with the target group, replaces any that fail, and keeps the two zones balanced.
+
+<Steps>
+
+<Step title="Create the group">
+
+<ConsolePath path="EC2 > Auto Scaling groups > Create Auto Scaling group" />
+
+**Step 1: Choose launch template**
+
+| Field | Enter |
+|---|---|
+| Auto Scaling group name | `quickcart-asg` |
+| Launch template | `quickcart-app-lt`, version **Latest** |
+
+**Step 2: Choose instance launch options**
+
+| Field | Enter |
+|---|---|
+| VPC | `quickcart-vpc` |
+| Availability Zones and subnets | `quickcart-app-a` and `quickcart-app-b`. **Only the app subnets** |
+| Availability Zone distribution | **Balanced best effort** |
+
+**Step 3: Integrate with other services**
+
+| Field | Enter |
+|---|---|
+| Load balancing | **Attach to an existing load balancer** → **Choose from your load balancer target groups** → `quickcart-tg` |
+| Turn on Elastic Load Balancing health checks | **Ticked** |
+| Health check grace period | `300` seconds |
+
+**Step 4: Configure group size and scaling**
+
+| Field | Enter |
+|---|---|
+| Desired capacity | `4` |
+| Min desired capacity | `2` |
+| Max desired capacity | `8` |
+| Automatic scaling | **Target tracking scaling policy** |
+| Metric type | **Average CPU utilization** |
+| Target value | `50` |
+| Instance warmup | `300` seconds |
+
+**Step 5** (notifications): skip. **Step 6: Add tags**: key `Name`, value `quickcart-app`. Then **Create Auto Scaling group**.
+
+| Choice | Why |
+|---|---|
+| ELB health checks on | The default EC2 check only asks "is the machine running?". If the app crashes but Linux is fine, that check passes forever. The ELB check uses `/health`, so a server that can't serve is replaced |
+| Grace period 300 seconds | Boot, packages and the app take a minute or two. Health checks start counting only after the grace period. Set it too short and servers get killed halfway through booting, replaced, and killed again, forever |
+| Desired 4, not 2 | With 2, losing a zone leaves 1 server carrying everything. With 4, each zone alone has 2 servers that can carry the whole load |
+| Minimum 2 | Scaling in never drops below one server per zone |
+| CPU target 50% | Add servers when the average CPU stays above half, long before they're overloaded |
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+After about five minutes, **EC2 → Target groups → quickcart-tg → Targets** lists **4 healthy** targets, two in `us-east-1a` and two in `us-east-1b`. If they cycle between **initial** and **unhealthy**, go to *Troubleshooting* before going on.
+
+</See>
+
+Now test from CloudShell. On path A, use your own name. On path B, use the load balancer's DNS name. On path A you can leave out `-k`.
+
+```sh ph="shop.example.com"
+curl -sk https://shop.example.com/health
+```
+
+| Part | What it means |
+|---|---|
+| `curl -s` | fetch a page, quietly |
+| `-k` | don't check the certificate. **Needed on path B only**, where the certificate is self-signed |
+| `https://shop.example.com/health` | the health page, through the load balancer. **Use your own name, or the load balancer's DNS name** |
+
+```output
+{"instance_id":"i-0a1b2c3d","status":"ok","zone":"us-east-1b"}
+```
+
+Run it a few more times: the instance ID and zone change as the load balancer spreads the requests. Now try the main page:
+
+```sh ph="shop.example.com"
+curl -sk https://shop.example.com/
+```
+
+| Part | What it means |
+|---|---|
+| `curl -sk` | fetch quietly, without checking the certificate |
+| `https://shop.example.com/` | the main page, which counts the orders |
+
+```output
+{"error":"database_unavailable","instance_id":"i-0a1b2c3d","zone":"us-east-1a"}
+```
+
+**That error is expected.** The database has no `orders` table yet. The next stage creates it.
+
+## Stage 10: Seed the database
+
+<Steps>
+
+<Step title="Run the seeding script on one app server">
+
+<ConsolePath path="EC2 > Instances > any quickcart-app instance > Connect > Session Manager > Connect" />
+
+In the Session Manager terminal:
+
+```sh
+python3 /opt/app/seed.py
+```
+
+| Part | What it means |
+|---|---|
+| `python3` | run a Python program |
+| `/opt/app/seed.py` | the seeding script, which the boot script copied from the bucket |
+
+```output
+orders in the database: 5
+```
+
+That one command read the login from Secrets Manager through its endpoint, using the server's role, and reached the database through the security group chain. You never saw or typed the password. Close the Session Manager tab.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+From CloudShell:
+
+```sh ph="shop.example.com"
+curl -sk https://shop.example.com/
+```
+
+| Part | What it means |
+|---|---|
+| `curl -sk https://shop.example.com/` | fetch the main page again. **Use your own address** |
+
+```output
+{"instance_id":"i-0a1b2c3d","orders":5,"zone":"us-east-1a"}
+```
+
+Five orders, from whichever server answered. Every piece you've built just took part in that one request: the load balancer, a server built from the template, the role, the secret through its endpoint, and the database through the security group chain.
+
+## Stage 11: Alarms that fire
+
+An alarm you've never seen go off is a guess. You'll build four alarms that email you, then set one off on purpose.
+
+<Steps>
+
+<Step title="An email topic, confirmed">
+
+<ConsolePath path="Simple Notification Service > Topics > Create topic" />
+
+| Field | Enter |
+|---|---|
+| Type | **Standard** |
+| Name | `quickcart-alerts` |
+
+Choose **Create topic**, then **Create subscription**:
+
+| Field | Enter |
+|---|---|
+| Protocol | **Email** |
+| Endpoint | Your email address |
+
+Choose **Create subscription**. **Open the email from AWS Notifications and choose Confirm subscription.** Until you do, the subscription is **Pending confirmation** and every alarm email is silently dropped.
+
+</Step>
+
+<Step title="Turn app errors into a number">
+
+The app logs each failure as a JSON line with `"level": "ERROR"`. A metric filter counts those lines, and an alarm can watch the count.
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/app > Actions > Create metric filter" />
+
+| Field | Enter |
+|---|---|
+| Filter pattern | `{ $.level = "ERROR" }` |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Filter name | `quickcart-app-errors` |
+| Metric namespace | `QuickCart/App` |
+| Metric name | `AppErrorCount` |
+| Metric value | `1` |
+| Default value | `0` |
+| Unit | **Count** |
+
+Choose **Next**, then **Create metric filter**. The `$.level` pattern only works because the app logs JSON. With plain text lines, you'd be matching words and hoping.
+
+If `/quickcart/app` isn't in the list yet, the agent hasn't sent anything. Load the main page a few times from CloudShell, and it appears.
+
+</Step>
+
+<Step title="Four alarms">
+
+For each row, go to **CloudWatch → Alarms → Create alarm → Select metric**, find the metric, and fill in the rest. Every alarm sends to `quickcart-alerts` when it goes **In alarm**.
+
+| Alarm name | Metric, and where to find it | Settings |
+|---|---|---|
+| `quickcart-unhealthy-hosts` | `UnHealthyHostCount` for `quickcart-tg`, under **ApplicationELB → Per AppELB, per TG Metrics** | Maximum over 1 minute. Greater/Equal `1`, for 2 out of 2 datapoints. Treat missing data as **missing** |
+| `quickcart-alb-5xx` | `HTTPCode_ELB_5XX_Count` for `quickcart-alb`, under **ApplicationELB → Per AppELB Metrics** | Sum over 1 minute. Greater than `5`, for 1 out of 1. Treat missing data as **not breaching** |
+| `quickcart-app-errors` | `AppErrorCount`, under **QuickCart/App → Metrics with no dimensions** | Sum over 1 minute. Greater than `5`, for 1 out of 1. Treat missing data as **not breaching** |
+| `quickcart-db-storage` | `FreeStorageSpace` for `quickcart-db`, under **RDS → Per-Database Metrics** | Minimum over 5 minutes. Lower than `2000000000` (2 GB, in bytes), for 1 out of 1. Treat missing data as **missing** |
+
+| Choice | Why |
+|---|---|
+| Unhealthy hosts, 2 of 2 | Any unhealthy server is worth knowing about. Two minutes in a row avoids an alarm for every normal replacement |
+| ELB 5xx over 5 | These come from the load balancer itself, usually meaning no healthy server was available. Normally zero |
+| App errors over 5 | The app's own view of failures, including ones the load balancer can't see, like the database being down |
+| Free storage under 2 GB | A full disk takes a database down hard, and recovery is slow |
+| **not breaching** for counts | No data means no errors, so the alarm should stay OK |
+| **missing** for the others | Without this choice, some alarms sit in **Insufficient data** and never tell you anything |
+
+</Step>
+
+<Step title="Set one off on purpose">
+
+Cut the app off from the database by removing the rule that lets it in:
+
+<ConsolePath path="VPC > Security groups > quickcart-db-sg > Inbound rules > Edit inbound rules" />
+
+Choose **Delete** on the MySQL rule, and **Save rules**. Write down the time. In CloudShell, load the main page a few times:
+
+```sh ph="shop.example.com"
+curl -sk https://shop.example.com/
+```
+
+| Part | What it means |
+|---|---|
+| `curl -sk https://shop.example.com/` | the main page, which needs the database. **Use your own address** |
+
+```output
+{"error":"database_unavailable","instance_id":"i-0a1b2c3d","zone":"us-east-1b"}
+```
+
+It takes about three seconds to fail: the connection timeout. Now the health page:
+
+```sh ph="shop.example.com"
+curl -sk https://shop.example.com/health
+```
+
+| Part | What it means |
+|---|---|
+| `curl -sk https://shop.example.com/health` | the health page, which doesn't touch the database |
+
+```output
+{"instance_id":"i-0a1b2c3d","status":"ok","zone":"us-east-1a"}
+```
+
+**Degraded, not down.** The servers stay in the load balancer, because they're fine. Only the database is unreachable. With a health check that queried the database, all four servers would now be out of rotation, and the auto scaling group would be replacing them in a loop.
+
+Keep loading the main page for a minute or two, so there are more than 5 errors in a minute. Then **put the rule back**: **Add rule**, type **MYSQL/Aurora**, source `quickcart-app-sg`, **Save rules**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+Within a few minutes, **CloudWatch → Alarms** shows `quickcart-app-errors` **In alarm**, and an email titled like `ALARM: "quickcart-app-errors" in US East (N. Virginia)` arrives. A few minutes after you put the rule back, the alarm returns to **OK**. The subscription on `quickcart-alerts` shows **Confirmed**.
+
+</See>
+
+## Prove it
+
+Now break it, on purpose, and measure. The measuring runs in **CloudShell**, which is outside your VPC, like a customer.
+
+### The measuring tools
+
+In CloudShell, create two small scripts. Open the editor with `nano probe.sh`, paste, then save with **Ctrl+O**, **Enter**, and leave with **Ctrl+X**.
+
+```sh title="probe.sh"
+#!/bin/bash
+# Usage: ./probe.sh URL RESULTS_FILE
+# Every 0.2 seconds, ask URL once and add "time,status" to RESULTS_FILE.
+# Stop it with Ctrl+C.
+url="$1"
+results="$2"
+while true; do
+  printf '%(%H:%M:%S)T,' -1 >> "$results"
+  curl -sk -o /dev/null -w '%{http_code}\n' --max-time 3 "$url" >> "$results"
+  sleep 0.2
+done
+```
+
+| Line | What it does |
+|---|---|
+| `url="$1"`, `results="$2"` | The two things you give it: the address to test, and the file to write to |
+| `while true; do` … `done` | Repeat until you press Ctrl+C |
+| `printf '%(%H:%M:%S)T,' -1` | Write the current time, like `14:05:07,`. `-1` means "now" |
+| `curl -sk -o /dev/null` | Make one request quietly, skip the certificate check (for path B), and throw away the page itself |
+| `-w '%{http_code}\n'` | Write only the status code: `200`, `502`, and so on. A request that got no answer at all is written as `000` |
+| `--max-time 3` | Give up after 3 seconds. A customer's app wouldn't wait much longer |
+| `>> "$results"` | Add to the end of the file |
+| `sleep 0.2` | Wait a fifth of a second, so about 4 or 5 requests a second |
+
+Then `nano summary.sh`:
+
+```sh title="summary.sh"
+#!/bin/bash
+# Usage: ./summary.sh RESULTS_FILE
+# Counts the requests and the failures, and shows when the failures started and stopped.
+awk -F, '
+  { total++ }
+  $2 != "200" { failed++; if (first == "") first = $1; last = $1 }
+  END {
+    printf "requests: %d\n", total
+    printf "failed:   %d\n", failed
+    if (failed > 0) printf "first failure: %s\nlast failure:  %s\n", first, last
+  }
+' "$1"
+```
+
+| Line | What it does |
+|---|---|
+| `awk -F,` | Read the file line by line, splitting each line at the comma: `$1` is the time, `$2` the status |
+| `{ total++ }` | Count every line |
+| `$2 != "200" { … }` | For any line that isn't a 200: count it as failed, and remember the first and last time that happened |
+| `END { printf … }` | After the last line, print the totals |
+| `"$1"` | The results file you give it |
+
+Make both runnable:
+
+```sh
+chmod +x probe.sh summary.sh
+```
+
+| Part | What it means |
+|---|---|
+| `chmod +x` | mark a file as a program you can run |
+| `probe.sh summary.sh` | both scripts |
+
+It prints nothing when it works.
+
+### How each test runs
+
+Every test follows the same pattern:
+
+1. Start the probe with a new results file, and leave it running for the whole test.
+2. Wait about 30 seconds, so there's a clean baseline.
+3. Break something, and **write down the exact time**.
+4. Watch **EC2 → Target groups → quickcart-tg → Targets**, and write down when it's back to 4 healthy.
+5. Stop the probe with **Ctrl+C**, and run the summary.
+
+For example, for the first test:
+
+```sh ph="shop.example.com"
+./probe.sh https://shop.example.com/ test1.csv
+```
+
+| Part | What it means |
+|---|---|
+| `./probe.sh` | run the probe script from this folder |
+| `https://shop.example.com/` | the main page. **Use your own address.** It needs a server **and** the database, so it catches both kinds of failure |
+| `test1.csv` | where to write the results. Use a new name for each test |
+
+It prints nothing while it runs. When the test is over, press **Ctrl+C**, then:
+
+```sh
+./summary.sh test1.csv
+```
+
+| Part | What it means |
+|---|---|
+| `./summary.sh` | run the summary script |
+| `test1.csv` | the results to summarise |
+
+```output title="The shape of the summary (your numbers will differ)"
+requests: 1250
+failed:   31
+first failure: 14:05:09
+last failure:  14:05:31
+```
+
+<Steps>
+
+<Step title="Test 1: a server dies suddenly">
+
+With the probe running, terminate one app server directly, as if its hardware failed:
+
+<ConsolePath path="EC2 > Instances > one quickcart-app instance > Instance state > Terminate (delete) instance" />
+
+**What to expect.** The load balancer keeps sending that server about a quarter of the requests until two health checks fail: roughly 20 to 30 seconds. Some of those requests fail. Then the failures stop completely, and the auto scaling group launches a replacement, which is healthy again 3 to 5 minutes later.
+
+</Step>
+
+<Step title="Test 2: a server is removed gracefully">
+
+With a new probe running (`test2.csv`), scale in by one, which removes a server **the planned way**:
+
+<ConsolePath path="EC2 > Auto Scaling groups > quickcart-asg > Details > Group details > Edit" />
+
+Set **Desired capacity** to `3` and choose **Update**. The group picks a server, **deregisters** it from the target group first, waits the 30-second deregistration delay while in-flight requests finish, and only then terminates it. When it's gone, set **Desired capacity** back to `4`.
+
+**What to expect:** zero failed requests.
+
+**This pair is the centre of your results.** Same outcome, a server gone, but one path respects deregistration and the other doesn't. The difference in failed requests is the difference between an outage and a routine event. It's also why releases, which replace servers on purpose, can be done with zero errors.
+
+</Step>
+
+<Step title="Test 3: a whole zone goes dark">
+
+You can't switch off a real zone, but you can cut one off at the subnet, which is how AWS's own fault-injection tooling does it. A network ACL is a stateless firewall on a subnet. A **new** one denies everything until you add rules, which makes it a perfect blackhole.
+
+<ConsolePath path="VPC > Network ACLs > Create network ACL" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-blackhole` |
+| VPC | `quickcart-vpc` |
+
+Choose **Create network ACL**. Add no rules. Start a new probe (`test3.csv`), wait 30 seconds, and then:
+
+<ConsolePath path="VPC > Network ACLs > quickcart-blackhole > Actions > Edit subnet associations" />
+
+Tick `quickcart-app-a` and choose **Save changes**. Write down the time. Zone a's app servers are now cut off from everything.
+
+**What to expect.** For about 20 to 30 seconds, requests sent to zone a's servers time out: roughly half of all requests in that window. Then the load balancer removes them, and **zone b's two servers carry everything**, with no more failures. The auto scaling group launches replacements, but any it puts in `quickcart-app-a` can't pass their health checks while the blackhole is there, so it may keep replacing them. Zone b holds the site up throughout.
+
+Leave it for five minutes, then restore it: open the VPC's **default** network ACL, choose **Actions → Edit subnet associations**, tick `quickcart-app-a` and save. That moves the subnet back. Then delete `quickcart-blackhole`.
+
+<Note title="What this test does and doesn't prove">
+
+The blackhole cut off zone a's **app** subnet. The data subnets were untouched, so the database kept working. If the database is **Single-AZ**, it lives in one zone. Check which: **Aurora and RDS → Databases → quickcart-db → Connectivity & security → Availability Zone**. If that zone failed for real, the database would go with it, and the site couldn't take orders however many app servers survived. So state your result exactly: *"The app tier survives the loss of a zone with N failed requests. The data tier is Single-AZ and does not."* A precise statement of a limit is worth far more than a result presented as broader than it was.
+
+</Note>
+
+</Step>
+
+<Step title="Test 4: the database restarts">
+
+With a new probe running (`test4.csv`):
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Actions > Reboot" />
+
+If you built **Multi-AZ**, tick **Reboot with failover**, which makes RDS switch to the standby in the other zone: a real failover test. On Single-AZ that option doesn't exist, and a plain reboot tests something narrower but still important: whether the app **reconnects by itself** when the database comes back.
+
+**What to expect:** the main page fails for somewhere around one to two minutes, then recovers with nobody touching anything, because the app opens a fresh connection for every request. `/health` stays 200 throughout, which is exactly why it doesn't check the database.
+
+</Step>
+
+</Steps>
+
+### Your results
+
+Fill in this table from your summaries and your notes. These are your numbers; the expected ranges are only a guide.
+
+| Test | Failed | Requests | Failures from, to | Back to 4 healthy after | Alarms that fired | Expected |
+|---|---|---|---|---|---|---|
+| 1. Server terminated suddenly | | | | | | Some failures, for about 20 to 30 s; full strength in 3 to 5 min |
+| 2. Server removed gracefully | | | | | | 0 failures |
+| 3. Zone a's app subnet cut off | | | | | | Some failures, for about 20 to 30 s; then 0 |
+| 4. Database rebooted | | | | — | | Failures for about 1 to 2 min, then 0, with no manual step |
+
+Then write two sentences for each: **what happened**, and **the mechanism**. For example: "Failures stopped 22 seconds after the termination, which matches the health check's 10-second interval × 2 failures."
+
+## Troubleshooting
+
+Every one of these happened in a real build of this environment.
+
+<Mistake title="servers launch, fail, and get replaced, over and over">
+
+The target group shows servers cycling between **initial** and **unhealthy**. **Activity** on the auto scaling group shows a steady stream of launches and terminations, and the bill climbs.
+
+```output title="The target's health status says"
+Health checks failed
+```
+
+**Why:** the app never started, so `/health` never answered. There are three usual causes:
+
+- `quickcart-app-sg` has **no outbound rule**. `dnf install` hangs without an error, and nothing after it runs.
+- The **grace period** is shorter than the boot. Servers are judged before the app has started, and killed.
+- The boot script failed partway, for example because `aws s3 cp` was refused.
+
+**The fix:** read the boot log. It's in **CloudWatch → Log groups → /quickcart/bootstrap**, if the agent got that far. If not, use **EC2 → Instances → the instance → Actions → Monitor and troubleshoot → Get system log**, which always works. With `set -x`, the last command printed is the one that failed or hung. While you fix it, you can set the group's desired capacity to `0` to stop the loop.
+
+</Mistake>
+
+<Mistake title="database_unavailable meant two different things">
+
+The page said `database_unavailable` both times. Only the log, in **CloudWatch → Log groups → /quickcart/app**, told the two apart.
+
+```output title="First time: the security group rule was missing"
+{"level": "ERROR", "route": "/", "status": 500, "latency_ms": 3004, "error_type": "OperationalError", "message": "(2003, \"Can't connect to MySQL server on 'quickcart-db.abcdefghijkl.us-east-1.rds.amazonaws.com' (timed out)\")"}
+```
+
+```output title="Second time: the table didn't exist yet"
+{"level": "ERROR", "route": "/", "status": 500, "latency_ms": 41, "error_type": "ProgrammingError", "message": "(1146, \"Table 'quickcart.orders' doesn't exist\")"}
+```
+
+**Why:** the page hides the details, as it should. But the log keeps them. The **latency** is a clue on its own: about 3,000 ms is the connect timeout, which means packets were dropped by a firewall. A fast failure means the database answered and said no.
+
+**The fix:** always check `error_type` and `message` in the log before changing anything. A timeout points at security groups and routes. A fast error points at the database itself.
+
+</Mistake>
+
+<Mistake title="Unknown database">
+
+```output title="The app log shows"
+{"level": "ERROR", "error_type": "OperationalError", "message": "(1049, \"Unknown database 'quickcart'\")"}
+```
+
+**Why:** **Initial database name** was left empty under **Additional configuration** when the database was created, and the seeding script hasn't run yet. The server exists, but there's no database called `quickcart` inside it.
+
+**The fix:** run stage 10's `python3 /opt/app/seed.py`. It creates the database if it's missing, then the tables.
+
+</Mistake>
+
+<Mistake title="the alarm went red, but no email came">
+
+**Why:** the email subscription is still **Pending confirmation**. Unconfirmed subscriptions silently drop everything. This is the most common reason people say their alarms "don't work".
+
+**The fix:** **SNS → Topics → quickcart-alerts → Subscriptions**. If it says **Pending confirmation**, find the confirmation email (check spam), or choose **Request confirmation** to send another.
+
+</Mistake>
+
+<Mistake title="an alarm stays in Insufficient data">
+
+**Why:** the metric has no data points. That's normal for counts when nothing has gone wrong, and the default treatment of missing data leaves the alarm undecided.
+
+**The fix:** edit the alarm and set **Treat missing data as** to **not breaching** for the error counts, as in the table in stage 11.
+
+</Mistake>
+
+<Mistake title="targets are unhealthy with a 404">
+
+```output title="The target's health status details say"
+Health checks failed with these codes: [404]
+```
+
+**Why:** the health check path doesn't exist in the app. Usually a typo, or `/` instead of `/health`, or a trailing space.
+
+**The fix:** **Target groups → quickcart-tg → Health checks → Edit**, and set the path to exactly `/health`.
+
+</Mistake>
+
+<Mistake title="the browser warns about the certificate">
+
+On path A, when opening the load balancer's own DNS name:
+
+```output title="The browser says something like"
+Your connection is not private
+NET::ERR_CERT_COMMON_NAME_INVALID
+```
+
+**Why:** the certificate is for `shop.example.com`, but the address bar says `quickcart-alb-….elb.amazonaws.com`. Encryption works; the **name** doesn't match.
+
+**The fix:** use the name the certificate is for, through the Route 53 alias record. On path B, a warning is expected for any name, because nothing trusted signed the certificate; that's the trade-off you chose, so use `curl -k` for tests.
+
+</Mistake>
+
+<Mistake title="plain HTTP shows the site instead of redirecting">
+
+**Why:** the HTTP:80 listener was set to **Forward** to the target group, not **Redirect**. Plain, unencrypted traffic then reaches the servers, and the HTTPS setup is decoration.
+
+**The fix:** **Load balancers → quickcart-alb → Listeners and rules → HTTP:80 → Edit listener**: default action **Redirect to URL**, HTTPS, port 443, status 301.
+
+</Mistake>
+
+## Clean up
+
+This removes everything from this project **and** Project 1, in dependency order. If you're going straight on to a later project that reuses the network, you can stop after step 6, but the network keeps costing about $3.20 a day.
+
+<Steps>
+
+<Step title="Stop the auto scaling group first">
+
+<ConsolePath path="EC2 > Auto Scaling groups > quickcart-asg > Actions > Delete" />
+
+Type `delete` and confirm. Deleting the group terminates its servers. If you terminate servers yourself first, the group just launches new ones.
+
+</Step>
+
+<Step title="Delete the load balancer, then the target group">
+
+<ConsolePath path="EC2 > Load balancers > quickcart-alb > Actions > Delete load balancer" />
+
+Type `confirm` and delete. Then:
+
+<ConsolePath path="EC2 > Target groups > quickcart-tg > Actions > Delete" />
+
+On path A, also delete the `shop` record: **Route 53 → Hosted zones → your domain → the A record → Delete record**. Keep the hosted zone if you're keeping the domain.
+
+</Step>
+
+<Step title="Delete the database and its subnet group">
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Actions > Delete" />
+
+Untick **Create final snapshot** and **Retain automated backups**, tick the acknowledgement, type `delete me`, and choose **Delete**. It takes several minutes. When it's gone:
+
+<ConsolePath path="Aurora and RDS > Subnet groups > quickcart-db-subnets > Delete" />
+
+</Step>
+
+<Step title="Delete the launch template and the certificate">
+
+<ConsolePath path="EC2 > Launch templates > quickcart-app-lt > Actions > Delete template" />
+
+<ConsolePath path="Certificate Manager > the certificate > Delete" />
+
+The certificate can only be deleted once the load balancer that used it is gone.
+
+</Step>
+
+<Step title="Delete the alarms, the topic and the log groups">
+
+<ConsolePath path="CloudWatch > Alarms" />
+
+Tick the four `quickcart-` alarms, choose **Actions → Delete**. Then **Simple Notification Service → Topics → quickcart-alerts → Delete**, typing `delete me`. Then in **CloudWatch → Log groups**, tick `/quickcart/app`, `/quickcart/bootstrap` and, if it exists, `/quickcart/vpc-flow-logs`, and choose **Actions → Delete log group(s)**.
+
+</Step>
+
+<Step title="Schedule both secrets for deletion">
+
+<ConsolePath path="Secrets Manager > quickcart/db > Actions > Delete secret" />
+
+Waiting period **7 days**, then **Schedule deletion**. Do the same for `quickcart/test` if it still exists.
+
+</Step>
+
+<Step title="Take down Project 1's network">
+
+Follow [Project 1's clean-up](/projects/01-network-by-hand/#clean-up) from its second step: the endpoints, the NAT gateway and its Elastic IP, the flow log, the VPC, the bucket and the two IAM roles. Emptying the bucket also removes the `app/` folder.
+
+</Step>
+
+<Step title="Confirm nothing is left billing" cleanup>
+
+| Where | Should show |
+|---|---|
+| **EC2 → Instances** | No running `quickcart-app` instances |
+| **EC2 → Load balancers** | None |
+| **Aurora and RDS → Databases** | None |
+| **VPC → NAT gateways** | None, or only **Deleted** ones |
+| **VPC → Elastic IPs** | No addresses |
+| **VPC → Endpoints** | None |
+| **Resource Groups & Tag Editor → Tag Editor**, region us-east-1, **All supported resource types** | Nothing with a `quickcart` name |
+
+<See>
+
+Every check comes back empty. Look at **Billing and Cost Management → Bills** the next day: the charges for these projects stop on the day you cleaned up.
+
+</See>
+
+</Step>
+
+</Steps>

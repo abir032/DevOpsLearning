@@ -1,0 +1,70 @@
+---
+/*
+ * Terraform loops: count vs for_each.
+ * Teaches: remove the middle item of a list, and count destroys the wrong
+ * thing, because it tracks by position; for_each tracks by name.
+ */
+import { cfHtml, cfSay } from "../../scripts/tf-count-foreach";
+---
+<div class="viz" data-track="code" data-viz="tf-count-foreach">
+  <div class="viz-controls">
+    <button class="btn line" type="button" data-a="remove">Remove the middle item</button>
+    <button class="btn" type="button" data-a="apply" disabled>Apply both plans</button>
+    <button class="btn" type="button" data-a="reset" disabled>Put it back</button>
+  </div>
+  <div class="cf" set:html={cfHtml("start")} />
+  <div class="viz-say" aria-live="polite" set:html={cfSay("start")} />
+</div>
+
+<script>
+  import { cfHtml, cfSay, cfTone, type Phase } from "../../scripts/tf-count-foreach";
+  import { reduced } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-count-foreach"]').forEach((root) => {
+    if (!once(root)) return;
+    const stage = root.querySelector<HTMLElement>(".cf")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btn = (a: string) => root.querySelector<HTMLButtonElement>(`[data-a="${a}"]`)!;
+
+    function show(p: Phase) {
+      stage.innerHTML = cfHtml(p, !reduced());
+      const t = cfTone(p);
+      say.className = "viz-say" + (t ? " " + t : "");
+      say.innerHTML = cfSay(p);
+      btn("remove").disabled = p !== "start";
+      btn("apply").disabled = p !== "removed";
+      btn("reset").disabled = p === "start";
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      const next: Phase | null = b.dataset.a === "remove" ? "removed" : b.dataset.a === "apply" ? "applied" : b.dataset.a === "reset" ? "start" : null;
+      if (!next) return;
+      show(next);
+      /* keep keyboard focus on a button that still works */
+      const focus = next === "removed" ? btn("apply") : next === "applied" ? btn("reset") : btn("remove");
+      focus.focus();
+    });
+  }));
+</script>
+
+<style is:global>
+  [data-viz="tf-count-foreach"] .cf { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px 16px; }
+  [data-viz="tf-count-foreach"] .cf-side { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+  [data-viz="tf-count-foreach"] .cf-side h3 { margin: 0 0 2px; font-size: 16px; font-weight: 800; font-family: var(--mono); color: var(--code-t); }
+  [data-viz="tf-count-foreach"] .cf-side small { display: block; color: var(--ink-3); font-size: 12.5px; margin-bottom: 10px; }
+  [data-viz="tf-count-foreach"] .cf-code {
+    font-family: var(--mono); font-size: 12.5px; background: var(--surface); border: 1px dashed var(--rule-2);
+    border-radius: 7px; padding: 6px 9px; margin-bottom: 10px; overflow-wrap: anywhere;
+  }
+  [data-viz="tf-count-foreach"] .cf-code .d { color: var(--ink-3); }
+  [data-viz="tf-count-foreach"] .cf-addr { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--code-t); min-width: 5.5em; }
+  [data-viz="tf-count-foreach"] .chip.add .orphan { color: var(--ok); }
+  [data-viz="tf-count-foreach"] .chip:not(.add):not(.chg):not(.lost) .orphan { color: var(--ink-3); }
+  [data-viz="tf-count-foreach"] .cf-plan { margin: 10px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+  @media (max-width: 720px) {
+    [data-viz="tf-count-foreach"] .cf { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>

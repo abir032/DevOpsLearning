@@ -1,0 +1,675 @@
+---
+time: 70 minutes
+level: Intermediate
+before: [continuous-integration, ecr]
+cost: pennies
+quiz:
+  - q: Why does a delivery pipeline deploy an image by its digest, not by a tag like v2?
+    answer: 2
+    options:
+      - t: Digests are shorter to type
+        why: They're much longer — 64 characters. Nobody types them; the pipeline passes them along.
+      - t: ECS and Kubernetes don't accept tags
+        why: Both accept tags. That's exactly the risk, because a tag can be moved to a different image.
+      - t: A digest names one exact image forever, so prod runs the very bytes that were tested in dev and stg
+        why: A mutable tag can be pushed over between one environment and the next. The digest can't change without the image changing.
+      - t: Tags stop working after the first deploy
+        why: Tags keep working. They just don't guarantee that two deploys got the same thing.
+  - q: The team rebuilds the image separately for dev, stg and prod "to be safe". What's wrong with that?
+    answer: 0
+    options:
+      - t: Each build can pull different dependency versions, so prod can run code that was never tested
+        why: A rebuild is a new artifact. Base images and packages move on between builds, so passing tests in stg says nothing certain about what prod got.
+      - t: Nothing, as long as all three builds use the same commit
+        why: The same commit isn't the same image. Anything fetched during the build — a base image, a package — can differ.
+      - t: It's slower, but otherwise just as safe
+        why: It's slower and less safe. You lose the one guarantee delivery depends on.
+      - t: Jenkins can only build once per commit
+        why: Jenkins will happily build as often as you ask.
+  - q: The prod approval step has a 15-minute timeout and nobody answers. What happens?
+    answer: 1
+    options:
+      - t: Jenkins deploys to prod anyway after 15 minutes
+        why: That would make the approval meaningless. A timeout never approves.
+      - t: The build is aborted, and prod keeps running what it had
+        why: The timeout cancels the input step and the build finishes as ABORTED. Nothing reached prod, which is the safe default.
+      - t: The build waits forever until someone answers
+        why: That's what happens without a timeout — and it ties up an executor. The timeout is there to stop it.
+      - t: The deploy to stg is rolled back
+        why: Stg keeps the new version. It passed its checks; only the prod step is skipped.
+  - q: Prod is misbehaving after a release. What is the fastest safe rollback?
+    answer: 3
+    options:
+      - t: Revert the commit, and let the whole pipeline build and deploy again
+        why: That works, but it's slow — a full build, tests and every environment again — while customers see errors.
+      - t: Fix the bug quickly and push a new version
+        why: A fix under pressure is how a second incident starts. Get back to good first, then fix calmly.
+      - t: Restore last night's backup of the server
+        why: Backups are for data. The problem is which code is running.
+      - t: Redeploy the previous image digest, which was already tested and ran in prod before
+        why: Nothing is built. The previous digest is known to work, so rolling back is one quick, low-risk deploy.
+  - q: How should a Jenkins agent on AWS get permission to deploy?
+    answer: 2
+    options:
+      - t: An access key and secret key stored in the Jenkins credentials store
+        why: Long-lived keys can leak from backups, logs or plugins, and they never expire. Avoid them wherever a role will do.
+      - t: The access keys of the person who set Jenkins up
+        why: Now every deploy looks like that person, and leaving the team breaks the pipeline.
+      - t: An IAM role — the agent's instance profile, or a role it assumes for each environment
+        why: Roles give short-lived credentials that renew themselves. Nothing secret is stored, and each environment can have its own narrowly scoped role.
+      - t: No permission at all; Jenkins is trusted by AWS automatically
+        why: AWS trusts nothing by default. Every call needs credentials from somewhere.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a release that passed every test">
+
+QuickCart's pipeline had three deploy jobs, one per environment. Each one checked out the code, built a fresh image and deployed it.
+
+On Tuesday the new menu search passed every test in dev and stg. On Wednesday Kofi ran the prod job. It built the image again — and in the hours between, a library the app used had released a new minor version. The prod build picked it up. Search broke for every customer, with code that had never run anywhere before.
+
+Rolling back meant running the prod job with Monday's commit, which built yet another image. That took twenty minutes, and nobody could be sure it matched what Monday's prod had really run.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Teams rebuild "the same version" for each environment, often because each environment's job was set up separately over time. Anything a build fetches — base images, packages, tools — can change between builds. So the image that reaches production is not the image that was tested, even though it came from the same commit. The fix everyone arrives at is the same: build once, and promote that exact artifact.
+
+</Case>
+
+QuickCart needs three things: one image that travels unchanged from dev to prod, a person's approval before prod, and a rollback that takes seconds, not a rebuild.
+
+</Part>
+
+<Part id="idea">
+
+**Continuous delivery** means every change that passes the pipeline is ready to go to production, and getting it there is one routine, repeatable step. Whether a human presses the final button is a choice; the rest is automatic.
+
+### Build once, promote many times
+
+The pipeline builds the image **once**, pushes it to ECR, and from then on refers to it only by its **digest** — the `sha256:…` fingerprint of its contents. Each environment is then told "run this digest".
+
+| Step | What happens | Why |
+|---|---|---|
+| Build | One image, pushed to ECR once | Everything after this uses the same bytes |
+| Deploy to dev | dev runs the digest | Fast feedback from a real environment |
+| Smoke test dev | A few quick checks that the release really works there | Catch "it deployed but doesn't start" |
+| Deploy to stg, smoke test | The same digest again | stg looks like prod, so this is the dress rehearsal |
+| Approval | A person agrees to go to prod, with a time limit | Someone accountable decides, and nothing waits forever |
+| Deploy to prod, smoke test | The same digest again | Prod runs exactly what stg tested |
+
+<YouKnow title="You already know this: promoting a build">
+
+When you ship a mobile app, you don't rebuild it for the App Store. The exact build your testers used in TestFlight or the internal track is the one you promote to production. Continuous delivery does the same for servers.
+
+</YouKnow>
+
+<Key>Build once, then promote the same digest through every environment. Rolling back is deploying the previous digest again.</Key>
+
+### Approval gates
+
+In a Jenkinsfile, an approval is the `input` step. The build pauses and shows a button. Always wrap it in a `timeout`: an unanswered approval should end the build, not wait for days.
+
+| Setting | What it does |
+|---|---|
+| `input message: '…', ok: '…'` | Pause and ask. The build continues only if someone presses the button |
+| `timeout` around the stage | If nobody answers in time, the build is **aborted** and prod is untouched |
+| `submitter: 'release-managers'` | Only people in that group may approve. Without it, anyone who can see the job can |
+
+While it waits, `input` holds on to the agent it's running on. Pipelines that wait a long time put `agent none` on the approval stage so no agent sits idle — the [Jenkinsfile lesson](/lessons/jenkinsfile/) covers per-stage agents.
+
+### Rollback is a deploy, not a rebuild
+
+Because every environment only ever ran digests, "the previous version" is just the previous digest. A rollback job looks it up and deploys it. Nothing is compiled, nothing is fetched, and it was already proven in prod. That makes it the fastest safe move in an incident: **get back to good first, fix calmly afterwards.**
+
+### Credentials: roles, not keys
+
+The pipeline needs AWS permissions to deploy. Never store an access key in Jenkins for this.
+
+| Where Jenkins runs | How it gets AWS credentials |
+|---|---|
+| An agent on EC2 | The agent's **instance profile** gives it a role. The AWS CLI picks up short-lived credentials automatically |
+| One role per environment | The **Pipeline: AWS Steps** plugin's `withAWS(role: 'quickcart-deploy-prod')` assumes a role just for that stage, so a dev build can't touch prod |
+| On your Mac, for learning | Your own SSO login from [Set up your Mac](/lessons/mac-setup/): short-lived, and it expires on its own |
+
+### Timeouts, retries and idempotency
+
+| Idea | In practice |
+|---|---|
+| **Timeout** every stage that talks to the network | A hung call ends the build instead of blocking the next release |
+| **Retry** only steps that are safe to repeat | `retry(3)` around a deploy call rides out a brief API error |
+| **Idempotent** deploys | "Set prod to digest X" gives the same result however many times it runs. "Add one more server" does not — never retry that |
+
+</Part>
+
+<Part id="see">
+
+Below, a new version of the order service moves through QuickCart's environments. First keep **The same image** selected: build, promote to dev and stg, approve prod, then roll prod back. Then choose **A fresh build**, where every environment rebuilds, and watch what the registry fills up with.
+
+<CdPromote />
+
+**What to notice:** with one build, every environment shows the same digest, and rollback is instant because the old digest is still there. With fresh builds, the digests stop matching — prod runs an image that no earlier environment ever tested.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">two small images in ECR, a fraction of a cent a day. Parameter Store standard parameters are free.</Cost>
+
+You'll build a delivery pipeline on the Jenkins you set up in [The Jenkinsfile](/lessons/jenkinsfile/). It finds one image in ECR by its digest, promotes it through dev, stg and prod with an approval before prod, and a second job rolls prod back. About 45 minutes.
+
+To keep this lab cheap, each environment is **a record of which digest it runs**: a parameter in AWS Systems Manager Parameter Store, such as `/quickcart/prod/image`. Deploying means updating that record. The pipeline logic — resolve once, promote, approve, check, roll back — is exactly what [Project 5](/projects/05-the-pipeline/) wires to real ECS services.
+
+<Steps>
+
+<Step title="Put two versions in ECR">
+
+You need the `quickcart-orders` repository from [Storing images: ECR](/lessons/ecr/), with **Tag immutability** on. If you deleted it, create it again the same way: **ECR** → **Private registry** → **Repositories** → **Create repository**, name `quickcart-orders`, immutable tags.
+
+For this lab, any two different images will do as "version 1" and "version 2". Pull two small public ones:
+
+```sh
+docker pull public.ecr.aws/docker/library/busybox:1.36
+```
+
+| Part | What it means |
+|---|---|
+| `docker pull` | download an image to your Mac |
+| `public.ecr.aws/docker/library/busybox:1.36` | a tiny public image, version 1.36 |
+
+```sh
+docker pull public.ecr.aws/docker/library/busybox:1.37
+```
+
+| Part | What it means |
+|---|---|
+| `docker pull` | download an image to your Mac |
+| `public.ecr.aws/docker/library/busybox:1.37` | the next version of the same image |
+
+Log Docker in to your registry. This is the one pipe in the lab:
+
+```sh ph="111122223333"
+aws ecr get-login-password --region us-east-1 --profile quickcart | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `aws ecr get-login-password` | ask ECR for a password that's valid for 12 hours |
+| `--region us-east-1 --profile quickcart` | in your region, using your SSO login |
+| `\|` | pass that password straight to the next command, without showing it on screen |
+| `docker login --username AWS` | log Docker in. The user name for ECR is always `AWS` |
+| `--password-stdin` | read the password from the pipe, not from the command line |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | your registry. Replace the account number with yours |
+
+```output
+Login Succeeded
+```
+
+Tag the two images as `v1` and `v2` of `quickcart-orders`:
+
+```sh ph="111122223333"
+docker tag public.ecr.aws/docker/library/busybox:1.36 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give an image a second name |
+| `public.ecr.aws/docker/library/busybox:1.36` | the image to name |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1` | its new name: your repository, tag `v1` |
+
+```sh ph="111122223333"
+docker tag public.ecr.aws/docker/library/busybox:1.37 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give an image a second name |
+| `public.ecr.aws/docker/library/busybox:1.37` | the second image |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2` | tag `v2` in your repository |
+
+Push both:
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload an image to its registry |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1` | the image, by its full name |
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload an image to its registry |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2` | the second image |
+
+Each push ends with a line like this, with its own digest:
+
+```output
+v2: digest: sha256:3f5a1e0c9b7d4a2e8f6c1b0d9e7a5c3b1f2e4d6a8c0b9e7f5d3a1c2b4e6f8a0d size: 527
+```
+
+<See>
+
+**ECR** → **quickcart-orders** lists two images, `v1` and `v2`, each with a different digest.
+
+</See>
+
+<Mistake title="the tag is already taken">
+
+```output title="The push stops with something like"
+tag invalid: The image tag 'v1' already exists in the 'quickcart-orders' repository and cannot be overwritten because the repository is immutable.
+```
+
+**Why:** your repository already has a `v1` from the ECR lesson, and immutable tags can never be moved. That's the protection working.
+
+**The fix:** use tags that don't exist yet, such as `v3` and `v4`, here and later in the lab.
+
+</Mistake>
+
+</Step>
+
+<Step title="Give Jenkins your AWS login">
+
+Jenkins on your Mac runs as you, so it can use your SSO login. Nothing secret is stored in Jenkins, and the login expires on its own.
+
+Stop Jenkins in its terminal with **Ctrl+C**. Then sign in:
+
+```sh
+aws sso login --profile quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `aws sso login` | open the browser to sign in, and cache short-lived credentials |
+| `--profile quickcart` | the profile you set up in [Set up your Mac](/lessons/mac-setup/) |
+
+Start Jenkins again, telling it which profile to use:
+
+```sh
+AWS_PROFILE=quickcart jenkins-lts --httpListenAddress=127.0.0.1 --httpPort=8080
+```
+
+| Part | What it means |
+|---|---|
+| `AWS_PROFILE=quickcart` | set this variable for Jenkins only. Every build step Jenkins runs inherits it, so the AWS CLI uses your profile |
+| `jenkins-lts` | start Jenkins, as before |
+| `--httpListenAddress=127.0.0.1 --httpPort=8080` | only reachable from this Mac, on port 8080 |
+
+```output
+Jenkins is fully up and running
+```
+
+<Note title="On a real Jenkins">
+
+Agents on EC2 get credentials from their instance profile instead, and nothing is set on the command line. [Jenkins from zero](/lessons/jenkins/) sets that up.
+
+</Note>
+
+</Step>
+
+<Step title="Create the delivery pipeline">
+
+In Jenkins, choose **New Item**:
+
+| Field | Enter |
+|---|---|
+| Enter an item name | `quickcart-deliver` |
+| Type | **Pipeline** |
+
+Choose **OK**. Under **Pipeline**, leave **Definition** as **Pipeline script**, and paste this into **Script**. Replace the account number in `REPO` with yours:
+
+```groovy title="Jenkinsfile" ph="111122223333"
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'TAG', defaultValue: 'v1', description: 'Which image tag to deliver')
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_PAGER  = ''
+        REPO       = '111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders'
+    }
+
+    stages {
+        stage('Find the image') {
+            steps {
+                script {
+                    env.DIGEST = sh(
+                        script: 'aws ecr describe-images --repository-name quickcart-orders --image-ids imageTag="$TAG" --query "imageDetails[0].imageDigest" --output text',
+                        returnStdout: true
+                    ).trim()
+                    env.IMAGE = "${env.REPO}@${env.DIGEST}"
+                }
+                echo "Delivering ${params.TAG} as ${env.IMAGE}"
+            }
+        }
+        stage('Deploy to dev') {
+            steps { script { deploy('dev') } }
+        }
+        stage('Smoke test dev') {
+            steps { script { smokeTest('dev') } }
+        }
+        stage('Deploy to stg') {
+            steps { script { deploy('stg') } }
+        }
+        stage('Smoke test stg') {
+            steps { script { smokeTest('stg') } }
+        }
+        stage('Approve prod') {
+            options { timeout(time: 15, unit: 'MINUTES') }
+            steps {
+                input message: "Deliver ${params.TAG} to prod?", ok: 'Deploy to prod'
+            }
+        }
+        stage('Deploy to prod') {
+            steps { script { deploy('prod') } }
+        }
+        stage('Smoke test prod') {
+            steps { script { smokeTest('prod') } }
+        }
+    }
+
+    post {
+        success { echo "${params.TAG} is running in dev, stg and prod as ${env.IMAGE}" }
+        aborted { echo 'Stopped before prod. Prod is unchanged.' }
+        failure { echo 'A step failed. Environments that were already updated keep the new version.' }
+    }
+}
+
+def deploy(String target) {
+    retry(3) {
+        sh "aws ssm put-parameter --name /quickcart/${target}/image --type String --value \"\$IMAGE\" --overwrite"
+    }
+}
+
+def smokeTest(String target) {
+    def running = sh(
+        script: "aws ssm get-parameter --name /quickcart/${target}/image --query Parameter.Value --output text",
+        returnStdout: true
+    ).trim()
+    if (running != env.IMAGE) {
+        error("${target} runs ${running}, but this build delivered ${env.IMAGE}")
+    }
+    sh 'aws ecr describe-images --repository-name quickcart-orders --image-ids imageDigest="$DIGEST" --query "imageDetails[0].imageTags" --output text'
+}
+```
+
+| Line | What it does | If you leave it out |
+|---|---|---|
+| `parameters` → `string(name: 'TAG', …)` | Asks which tag to deliver when you start the build. Jenkins also sets it as the environment variable `TAG` | You'd edit the pipeline for every release |
+| `timeout(time: 30, unit: 'MINUTES')` | Ends the whole build if it runs longer than 30 minutes | A hung call could block releases indefinitely |
+| `disableConcurrentBuilds()` | Only one delivery at a time | Two releases could race to set the same environment |
+| `AWS_PAGER = ''` | Stops the AWS CLI opening a pager, which would hang a build waiting for a key press | Some commands hang in Jenkins |
+| `REPO` | Your repository's address, used to build the full image name | Required |
+| `sh(script: …, returnStdout: true).trim()` | Runs a command and keeps what it prints, without the final newline | You couldn't use the digest later |
+| `imageTag="$TAG"` in single quotes | The shell reads `$TAG`, not Groovy. A tag with odd characters can't break out into other commands | With double quotes, Groovy would paste the value straight into the command |
+| `env.IMAGE = "${env.REPO}@${env.DIGEST}"` | The image by digest: `…/quickcart-orders@sha256:…`. Every later stage uses only this | Stages might resolve the tag again and get a different image |
+| `deploy('dev')` inside `script` | Calls the `deploy` helper defined at the bottom of the file | Declarative stages only allow plain steps outside a `script` block |
+| `options { timeout(time: 15 …) }` on the approval stage | If nobody approves within 15 minutes, the build is aborted | It would wait until someone noticed |
+| `input message: …, ok: 'Deploy to prod'` | Pauses and shows two buttons: **Deploy to prod** and **Abort** | Nothing would stop before prod |
+| `post` → `success`, `aborted`, `failure` | A clear last line for each outcome | You'd have to read the whole log to see what happened |
+| `def deploy(String target)` | Sets the environment's record to the digest. `--overwrite` makes it idempotent: running it twice gives the same result | — |
+| `retry(3)` | Tries the deploy up to three times if the AWS call fails briefly | One network hiccup fails the release |
+| `def smokeTest(String target)` | Reads the record back and fails the build unless it holds the digest this build delivered, then confirms the image really exists in ECR | A deploy that silently didn't happen would look like success |
+
+Choose **Save**.
+
+<Mistake title="the first build doesn't ask for TAG">
+
+The first time you choose **Build Now**, Jenkins may not show the `TAG` field and uses the default. Jenkins only learns a pipeline's parameters by running it once.
+
+**The fix:** after the first run, the button says **Build with Parameters**. Use that from now on.
+
+</Mistake>
+
+</Step>
+
+<Step title="Deliver v1 everywhere">
+
+Choose **Build with Parameters** (or **Build Now** the first time), with **TAG** `v1`. Open the build, then **Console Output**. It stops at the approval:
+
+```output title="The console shows, near the end"
+Deliver v1 to prod?
+Deploy to prod or Abort
+```
+
+Choose **Deploy to prod**. The build finishes:
+
+```output title="The end of the console output"
+v1 is running in dev, stg and prod as 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders@sha256:8d2f6a4b1c0e9f7d5a3b2c1e0f9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d
+Finished: SUCCESS
+```
+
+Your account number and digest will differ. The digest is the same one ECR shows for `v1`.
+
+<See>
+
+**Systems Manager** → **Parameter Store** lists `/quickcart/dev/image`, `/quickcart/stg/image` and `/quickcart/prod/image`, all with the same value.
+
+</See>
+
+<Mistake title="Jenkins can't use your login">
+
+```output title="The first AWS step fails with"
+Error when retrieving token from sso: Token has expired and refresh failed
+```
+
+**Why:** your SSO login lasts a limited time, commonly 8 to 12 hours, and it has run out.
+
+**The fix:** run `aws sso login --profile quickcart` in any terminal. Jenkins doesn't need restarting; it reads the new login on the next build.
+
+</Mistake>
+
+</Step>
+
+<Step title="Deliver v2, and try not answering">
+
+Build again with **TAG** `v2`. At the approval, this time **don't answer**. After 15 minutes the stage's timeout ends it:
+
+```output title="The end of the console output"
+Cancelling nested steps due to timeout
+Timeout has been exceeded
+Stopped before prod. Prod is unchanged.
+Finished: ABORTED
+```
+
+<See>
+
+In Parameter Store, `/quickcart/dev/image` and `/quickcart/stg/image` now hold the `v2` digest. `/quickcart/prod/image` still holds `v1`. The unanswered approval changed nothing in prod.
+
+</See>
+
+If you don't want to wait 15 minutes, choose **Abort** at the approval instead. The result in prod is the same.
+
+</Step>
+
+<Step title="Deliver v2 to prod">
+
+Build once more with **TAG** `v2`, and this time choose **Deploy to prod**.
+
+```output title="The end of the console output"
+v2 is running in dev, stg and prod as 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders@sha256:3f5a1e0c9b7d4a2e8f6c1b0d9e7a5c3b1f2e4d6a8c0b9e7f5d3a1c2b4e6f8a0d
+Finished: SUCCESS
+```
+
+Open `/quickcart/prod/image` in Parameter Store, then its **History** tab. Parameter Store keeps every value it has held: `v1`'s digest as version 1, `v2`'s as version 2. The rollback job uses that history.
+
+</Step>
+
+<Step title="Create the one-click rollback">
+
+Choose **New Item**, name `quickcart-rollback`, type **Pipeline**, and paste:
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'TARGET', choices: ['prod', 'stg', 'dev'], description: 'Which environment to roll back')
+    }
+
+    options {
+        timeout(time: 10, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_PAGER  = ''
+    }
+
+    stages {
+        stage('Find the previous digest') {
+            steps {
+                script {
+                    def name = "/quickcart/${params.TARGET}/image"
+                    def version = sh(
+                        script: "aws ssm get-parameter --name ${name} --query Parameter.Version --output text",
+                        returnStdout: true
+                    ).trim() as Integer
+                    def current = sh(
+                        script: "aws ssm get-parameter --name ${name} --query Parameter.Value --output text",
+                        returnStdout: true
+                    ).trim()
+                    def previous = ''
+                    for (int v = version - 1; v >= 1 && previous == ''; v--) {
+                        def value = sh(
+                            script: "aws ssm get-parameter --name ${name}:${v} --query Parameter.Value --output text",
+                            returnStdout: true
+                        ).trim()
+                        if (value != current) {
+                            previous = value
+                        }
+                    }
+                    if (previous == '') {
+                        error("${params.TARGET} has never run a different digest, so there is nothing to roll back to")
+                    }
+                    env.PREVIOUS = previous
+                    echo "${params.TARGET} runs ${current}"
+                    echo "Rolling back to ${previous}"
+                }
+            }
+        }
+        stage('Redeploy it') {
+            steps {
+                sh "aws ssm put-parameter --name /quickcart/${params.TARGET}/image --type String --value \"\$PREVIOUS\" --overwrite"
+            }
+        }
+    }
+
+    post {
+        success { echo "${params.TARGET} is back on ${env.PREVIOUS}" }
+    }
+}
+```
+
+| Line | What it does | If you leave it out |
+|---|---|---|
+| `choice(name: 'TARGET', …)` | A drop-down of environments, with `prod` first because that's the usual emergency | Someone would have to type the name under pressure |
+| `get-parameter … --query Parameter.Version` | How many values the record has held | — |
+| `get-parameter --name ${name}:${v}` | Reads the value the record held at version `v`. The `:number` suffix selects a past version | You could only ever read the current value |
+| The `for` loop | Walks back through history until it finds a digest **different** from the current one | Rolling back twice would bounce between the good and bad versions, because a rollback is itself a new version |
+| `error(…)` when nothing is found | Stops with a clear message instead of "deploying" the same digest | A rollback that did nothing would look like success |
+| `Redeploy it` | The same idempotent update as a normal deploy. Nothing is built | — |
+
+Choose **Save**, then **Build Now** once so Jenkins learns the `TARGET` parameter. That first run rolls prod back.
+
+```output title="The end of the console output"
+prod is back on 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders@sha256:8d2f6a4b1c0e9f7d5a3b2c1e0f9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d
+Finished: SUCCESS
+```
+
+<See>
+
+`/quickcart/prod/image` holds `v1`'s digest again, while dev and stg keep `v2`. The rollback took seconds, and nothing was rebuilt.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Delete the three parameters:
+
+```sh
+aws ssm delete-parameters --names /quickcart/dev/image /quickcart/stg/image /quickcart/prod/image --profile quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `aws ssm delete-parameters` | delete several Parameter Store parameters at once |
+| `--names /quickcart/dev/image /quickcart/stg/image /quickcart/prod/image` | the three environment records |
+| `--profile quickcart` | using your SSO login |
+
+```output
+{
+    "DeletedParameters": [
+        "/quickcart/dev/image",
+        "/quickcart/stg/image",
+        "/quickcart/prod/image"
+    ],
+    "InvalidParameters": []
+}
+```
+
+The order of the names may differ. Then delete the lab images:
+
+<ConsolePath path="ECR > Private registry > Repositories > quickcart-orders" />
+
+Tick `v1` and `v2`, choose **Delete**, and confirm. If you don't need the repository any more, go back to **Repositories**, tick `quickcart-orders` and choose **Delete**.
+
+In Jenkins, open each of `quickcart-deliver` and `quickcart-rollback` and choose **Delete Pipeline**. Keep Jenkins itself: the next lesson uses it.
+
+<See>
+
+Parameter Store has no `/quickcart/…` parameters, and ECR has no lab images. Nothing from this lab is left costing money.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Idea or code | In one line |
+|---|---|
+| Build once | One image per change. Every environment gets that same image |
+| Deploy by digest | `repo@sha256:…` never changes. A tag can |
+| Promotion | dev → smoke test → stg → smoke test → approval → prod → smoke test |
+| `input message: '…', ok: '…'` | Pause for a person. Add `submitter` to limit who can approve |
+| `timeout` around `input` | No answer means **aborted**, never approved |
+| Smoke test | A few quick checks that the release really runs where it was deployed |
+| Rollback | Deploy the previous digest. No rebuild |
+| `retry(3)` | Only around steps that are safe to repeat |
+| Idempotent | "Set to X" can run twice safely. "Add one more" can't |
+| AWS credentials | An instance profile, or `withAWS(role: …)` per environment. Never stored keys |
+
+</Cheat>
+
+</Part>

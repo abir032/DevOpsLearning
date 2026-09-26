@@ -1,0 +1,7 @@
+---
+/* Used on the cheat-sheet index: render only the cheat sheet part of a lesson. */
+import type { PartId } from "../../data/parts";
+interface Props { id: PartId }
+const { id } = Astro.props;
+---
+{id === "cheat" && <slot />}

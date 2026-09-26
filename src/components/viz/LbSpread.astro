@@ -1,0 +1,259 @@
+---
+/*
+ * Load balancers: traffic spreading across servers.
+ * Teaches: health checks decide who gets traffic, and a deep health check
+ * can turn a database problem into a total outage.
+ */
+const servers = [
+  { k: "a", name: "Server A", az: "us-east-1a", y: 45 },
+  { k: "b", name: "Server B", az: "us-east-1b", y: 150 },
+  { k: "c", name: "Server C", az: "us-east-1a", y: 255 },
+];
+---
+<div class="viz" data-track="cloud" data-viz="lb-spread">
+  <div class="viz-controls">
+    <span class="lbl" id="lbs-mode">Health check</span>
+    <div class="seg" role="group" aria-labelledby="lbs-mode">
+      <button type="button" data-mode="shallow" aria-pressed="true">Shallow</button>
+      <button type="button" data-mode="deep" aria-pressed="false">Deep</button>
+    </div>
+    <span class="lbl" id="lbs-crash">Crash the app on</span>
+    <div class="seg" role="group" aria-labelledby="lbs-crash">
+      {servers.map((s) => <button type="button" data-crash={s.k} aria-pressed="false" aria-label={`Crash the app on ${s.name}`}>{s.k.toUpperCase()}</button>)}
+    </div>
+    <button class="btn" type="button" data-act="db" aria-pressed="false">Break the database</button>
+    <button class="btn line" type="button" data-act="send">Send 6 requests</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see all the servers</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 380" role="img" aria-labelledby="lbs-title">
+      <title id="lbs-title">A customer's phone sends requests to a load balancer. The load balancer spreads them across three servers in a target group, two in zone us-east-1a and one in us-east-1b. All three servers use one database.</title>
+      <path class="vz-wire" d="M130 182 L190 182" />
+      {servers.map((s) => <path class="vz-wire" d={`M320 182 L400 ${s.y + 40}`} />)}
+      {servers.map((s) => <path class="vz-wire" d={`M560 ${s.y + 40} L640 185`} />)}
+
+      <rect data-n="phone" class="vz-node" x="20" y="150" width="110" height="64" rx="10" />
+      <text class="vz-t" x="75" y="178" text-anchor="middle">Customers</text>
+      <text class="vz-s" x="75" y="195" text-anchor="middle">GET /</text>
+
+      <rect data-n="lb" class="vz-node" x="190" y="140" width="130" height="84" rx="8" />
+      <text class="vz-t" x="255" y="170" text-anchor="middle">Load balancer</text>
+      <text class="vz-s" x="255" y="187" text-anchor="middle">listener: HTTP 80</text>
+      <text data-n="hc" class="vz-r" x="255" y="206" text-anchor="middle">checks GET /health</text>
+
+      <rect class="vz-vpc" x="380" y="20" width="200" height="345" rx="12" />
+      <text class="vz-label" x="394" y="38">Target group</text>
+      {servers.map((s) => (
+        <g>
+          <rect data-n={`s-${s.k}`} class="vz-node okk" x="400" y={s.y} width="160" height="80" rx="8" />
+          <text class="vz-t" x="414" y={s.y + 22}>{s.name}</text>
+          <text class="vz-s" x="414" y={s.y + 39}>{s.az}</text>
+          <text data-n={`st-${s.k}`} class="vz-r lbs-ok" x="414" y={s.y + 62}>healthy: gets traffic</text>
+        </g>
+      ))}
+
+      <rect data-n="db" class="vz-node" x="640" y="150" width="120" height="70" rx="8" />
+      <text class="vz-t" x="700" y="178" text-anchor="middle">Database</text>
+      <text data-n="dbst" class="vz-s" x="700" y="196" text-anchor="middle">working</text>
+
+      <circle data-n="dot" class="vz-dot" r="8" cx="130" cy="182" opacity="0" />
+    </svg>
+  </div>
+  <p class="lbs-tally" aria-label="Responses so far">
+    <span class="t200">200 OK: <b data-n="n200">0</b></span>
+    <span class="t500">500 error: <b data-n="n500">0</b></span>
+    <span class="t503">502 bad gateway: <b data-n="n502">0</b></span>
+  </p>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>All three servers pass their health check. Choose <b>Send 6 requests</b> to watch the load balancer spread them.</div>
+</div>
+
+<style is:global>
+  [data-viz="lb-spread"] .lbs-ok { fill: var(--ok); font-weight: 600; }
+  [data-viz="lb-spread"] .lbs-bad { fill: var(--bad); font-weight: 600; }
+  [data-viz="lb-spread"] .lbs-chk { fill: var(--warn); font-weight: 600; }
+  [data-viz="lb-spread"] .vz-node.dim { opacity: .55; }
+  [data-viz="lb-spread"] [data-n^="st-"] { font-size: 9.5px; }
+  [data-viz="lb-spread"] .lbs-tally { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 4px 16px 12px; font-size: 14px; color: var(--ink-2); }
+  [data-viz="lb-spread"] .lbs-tally b { color: var(--ink); }
+  [data-viz="lb-spread"] .lbs-tally .t200 b { color: var(--ok); }
+  [data-viz="lb-spread"] .lbs-tally .t500 b, [data-viz="lb-spread"] .lbs-tally .t503 b { color: var(--bad); }
+</style>
+
+<script>
+  import { beat, moveDot, press, reduced, sleep, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type K = "a" | "b" | "c";
+  const KS: K[] = ["a", "b", "c"];
+  const Y: Record<K, number> = { a: 85, b: 190, c: 295 };
+  const NAME: Record<K, string> = { a: "A", b: "B", c: "C" };
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="lb-spread"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const dot = q<SVGCircleElement>("dot");
+      const lb = q<SVGRectElement>("lb");
+      const db = q<SVGRectElement>("db");
+      const phone = q<SVGRectElement>("phone");
+      const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+      const crashBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-crash]")];
+      const dbBtn = root.querySelector<HTMLButtonElement>('[data-act="db"]')!;
+      let mode: "shallow" | "deep" = "shallow";
+      const crashed: Record<K, boolean> = { a: false, b: false, c: false };
+      const healthy: Record<K, boolean> = { a: true, b: true, c: true };
+      let dbDown = false;
+      let rr = 0;
+      const tally = { n200: 0, n500: 0, n502: 0 };
+      let run = 0;
+
+      const passes = (k: K) => !crashed[k] && !(mode === "deep" && dbDown);
+
+      function busy(on: boolean) {
+        root.querySelectorAll<HTMLButtonElement>(".viz-controls button:not([data-act=reset])").forEach((b) => (b.disabled = on));
+      }
+      function drawServers(checking = false) {
+        for (const k of KS) {
+          const r = q<SVGRectElement>("s-" + k);
+          const t = q<SVGTextElement>("st-" + k);
+          r.setAttribute("class", "vz-node " + (healthy[k] ? "okk" : "hit dim"));
+          if (checking && passes(k) !== healthy[k]) {
+            t.textContent = passes(k) ? "passing checks" : "failing checks";
+            t.setAttribute("class", "vz-r lbs-chk");
+          } else {
+            t.textContent = healthy[k] ? "healthy: gets traffic" : "unhealthy: no traffic";
+            t.setAttribute("class", "vz-r " + (healthy[k] ? "lbs-ok" : "lbs-bad"));
+          }
+        }
+        db.setAttribute("class", "vz-node" + (dbDown ? " hit" : ""));
+        q<SVGTextElement>("dbst").textContent = dbDown ? "not reachable" : "working";
+        q<SVGTextElement>("hc").textContent = mode === "deep" ? "checks /health + database" : "checks GET /health";
+      }
+      function drawTally() {
+        (Object.keys(tally) as (keyof typeof tally)[]).forEach((n) => (q<HTMLElement>(n).textContent = String(tally[n])));
+      }
+
+      /* Two rounds of health checks, the unhealthy threshold. Then the new
+         status sticks. */
+      async function check(what: string) {
+        const me = ++run;
+        const live = () => me === run;
+        const flips = KS.filter((k) => passes(k) !== healthy[k]);
+        if (!flips.length) {
+          drawServers();
+          const all = KS.filter((k) => healthy[k]).map((k) => NAME[k]);
+          tell(say, what, `Every health check gives the same answer as before, so nothing changes. Servers getting traffic: <b>${all.length ? all.join(", ") : "none"}</b>.${dbDown && mode === "shallow" ? " The database is broken, but <code>/health</code> doesn't touch it, so every server still passes." : ""}`);
+          return;
+        }
+        busy(true);
+        drawServers(true);
+        const names = flips.map((k) => NAME[k]).join(", ");
+        tell(say, what + ": check 1 of 2", `The load balancer checks every server every 10 seconds. Server${flips.length > 1 ? "s" : ""} <b>${names}</b> gave a different answer. One result isn't enough: it waits for a second.`);
+        await beat(900); if (!live()) return;
+        tell(say, what + ": check 2 of 2", `Second check, same answer for <b>${names}</b>. That's 2 in a row, the threshold. About 20 seconds have passed.`);
+        await beat(900); if (!live()) return;
+        for (const k of flips) healthy[k] = passes(k);
+        drawServers();
+        busy(false);
+        const up = KS.filter((k) => healthy[k]);
+        if (!up.length && mode === "deep" && dbDown) {
+          tell(say, "Every server failed at once", "The database broke, and the <b>deep</b> check asks about the database. So all three servers failed <b>together</b>. With no healthy target, the load balancer <b>fails open</b> and keeps sending requests to all of them, but the auto scaling group behind them starts replacing every server, and the replacements fail the same check. Capacity keeps disappearing. <b>A database problem just became a total outage.</b>", "bad");
+        } else if (!up.length) {
+          tell(say, "No healthy servers", "Every server is failing its health check. A load balancer then <b>fails open</b>: rather than refuse everyone, it sends requests to all of them anyway. Send some requests to see what that gets customers.", "bad");
+        } else {
+          const down = KS.filter((k) => !healthy[k]).map((k) => NAME[k]);
+          tell(say, "Health checks decided", `Traffic now goes only to <b>${up.map((k) => NAME[k]).join(", ")}</b>.${down.length ? ` ${down.join(", ")} gets nothing until it passes 2 checks in a row again.` : " Every server is back in."} Send some requests to see it.`, down.length ? "" : "good");
+        }
+      }
+
+      async function send() {
+        const me = ++run;
+        const live = () => me === run;
+        busy(true);
+        const got: Record<string, number> = {};
+        for (let i = 1; i <= 6; i++) {
+          const up = KS.filter((k) => healthy[k]);
+          /* With no healthy target, an ALB fails open and uses every target. */
+          const failOpen = up.length === 0;
+          const targets = failOpen ? KS : up;
+          dot.setAttribute("class", "vz-dot");
+          phone.classList.add("lit");
+          await moveDot(dot, [[130, 182], [255, 182]], 700); if (!live()) return;
+          lb.classList.add("lit");
+          const k = targets[rr++ % targets.length];
+          got[NAME[k]] = (got[NAME[k]] || 0) + 1;
+          if (failOpen && !passes(k) && !dbDown) {
+            /* the server itself is broken: no valid answer comes back */
+            await moveDot(dot, [[255, 182], [400, Y[k]]], 700); if (!live()) return;
+            dot.setAttribute("class", "vz-dot bot");
+            tally.n502++; drawTally();
+            tell(say, `Request ${i} of 6`, `No server is healthy, so the load balancer <b>fails open</b> and tries <b>${NAME[k]}</b> anyway. Its app has crashed, so no valid answer comes back: <b>502 Bad Gateway</b>.`, "bad");
+            await sleep(reduced() ? 100 : 250); if (!live()) return;
+            continue;
+          }
+          await moveDot(dot, [[255, 182], [400, Y[k]], [560, Y[k]], [640, 185]], 700); if (!live()) return;
+          if (dbDown) {
+            db.classList.add("hit");
+            dot.setAttribute("class", "vz-dot bot");
+            tally.n500++; drawTally();
+            tell(say, `Request ${i} of 6`, `Server <b>${NAME[k]}</b> took it, but couldn't reach the database. It answered <b>500</b> with a clear error. The page is broken; the servers are not.`, "bad");
+          } else {
+            dot.setAttribute("class", "vz-dot back");
+            tally.n200++; drawTally();
+            tell(say, `Request ${i} of 6`, `Server <b>${NAME[k]}</b> answered <b>200 OK</b>.`);
+          }
+          await sleep(reduced() ? 100 : 250); if (!live()) return;
+        }
+        dot.setAttribute("opacity", "0");
+        lb.classList.remove("lit"); phone.classList.remove("lit");
+        busy(false);
+        const spread = Object.entries(got).map(([n, c]) => `${n} took ${c}`).join(", ");
+        const allDown = KS.every((k) => !healthy[k]);
+        if (allDown && dbDown) tell(say, "Done: 6 requests", `${spread}. No server was healthy, so the load balancer <b>failed open</b> and used them all, and every answer was a 500. Meanwhile the auto scaling group is replacing servers that never pass the deep check: <b>a total outage in the making</b>.`, "bad");
+        else if (allDown) tell(say, "Done: 6 requests", `${spread}. Failing open meant every request went to a broken server: <b>502</b> every time. Failing open only helps when the checks are wrong, not the servers.`, "bad");
+        else if (dbDown) tell(say, "Done: 6 requests", `${spread}. Every answer was a 500, but every server stayed in: <b>degraded, not down</b>. The servers can still serve a friendly error, and the alarm on errors tells a person what's wrong.`, "bad");
+        else tell(say, "Done: 6 requests", `${spread}. The load balancer took turns across the <b>healthy</b> servers only.`, "good");
+      }
+
+      function reset() {
+        run++;
+        mode = "shallow"; dbDown = false; rr = 0;
+        KS.forEach((k) => { crashed[k] = false; healthy[k] = true; });
+        tally.n200 = tally.n500 = tally.n502 = 0;
+        press(modeBtns, (b) => b.dataset.mode === "shallow");
+        press(crashBtns, () => false);
+        dbBtn.setAttribute("aria-pressed", "false"); dbBtn.textContent = "Break the database";
+        dot.setAttribute("opacity", "0");
+        lb.classList.remove("lit"); phone.classList.remove("lit");
+        busy(false); drawServers(); drawTally();
+        tell(say, "Ready", "All three servers pass their health check. Choose <b>Send 6 requests</b>.");
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.mode) {
+          mode = b.dataset.mode as typeof mode;
+          press(modeBtns, (x) => x === b);
+          check(mode === "deep" ? "Deep health check" : "Shallow health check");
+        } else if (b.dataset.crash) {
+          const k = b.dataset.crash as K;
+          crashed[k] = !crashed[k];
+          b.setAttribute("aria-pressed", String(crashed[k]));
+          check(crashed[k] ? `Server ${NAME[k]}'s app crashed` : `Server ${NAME[k]}'s app is back`);
+        } else if (b.dataset.act === "db") {
+          dbDown = !dbDown;
+          b.setAttribute("aria-pressed", String(dbDown));
+          b.textContent = dbDown ? "Fix the database" : "Break the database";
+          check(dbDown ? "The database broke" : "The database is back");
+        } else if (b.dataset.act === "send") send();
+        else if (b.dataset.act === "reset") reset();
+      });
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

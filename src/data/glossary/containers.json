@@ -1,0 +1,462 @@
+[
+ {
+  "term": "Registry (container)",
+  "lesson": "images-and-containers",
+  "match": [
+   "container registry",
+   "registries"
+  ],
+  "def": "A server that stores images. You push an image to it and servers pull from it. Docker Hub is public; ECR is private to your AWS account."
+ },
+ {
+  "term": "Image tag",
+  "lesson": "images-and-containers",
+  "match": [
+   "image tag"
+  ],
+  "def": "The label after the colon in an image name, like v1 in quickcart-orders:v1. Tags can be moved to a different image unless the registry forbids it."
+ },
+ {
+  "term": "Image layer",
+  "lesson": "images-and-containers",
+  "match": [
+   "layers"
+  ],
+  "def": "One set of file changes in an image, usually made by one Dockerfile line. Layers are shared between images and downloaded only once."
+ },
+ {
+  "term": "Container runtime",
+  "lesson": "images-and-containers",
+  "match": [
+   "container runtime"
+  ],
+  "def": "The software that starts and stops containers on a machine, such as Docker or containerd."
+ },
+ {
+  "term": "Hypervisor",
+  "lesson": "images-and-containers",
+  "match": [
+   "hypervisor"
+  ],
+  "def": "The software that splits one physical server into virtual machines, each with its own operating system and kernel."
+ },
+ {
+  "term": "Virtual machine",
+  "lesson": "images-and-containers",
+  "match": [
+   "virtual machine",
+   "virtual machines"
+  ],
+  "def": "A software computer with its own operating system and kernel, running on a hypervisor. An EC2 instance is one."
+ },
+ {
+  "term": "Kernel",
+  "lesson": "images-and-containers",
+  "match": [
+   "kernel"
+  ],
+  "def": "The core of an operating system, which runs programs and talks to the hardware. Every container on a machine shares the host's kernel."
+ },
+ {
+  "term": "cgroups",
+  "lesson": "images-and-containers",
+  "match": [
+   "cgroups"
+  ],
+  "def": "A Linux kernel feature that limits how much CPU and memory a group of processes, such as a container, may use."
+ },
+ {
+  "term": "EKS extended support",
+  "lesson": "ecs-or-eks",
+  "match": [
+   "extended support"
+  ],
+  "def": "The period after a Kubernetes version leaves EKS standard support. The control plane then costs about six times more per hour."
+ },
+ {
+  "term": "Dockerfile",
+  "lesson": "dockerfile",
+  "match": [
+   "Dockerfile"
+  ],
+  "def": "A text file of instructions that Docker runs, top to bottom, to build an image."
+ },
+ {
+  "term": "Multi-stage build",
+  "lesson": "dockerfile",
+  "match": [
+   "multi-stage build",
+   "multi-stage builds"
+  ],
+  "def": "A Dockerfile with more than one FROM. Early stages build things; only the last stage becomes the image, so build tools don't ship."
+ },
+ {
+  "term": "Build cache (layer cache)",
+  "lesson": "dockerfile",
+  "match": [
+   "layer cache",
+   "build cache"
+  ],
+  "def": "Docker reuses a saved layer when a line and the files it reads haven't changed. Once one line changes, every line below it rebuilds."
+ },
+ {
+  "term": ".dockerignore",
+  "lesson": "dockerfile",
+  "match": [
+   ".dockerignore"
+  ],
+  "def": "A file listing what to leave out of the build context, like .git and .env. It keeps builds fast and secrets out of images."
+ },
+ {
+  "term": "Volume",
+  "lesson": "volumes-and-networking",
+  "match": [
+   "named volume",
+   "named volumes"
+  ],
+  "def": "Storage that Docker creates and manages, mounted into a container. It outlives the container, so a database's files survive docker rm."
+ },
+ {
+  "term": "Bind mount",
+  "lesson": "volumes-and-networking",
+  "match": [
+   "bind mount",
+   "bind mounts"
+  ],
+  "def": "A folder on your own machine shown inside a container. Useful for local development; there's no such folder on Fargate."
+ },
+ {
+  "term": "Bridge network (user-defined)",
+  "lesson": "volumes-and-networking",
+  "match": [
+   "user-defined bridge",
+   "user-defined network"
+  ],
+  "def": "A Docker network you create with docker network create. Containers on it can reach each other by name, through built-in DNS."
+ },
+ {
+  "term": "Docker Compose",
+  "lesson": "volumes-and-networking",
+  "match": [
+   "Docker Compose",
+   "compose.yaml"
+  ],
+  "def": "A tool that starts several containers, their network and volumes from one file, compose.yaml. Each service name becomes a hostname."
+ },
+ {
+  "term": "Port publishing",
+  "lesson": "volumes-and-networking",
+  "match": [
+   "publish a port",
+   "port publishing"
+  ],
+  "def": "Connecting a port on the host to a port in a container, like -p 8080:8080. The host's port comes first."
+ },
+ {
+  "term": "ECR",
+  "lesson": "ecr",
+  "match": [
+   "ECR"
+  ],
+  "def": "Elastic Container Registry: AWS's private registry for container images, inside your account. ECS and EKS pull images from it."
+ },
+ {
+  "term": "Immutable tag",
+  "lesson": "ecr",
+  "match": [
+   "immutable tags",
+   "immutable tag"
+  ],
+  "def": "A repository setting that stops a tag such as v1 ever being moved to a different image, so every version name means exactly one build."
+ },
+ {
+  "term": "Lifecycle policy (ECR)",
+  "lesson": "ecr",
+  "match": [
+   "lifecycle policy"
+  ],
+  "def": "Rules that expire old images from an ECR repository automatically, such as untagged images after 7 days."
+ },
+ {
+  "term": "Scan on push",
+  "lesson": "ecr",
+  "match": [
+   "scan on push",
+   "Scan on push"
+  ],
+  "def": "ECR image scanning that checks each image for known vulnerabilities as soon as it is pushed. Basic scanning is free."
+ },
+ {
+  "term": "Image digest",
+  "lesson": "images-and-containers",
+  "match": [
+   "digest"
+  ],
+  "def": "A sha256 fingerprint calculated from an image's contents. Unlike a tag, it can never point at a different image."
+ },
+ {
+  "term": "ECS",
+  "lesson": "ecs-fargate",
+  "match": [
+   "ECS"
+  ],
+  "def": "Elastic Container Service: AWS's service for running containers. You describe a task and a desired count, and ECS keeps it running."
+ },
+ {
+  "term": "Fargate",
+  "lesson": "ecs-fargate",
+  "match": [
+   "Fargate"
+  ],
+  "def": "A way to run ECS tasks (and EKS pods) with no servers of your own. You pay for the CPU and memory each task asks for."
+ },
+ {
+  "term": "Task definition",
+  "lesson": "ecs-fargate",
+  "match": [
+   "task definition",
+   "task definitions"
+  ],
+  "def": "ECS's recipe for a task: image, CPU, memory, port, logs and roles. Every change makes a new numbered revision."
+ },
+ {
+  "term": "Task (ECS)",
+  "lesson": "ecs-fargate",
+  "match": [
+   "ECS task",
+   "ECS tasks"
+  ],
+  "def": "One running copy of an ECS task definition. On Fargate each task has its own network card and private IP."
+ },
+ {
+  "term": "ECS service",
+  "lesson": "ecs-fargate",
+  "match": [
+   "ECS service"
+  ],
+  "def": "Keeps a desired number of ECS tasks running, replaces any that stop, and registers them with a load balancer."
+ },
+ {
+  "term": "Desired count",
+  "lesson": "ecs-fargate",
+  "match": [
+   "desired count"
+  ],
+  "def": "How many tasks an ECS service should run. The service keeps comparing it with what is running and closes the gap."
+ },
+ {
+  "term": "Execution role",
+  "lesson": "ecs-fargate",
+  "match": [
+   "execution role"
+  ],
+  "def": "The IAM role ECS uses before your app starts: pulling the image, sending logs and fetching secrets."
+ },
+ {
+  "term": "Task role",
+  "lesson": "ecs-fargate",
+  "match": [
+   "task role"
+  ],
+  "def": "The IAM role your code uses for its own AWS calls while an ECS task runs."
+ },
+ {
+  "term": "awsvpc network mode",
+  "lesson": "ecs-fargate",
+  "match": [
+   "awsvpc"
+  ],
+  "def": "The ECS network mode where each task gets its own network card, private IP and security group. The only mode on Fargate."
+ },
+ {
+  "term": "Stopped reason",
+  "lesson": "ecs-fargate",
+  "match": [
+   "stopped reason"
+  ],
+  "def": "The message ECS writes on a stopped task explaining why it stopped. The first place to look when a task won't start."
+ },
+ {
+  "term": "Rolling deployment",
+  "lesson": "zero-downtime-releases",
+  "match": [
+   "rolling deployment",
+   "rolling update"
+  ],
+  "def": "A release that replaces the old copies of an app with new ones a few at a time, while the service keeps running."
+ },
+ {
+  "term": "Deregistration delay",
+  "lesson": "zero-downtime-releases",
+  "match": [
+   "deregistration delay"
+  ],
+  "def": "How long a load balancer lets requests already in progress finish on a target it's removing, while sending it nothing new. The default is 300 seconds."
+ },
+ {
+  "term": "Graceful shutdown",
+  "lesson": "zero-downtime-releases",
+  "match": [
+   "graceful shutdown"
+  ],
+  "def": "An app hearing the stop signal, finishing the requests it's handling, and then exiting, instead of dying mid-request."
+ },
+ {
+  "term": "SIGTERM",
+  "lesson": "zero-downtime-releases",
+  "match": [
+   "SIGTERM"
+  ],
+  "def": "The polite \"please stop\" signal sent to a container before it's stopped. If the process is still running after the stop timeout, SIGKILL ends it by force."
+ },
+ {
+  "term": "Health check grace period",
+  "lesson": "zero-downtime-releases",
+  "match": [
+   "health check grace period"
+  ],
+  "def": "How long ECS ignores failed load balancer health checks after a task starts, so a slow starter isn't replaced before it's ready."
+ },
+ {
+  "term": "Deployment circuit breaker",
+  "lesson": "zero-downtime-releases",
+  "match": [
+   "circuit breaker"
+  ],
+  "def": "An ECS setting that stops a release whose new tasks keep failing and, with rollback on, returns the service to the last deployment that worked."
+ },
+ {
+  "term": "Kubernetes",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "Kubernetes"
+  ],
+  "def": "Open-source software that runs containers across many servers and keeps making what's running match the desired state you describe in files."
+ },
+ {
+  "term": "Pod",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "pod",
+   "pods"
+  ],
+  "def": "The smallest thing Kubernetes runs: one or more containers sharing a network address. One running copy of your app, like an ECS task."
+ },
+ {
+  "term": "Deployment (Kubernetes)",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "Kubernetes Deployment"
+  ],
+  "def": "A Kubernetes object that says how many pods of which image to run, and replaces them gradually when you release."
+ },
+ {
+  "term": "ReplicaSet",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "ReplicaSet",
+   "ReplicaSets"
+  ],
+  "def": "Created by a Deployment, one per version: keeps exactly the right number of pods of that version running."
+ },
+ {
+  "term": "Service (Kubernetes)",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "Kubernetes Service"
+  ],
+  "def": "A stable name and address inside a cluster in front of a changing set of ready pods."
+ },
+ {
+  "term": "Ingress",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "Ingress"
+  ],
+  "def": "A Kubernetes request for a load balancer with routing rules. On EKS, the AWS Load Balancer Controller builds an ALB for it."
+ },
+ {
+  "term": "Readiness probe",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "readiness probe",
+   "readiness probes"
+  ],
+  "def": "A regular check that decides whether a pod gets traffic. A failing pod is taken out of the Service but keeps running."
+ },
+ {
+  "term": "Liveness probe",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "liveness probe",
+   "liveness probes"
+  ],
+  "def": "A regular check that decides whether a container is stuck. When it keeps failing, Kubernetes restarts the container."
+ },
+ {
+  "term": "Namespace (Kubernetes)",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "Kubernetes namespace"
+  ],
+  "def": "A named folder for Kubernetes objects inside one cluster, such as default or kube-system."
+ },
+ {
+  "term": "EKS",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "EKS"
+  ],
+  "def": "Amazon Elastic Kubernetes Service: AWS runs the Kubernetes control plane for you; you choose how the nodes run."
+ },
+ {
+  "term": "Control plane",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "control plane"
+  ],
+  "def": "The part of Kubernetes that makes decisions: its API, controllers, scheduler and store of desired state. On EKS, AWS runs it for an hourly fee."
+ },
+ {
+  "term": "Node group",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "node group",
+   "managed node group"
+  ],
+  "def": "A set of EC2 instances that run a cluster's pods. In a managed node group, AWS launches and helps update them."
+ },
+ {
+  "term": "AWS Load Balancer Controller",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "AWS Load Balancer Controller",
+   "load balancer controller"
+  ],
+  "def": "A program you install in an EKS cluster that builds AWS load balancers when it sees an Ingress, and removes them when the Ingress is deleted."
+ },
+ {
+  "term": "kubectl",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "kubectl"
+  ],
+  "def": "The command-line tool for talking to a Kubernetes cluster: apply files, list pods, read events, roll releases back."
+ },
+ {
+  "term": "eksctl",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "eksctl"
+  ],
+  "def": "AWS's command-line tool that creates and deletes a whole EKS cluster, with its nodes and IAM roles, in one command."
+ },
+ {
+  "term": "Desired state",
+  "lesson": "kubernetes-and-eks",
+  "match": [
+   "desired state"
+  ],
+  "def": "What you've declared should be running, such as replicas: 2. Controllers keep comparing reality with it and closing the gap."
+ }
+]

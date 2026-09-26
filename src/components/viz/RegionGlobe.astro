@@ -1,0 +1,346 @@
+---
+/*
+ * Regions and zones: a globe of AWS regions, and the zones inside us-east-1.
+ * Teaches: anything in one zone fails with that zone, so run in two.
+ *
+ * The flat map below is the real, server-rendered visual. When the visual
+ * scrolls into view, WebGL works and reduced motion is off, a 3D globe
+ * (Three.js, loaded lazily) takes the map's place. The zone panel and every
+ * control work the same either way.
+ */
+import { LAND_3, landRuns, REGIONS, ZONES, ZONE_BOX, SERVER_W, SERVER_H, serverSpots, wire } from "../../scripts/region-globe-data";
+
+/* Flat map: x = longitude + 180, y = 90 - latitude, in degrees. */
+const step = LAND_3.step;
+const land = landRuns(LAND_3)
+  .map(([r, s, n]) => `M${s * step + step / 2} ${r * step + step / 2}h${(n - 1) * step}`)
+  .join("");
+const mx = (lon: number) => lon + 180;
+const my = (lat: number) => 90 - lat;
+const home = REGIONS[0];
+const spots = serverSpots("one");
+const names = REGIONS.map((r) => `${r.code} (${r.name})`).join(", ");
+---
+<div class="viz" data-track="cloud" data-viz="region-globe" data-mode="2d">
+  <div class="viz-controls">
+    <span class="lbl" id="rg-lbl-run">QuickCart runs in</span>
+    <div class="seg" role="group" aria-labelledby="rg-lbl-run">
+      <button type="button" data-run="one" aria-pressed="true">One zone</button>
+      <button type="button" data-run="two" aria-pressed="false">Two zones</button>
+    </div>
+    <span class="lbl" id="rg-lbl-fail">Fail a zone</span>
+    <div class="seg" role="group" aria-labelledby="rg-lbl-fail">
+      {ZONES.map((z) => <button type="button" data-fail={z} aria-pressed="false">us-east-1{z}</button>)}
+    </div>
+    <button class="btn line" type="button" data-act="send">Send 6 orders</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see all three zones</p>
+  <div class="viz-stage rg-stage">
+    <div class="rg-world">
+      <svg class="rg-map" viewBox="0 12 360 136" role="img" aria-labelledby="rg-map-title">
+        <title id="rg-map-title">A flat world map with some of AWS's regions marked: {names}. us-east-1 is circled, with its three zones shown beside it.</title>
+        <path class="rg-land" d={land} />
+        {REGIONS.slice(1).map((r) => <circle class="rg-region" cx={mx(r.lon)} cy={my(r.lat)} r="2.6" />)}
+        <circle class="rg-home-ring" cx={mx(home.lon)} cy={my(home.lat)} r="6" />
+        <circle class="rg-home" cx={mx(home.lon)} cy={my(home.lat)} r="2.6" />
+        <path class="rg-lead" d={`M${mx(home.lon) - 4} ${my(home.lat) + 5} L54 86`} />
+        <rect class="rg-callout" x="4" y="86" width="100" height="54" rx="5" />
+        <text class="rg-ct" x="11" y="100">us-east-1 zones</text>
+        {ZONES.map((z, i) => (
+          <g>
+            <circle data-mz={z} class:list={["rg-mz", i === 0 ? "up" : "idle"]} cx={24 + i * 30} cy="113" r="6" />
+            <text class="rg-cz" x={24 + i * 30} y="133" text-anchor="middle">{z}</text>
+          </g>
+        ))}
+      </svg>
+      <div class="rg-3d" aria-hidden="true"><span class="rg-chip">us-east-1</span></div>
+      <p class="rg-cap"><span class="rg-cap-2d">Some of AWS's regions. Each region is a separate part of the world with its own zones.</span><span class="rg-cap-3d">Drag to turn the globe. Zone spacing is exaggerated so you can see it.</span></p>
+    </div>
+    <div class="rg-zones">
+      <svg viewBox="0 0 640 296" role="img" aria-labelledby="rg-z-title">
+        <title id="rg-z-title">Inside us-east-1: customers send orders to a load balancer, which sends each one to a server. Three availability zones, us-east-1a, us-east-1b and us-east-1c, sit side by side.</title>
+        <defs>
+          <pattern id="rg-hatch" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line class="rg-hatch-l" x1="0" y1="0" x2="0" y2="10" />
+          </pattern>
+        </defs>
+        <text class="vz-s" x="630" y="24" text-anchor="end" data-n="tally">Orders: 0 placed, 0 failed</text>
+        <rect data-n="cust" class="vz-node" x="250" y="10" width="140" height="44" rx="10" />
+        <text class="vz-t" x="320" y="30" text-anchor="middle">Customers</text>
+        <text class="vz-s" x="320" y="46" text-anchor="middle">placing orders</text>
+        <path class="vz-wire" d="M320 54 L320 80" />
+        <rect data-n="lb" class="vz-node" x="170" y="80" width="300" height="42" rx="8" />
+        <text class="vz-t" x="320" y="99" text-anchor="middle">Load balancer</text>
+        <text class="vz-s" x="320" y="114" text-anchor="middle">sends each order to a healthy server</text>
+        <rect class="vz-vpc" x="8" y="136" width="624" height="154" rx="12" />
+        <text class="vz-label" x="22" y="156">us-east-1 (N. Virginia)</text>
+        {spots.map((s, i) => <path data-w={i} class="vz-wire" d={wire(s)} />)}
+        {ZONES.map((z) => {
+          const b = ZONE_BOX[z];
+          return (
+            <g data-zone={z}>
+              <rect class="rg-zone" x={b.x} y={b.y} width={b.w} height={b.h} rx="9" />
+              <rect class="rg-zone-hatch" x={b.x} y={b.y} width={b.w} height={b.h} rx="9" fill="url(#rg-hatch)" />
+              <text class="vz-t" x={b.x + 12} y={b.y + 22}>us-east-1{z}</text>
+              <text class="rg-status" x={b.x + b.w - 12} y={b.y + 22} text-anchor="end" data-st={z}>Up</text>
+              <text class="vz-s rg-empty" x={b.x + b.w / 2} y={b.y + 70} text-anchor="middle" data-empty={z} opacity={z === "a" ? "0" : "1"}>Nothing running here</text>
+            </g>
+          );
+        })}
+        {spots.map((s, i) => (
+          <g data-srv={i} transform={`translate(${s.x} ${s.y})`}>
+            <rect class="vz-node rg-srv" width={SERVER_W} height={SERVER_H} rx="7" />
+            <text class="vz-t" x={SERVER_W / 2} y="20" text-anchor="middle">Server {i + 1}</text>
+            <text class="vz-s rg-srv-st" x={SERVER_W / 2} y="36" text-anchor="middle">running</text>
+          </g>
+        ))}
+        <g data-n="x" opacity="0"><line class="vz-x" x1="398" y1="92" x2="412" y2="106" /><line class="vz-x" x1="412" y1="92" x2="398" y2="106" /></g>
+        <circle data-n="dot" class="vz-dot" r="7" cx="320" cy="54" opacity="0" />
+      </svg>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>QuickCart's two servers both run in <b>us-east-1a</b>. Choose <b>Send 6 orders</b>, then fail that zone and send them again.</div>
+</div>
+
+<style is:global>
+  [data-viz="region-globe"] .rg-stage { container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px 14px; align-items: center; }
+  @container (min-width: 760px) {
+    [data-viz="region-globe"] .rg-stage.rg-stage { grid-template-columns: minmax(0, 4fr) minmax(0, 7fr); }
+  }
+  [data-viz="region-globe"] .rg-world { position: relative; min-width: 0; }
+  [data-viz="region-globe"] .viz-stage svg.rg-map { min-width: 0; max-width: 520px; margin: 0 auto; }
+  [data-viz="region-globe"] .rg-zones { min-width: 0; overflow-x: auto; }
+  [data-viz="region-globe"] .rg-zones svg { min-width: 560px; }
+  [data-viz="region-globe"] .rg-land { fill: none; stroke: var(--rule-2); stroke-width: 2.1; stroke-linecap: round; }
+  [data-viz="region-globe"] .rg-region { fill: var(--ink-3); }
+  [data-viz="region-globe"] .rg-home { fill: var(--cloud); }
+  [data-viz="region-globe"] .rg-home-ring { fill: none; stroke: var(--cloud); stroke-width: 1.4; }
+  [data-viz="region-globe"] .rg-lead { fill: none; stroke: var(--cloud); stroke-width: .8; stroke-dasharray: 2 2; }
+  [data-viz="region-globe"] .rg-callout { fill: var(--surface); stroke: var(--cloud); stroke-width: .8; }
+  [data-viz="region-globe"] .rg-ct { font-family: var(--font); font-size: 10px; font-weight: 700; fill: var(--ink); }
+  [data-viz="region-globe"] .rg-cz { font-family: var(--font); font-size: 9px; font-weight: 700; fill: var(--ink-2); }
+  [data-viz="region-globe"] .rg-mz { stroke-width: 1.2; transition: fill .2s; }
+  [data-viz="region-globe"] .rg-mz.up { fill: var(--ok); stroke: var(--ok); }
+  [data-viz="region-globe"] .rg-mz.idle { fill: var(--surface); stroke: var(--cloud); }
+  [data-viz="region-globe"] .rg-mz.down { fill: var(--bad); stroke: var(--bad); }
+  [data-viz="region-globe"] .rg-3d { display: none; position: relative; width: 100%; max-width: 320px; aspect-ratio: 1; margin: 0 auto; overflow: hidden; }
+  [data-viz="region-globe"] .rg-canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: pan-y; }
+  [data-viz="region-globe"] .rg-canvas.grabbing { cursor: grabbing; }
+  [data-viz="region-globe"] .rg-chip { position: absolute; left: 0; top: 0; pointer-events: none; font-size: 12.5px; font-weight: 800; color: var(--cloud-t); background: var(--surface); border: 1px solid var(--cloud); border-radius: 6px; padding: 1px 7px; white-space: nowrap; transition: opacity .15s; }
+  [data-viz="region-globe"][data-mode="3d"] .rg-map { display: none; }
+  [data-viz="region-globe"][data-mode="3d"] .rg-3d { display: block; }
+  [data-viz="region-globe"] .rg-cap { margin: 4px 0 0; font-size: 13.5px; color: var(--ink-3); text-align: center; }
+  [data-viz="region-globe"] .rg-cap-3d, [data-viz="region-globe"][data-mode="3d"] .rg-cap-2d { display: none; }
+  [data-viz="region-globe"][data-mode="3d"] .rg-cap-3d { display: inline; }
+  [data-viz="region-globe"] .rg-zone { fill: var(--bg); stroke: var(--rule-2); stroke-width: 1.5; transition: fill .2s, stroke .2s; }
+  [data-viz="region-globe"] .rg-zone-hatch { opacity: 0; pointer-events: none; }
+  [data-viz="region-globe"] .rg-hatch-l { stroke: var(--bad); stroke-width: 2; opacity: .35; }
+  [data-viz="region-globe"] [data-zone].down .rg-zone { fill: var(--bad-bg); stroke: var(--bad); stroke-width: 2; }
+  [data-viz="region-globe"] [data-zone].down .rg-zone-hatch { opacity: 1; }
+  [data-viz="region-globe"] .rg-status { font-family: var(--font); font-size: 12px; font-weight: 800; fill: var(--ok); }
+  [data-viz="region-globe"] [data-zone].down .rg-status { fill: var(--bad); }
+  [data-viz="region-globe"] [data-srv].dead .rg-srv { stroke: var(--bad); stroke-dasharray: 4 3; fill: var(--surface); }
+  [data-viz="region-globe"] [data-srv].dead text { fill: var(--ink-3); }
+  [data-viz="region-globe"] .vz-wire.cut { stroke: var(--bad); opacity: .5; }
+  [data-viz="region-globe"] [data-srv] { transition: transform .35s; }
+  @media (prefers-reduced-motion: reduce) {
+    [data-viz="region-globe"] [data-srv], [data-viz="region-globe"] .rg-zone, [data-viz="region-globe"] .rg-mz { transition: none; }
+  }
+</style>
+
+<script>
+  import { beat, moveDot, press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+  import { ZONES, SERVER_ZONES, serverSpots, wire, SERVER_W, type Mode, type Zone } from "../../scripts/region-globe-data";
+  import type { Globe } from "../../scripts/region-globe-3d";
+
+  function webgl(): boolean {
+    try {
+      const c = document.createElement("canvas");
+      return !!(c.getContext("webgl2") || c.getContext("webgl"));
+    } catch {
+      return false;
+    }
+  }
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="region-globe"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)!;
+      const say = q<HTMLElement>(".viz-say");
+      const dot = q<SVGCircleElement>('[data-n="dot"]');
+      const x = q<SVGGElement>('[data-n="x"]');
+      const tally = q<SVGTextElement>('[data-n="tally"]');
+      const lb = q<SVGRectElement>('[data-n="lb"]');
+      const srv = [0, 1].map((i) => q<SVGGElement>(`[data-srv="${i}"]`));
+      const wires = [0, 1].map((i) => q<SVGPathElement>(`[data-w="${i}"]`));
+      const runBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-run]")];
+      const failBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-fail]")];
+      let mode: Mode = "one";
+      const failed = new Set<Zone>();
+      let run = 0; /* bumped on reset, so orders in flight stop narrating */
+      let globe: Globe | null = null;
+
+      const used = () => new Set<Zone>(SERVER_ZONES[mode]);
+      const alive = () => [0, 1].filter((i) => !failed.has(SERVER_ZONES[mode][i]));
+
+      function draw(focus = false) {
+        const spots = serverSpots(mode);
+        const u = used();
+        srv.forEach((g, i) => {
+          g.setAttribute("transform", `translate(${spots[i].x} ${spots[i].y})`);
+          const dead = failed.has(SERVER_ZONES[mode][i]);
+          g.classList.toggle("dead", dead);
+          g.querySelector(".rg-srv-st")!.textContent = dead ? "unreachable" : "running";
+          wires[i].setAttribute("d", wire(spots[i]));
+          wires[i].classList.toggle("cut", dead);
+        });
+        for (const z of ZONES) {
+          const down = failed.has(z);
+          q(`[data-zone="${z}"]`).classList.toggle("down", down);
+          q(`[data-st="${z}"]`).textContent = down ? "Offline" : "Up";
+          q(`[data-empty="${z}"]`).setAttribute("opacity", u.has(z) ? "0" : "1");
+          q(`[data-mz="${z}"]`).setAttribute("class", "rg-mz " + (down ? "down" : u.has(z) ? "up" : "idle"));
+        }
+        press(runBtns, (b) => b.dataset.run === mode);
+        press(failBtns, (b) => failed.has(b.dataset.fail as Zone));
+        globe?.update({ used: u, failed }, focus);
+      }
+
+      function clearRun() {
+        dot.setAttribute("opacity", "0");
+        x.setAttribute("opacity", "0");
+        lb.classList.remove("lit", "hit");
+        srv.forEach((g) => g.querySelector(".rg-srv")!.classList.remove("lit"));
+        tally.textContent = "Orders: 0 placed, 0 failed";
+      }
+
+      function busy(on: boolean) {
+        root.querySelectorAll<HTMLButtonElement>("[data-run],[data-fail],[data-act=send]").forEach((b) => (b.disabled = on));
+      }
+
+      function explain() {
+        const u = [...used()];
+        const up = alive().length;
+        const zoneList = u.map((z) => `us-east-1${z}`).join(" and ");
+        if (!failed.size) {
+          return tell(say, mode === "one" ? "One zone" : "Two zones", mode === "one"
+            ? "Both servers run in <b>us-east-1a</b>. Everything is up. Now fail <b>us-east-1a</b> and send orders again."
+            : "One server runs in <b>us-east-1a</b> and one in <b>us-east-1b</b>. The load balancer spreads orders across both. Now fail a zone.");
+        }
+        const f = [...failed].map((z) => `us-east-1${z}`).join(" and ");
+        if (up === 0) {
+          return tell(say, `${f} offline`, `A power or network failure has taken <b>${f}</b> offline. QuickCart runs only in ${zoneList}, so <b>every server is gone</b>. Send orders to see what customers get.`, "bad");
+        }
+        if (up === 2) {
+          return tell(say, `${f} offline`, `<b>${f}</b> is offline, but QuickCart has nothing running there, so nothing changes. It's only a problem if it's the zone you're in.`);
+        }
+        return tell(say, `${f} offline`, `<b>${f}</b> is offline and one server went with it. The other server, in another zone, is still running. Send orders to see what happens.`);
+      }
+
+      async function send() {
+        const me = ++run;
+        const live = () => me === run;
+        busy(true);
+        clearRun();
+        let ok = 0, bad = 0;
+        const healthy = alive();
+        const spots = serverSpots(mode);
+        for (let n = 0; n < 6; n++) {
+          dot.setAttribute("class", "vz-dot");
+          tell(say, `Order ${n + 1} of 6`, "An order arrives at the <b>load balancer</b>. It picks a server that is still healthy.");
+          await moveDot(dot, [[320, 54], [320, 100]], 520);
+          if (!live()) return;
+          if (!healthy.length) {
+            lb.classList.add("hit");
+            x.setAttribute("opacity", "1");
+            dot.setAttribute("class", "vz-dot bot");
+            bad++;
+          } else {
+            const i = healthy[n % healthy.length];
+            const s = spots[i];
+            await moveDot(dot, [[320, 100], [320, 122], [s.x + SERVER_W / 2, s.y + 4]], 620);
+            if (!live()) return;
+            srv[i].querySelector(".rg-srv")!.classList.add("lit");
+            ok++;
+          }
+          tally.textContent = `Orders: ${ok} placed, ${bad} failed`;
+          await beat(reduced() ? 60 : 160);
+          if (!live()) return;
+          x.setAttribute("opacity", "0");
+          lb.classList.remove("hit");
+          srv.forEach((g) => g.querySelector(".rg-srv")!.classList.remove("lit"));
+        }
+        dot.setAttribute("opacity", "0");
+        dot.setAttribute("class", "vz-dot");
+        busy(false);
+        if (bad === 6) {
+          tell(say, "0 of 6 orders placed: QuickCart is down", `Every server was in a zone that failed, so the load balancer had <b>nowhere to send anything</b>. Customers get an error until the zone comes back. Switch to <b>Two zones</b> and try again.`, "bad");
+        } else if (healthy.length === 1) {
+          tell(say, "6 of 6 orders placed", `The load balancer sent <b>every order to the server that's still up</b>, in the other zone. Customers noticed nothing. That one server is now doing twice the work, so each zone needs room to spare.`, "good");
+        } else {
+          tell(say, "6 of 6 orders placed", `The load balancer shared the orders between <b>both servers</b>. ${failed.size ? "The failed zone didn't matter: QuickCart had nothing there." : "Now fail a zone and send them again."}`, "good");
+        }
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.run) {
+          mode = b.dataset.run as Mode;
+          clearRun();
+          draw();
+          explain();
+        } else if (b.dataset.fail) {
+          const z = b.dataset.fail as Zone;
+          if (failed.has(z)) failed.delete(z); else failed.add(z);
+          clearRun();
+          draw(true);
+          explain();
+        } else if (b.dataset.act === "send") {
+          send();
+        } else if (b.dataset.act === "reset") {
+          run++;
+          mode = "one";
+          failed.clear();
+          busy(false);
+          clearRun();
+          dot.setAttribute("class", "vz-dot");
+          draw();
+          tell(say, "Ready", "QuickCart's two servers both run in <b>us-east-1a</b>. Choose <b>Send 6 orders</b>, then fail that zone and send them again.");
+        }
+      });
+
+      /* The 3D globe: only when visible, WebGL works and motion is welcome. */
+      let gone = false;
+      const host = q<HTMLElement>(".rg-3d");
+      const io = new IntersectionObserver(async (entries) => {
+        if (!entries.some((en) => en.isIntersecting)) return;
+        io.disconnect();
+        if (reduced() || !webgl()) return;
+        try {
+          const mod = await import("../../scripts/region-globe-3d");
+          if (gone) return;
+          root.dataset.mode = "3d";
+          globe = await mod.mount(host, q<HTMLElement>(".rg-chip"), { used: used(), failed });
+          if (gone) { globe.dispose(); globe = null; return; }
+        } catch {
+          root.dataset.mode = "2d";
+          globe = null;
+        }
+      }, { rootMargin: "200px" });
+      io.observe(root);
+
+      stops.push(() => {
+        gone = true;
+        run++;
+        io.disconnect();
+        globe?.dispose();
+        globe = null;
+      });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

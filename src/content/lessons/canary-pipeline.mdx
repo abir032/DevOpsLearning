@@ -1,0 +1,493 @@
+---
+time: 60 minutes
+level: Advanced
+before: [release-strategies, continuous-delivery]
+cost: pennies
+quiz:
+  - q: When should a team decide what counts as a failed canary?
+    answer: 1
+    options:
+      - t: While the canary is running, by looking at the dashboards
+        why: In the moment, people argue, hope and wait "just five more minutes". A number chosen in advance can't be talked round.
+      - t: Before the release, written down so the pipeline can check it without anyone deciding
+        why: Abort criteria agreed in advance turn a judgement call into a rule a machine can apply at 3am.
+      - t: After the release, in the postmortem
+        why: By then every customer has had the bad version.
+      - t: Never; if customers complain, roll back
+        why: Waiting for complaints means the canary has protected nobody.
+  - q: The canary step saw 4 requests to the new version, with 0 errors. What should the pipeline do?
+    answer: 3
+    options:
+      - t: Promote it — zero errors is perfect
+        why: Zero out of four says almost nothing. A version that fails one request in five could easily show four successes.
+      - t: Abort — four requests is suspicious
+        why: A quiet period isn't a failure either. The version might be fine.
+      - t: Roll back and page someone
+        why: Nothing is known to be wrong yet.
+      - t: Keep waiting until it has enough requests to judge, and fail the step if they never come
+        why: A minimum sample size is part of the criteria. Too little data is not a pass.
+  - q: A canary at 10% crosses the error limit. What should happen, with nobody touching anything?
+    answer: 0
+    options:
+      - t: The pipeline moves all traffic back to the stable version and fails the build
+        why: Automatic rollback is the point. Only the 10% of customers in the canary saw the errors, and only for minutes.
+      - t: The pipeline pauses and waits for an engineer to decide
+        why: That's slower, and it relies on someone being awake. The decision was already made when the criteria were written.
+      - t: The pipeline increases the canary to 50% to get more data
+        why: More data from a version that is already failing means more customers hurt.
+      - t: Nothing; alarms will notify the team
+        why: A notification with no action leaves 10% of customers on a broken version.
+  - q: Why is an ALB's weighted target group a good way to run a canary for an ECS service?
+    answer: 2
+    options:
+      - t: It makes the new version faster
+        why: Weights decide who gets which version. They don't change performance.
+      - t: It stops the new version from ever receiving real traffic
+        why: The whole point of a canary is that it receives real traffic — just a small, controlled share.
+      - t: One listener rule can send a set percentage of requests to each target group, and changing the weights takes effect in seconds
+        why: The pipeline shifts traffic by editing two numbers, and rolls back by setting the canary's weight to zero.
+      - t: It needs no second copy of the service
+        why: "It does: the old and new versions each run behind their own target group while the canary lasts."
+  - q: Which signal is the best abort criterion for QuickCart's checkout?
+    answer: 1
+    options:
+      - t: CPU usage on the servers
+        why: CPU can be fine while every checkout fails, or high while everything works. It's not what customers feel.
+      - t: The new version's rate of server errors (5xx) and its p99 latency, compared with limits agreed in advance
+        why: "These measure what customers experience: failed requests and slow ones. They're per version, so the canary is judged on its own behaviour."
+      - t: The number of log lines written
+        why: Log volume changes for many reasons, most of them harmless.
+      - t: Whether the deploy command succeeded
+        why: A deploy can succeed and the new code still fail every request.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the Friday canary">
+
+QuickCart started releasing new versions of the menu service to 10% of customers first, as a canary. It worked — in theory.
+
+On Friday evening, Ana started a canary and watched the dashboard. The error graph wobbled. Was that the new version, or the usual Friday rush? She messaged Kofi. Kofi thought it looked "probably fine". They waited twenty minutes to be sure, then promoted to 100%. The wobble had been the new version, and now everyone had it.
+
+The canary had done its job and found the problem. The people reading it hadn't known what they were looking for.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Teams adopt canary releases but judge them by eye, with no numbers agreed in advance. In practice someone watches a dashboard during the canary and decides. Under time pressure, people round borderline results in favour of shipping, and quiet periods with very little traffic get read as "no errors". The canary finds the problem, and then nobody acts on it. The fix is to write the abort criteria down before the release, and let the pipeline apply them.
+
+</Case>
+
+</Part>
+
+<Part id="idea">
+
+A **canary** sends a small share of real traffic to a new version, watches it, and either widens the share step by step or pulls it back. [Ways to release](/lessons/release-strategies/) explained the idea. This lesson puts it in the pipeline, so a machine makes the call using rules people agreed on calmly, in advance.
+
+### Abort criteria, written first
+
+Before the release, the team writes down what "failing" means. Each criterion is a number the pipeline can check.
+
+| Criterion | QuickCart's rule | Why it's there |
+|---|---|---|
+| Error rate | The new version's server errors (5xx) stay **under 2%** of its requests | Failed requests are what customers notice first |
+| Latency | The new version's p99 response time stays **under 800 ms** | A version can be correct but too slow |
+| Minimum sample | At least **20 requests** reach the new version in the step, or the step doesn't count | Too little data is not a pass |
+| Bake time | Each step lasts **at least 5 minutes** | Some failures only show up after caches expire or a job runs |
+
+<Key>A canary is only as good as its abort criteria. Write them down before the release, and let the pipeline apply them.</Key>
+
+### How the traffic moves
+
+| Where the service runs | How the pipeline shifts traffic | How it rolls back |
+|---|---|---|
+| ECS or EC2 behind an ALB | The listener rule forwards to **two target groups with weights**, such as 90 and 10 | Set the canary target group's weight to 0 |
+| ECS with CodeDeploy | A **deployment configuration** such as `CodeDeployDefault.ECSCanary10Percent5Minutes`, with CloudWatch alarms attached | CodeDeploy rolls back itself when an attached alarm fires |
+| Lambda | A weighted **alias**: the alias points at the stable version and sends a share to the new one | Remove the extra weight |
+| Kubernetes | A service mesh, or an ingress controller that supports weights | Set the canary's weight to 0 |
+
+Newer ECS releases also have canary options built into ECS deployments. Check what your platform supports before building your own.
+
+### Where the numbers come from
+
+The pipeline reads the same metrics a person would, but per version, so the canary is judged only on its own requests.
+
+| Platform | Error metric | Split per version by |
+|---|---|---|
+| ALB | `HTTPCode_Target_5XX_Count` and `RequestCount` in CloudWatch | The `TargetGroup` dimension: one target group per version |
+| ALB | `TargetResponseTime`, at the p99 statistic | `TargetGroup` |
+| Lambda | `Errors` and `Invocations` in CloudWatch | The `ExecutedVersion` dimension, for calls through a weighted alias |
+
+### The pipeline's shape
+
+| Stage | What it does |
+|---|---|
+| Deploy the new version **next to** the old one | No customer reaches it yet |
+| Shift a small share, then wait and judge | For example 10%, for 5 minutes |
+| Shift more, then wait and judge | For example 50%, for 5 minutes |
+| Promote | 100% to the new version. Keep the old one briefly for a fast rollback |
+| `post` → `failure` | Put all traffic back on the old version. This runs however the build fails: a broken criterion, an error, or a timeout |
+
+Putting the rollback in `post { failure }` means it happens on **any** failure, not just the ones you thought of.
+
+</Part>
+
+<Part id="see">
+
+Below, a pipeline releases a new version of QuickCart's menu service in steps. First release a **Healthy** version. Then choose **Raises errors** and start again. Finally try **Quiet night**, where very little traffic arrives.
+
+<CanaryAbort />
+
+**What to notice:** nobody decides anything during the canary. The failing version is stopped at the first step, and only that step's share of customers ever saw it. On a quiet night, the pipeline refuses to call a handful of successful requests a pass; it waits until it has enough to judge.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">a few hundred calls to a tiny Lambda function: well under a cent, and inside the free allowance on most accounts.</Cost>
+
+You'll give Jenkins a canary to run. The service is the `quickcart-menu` Lambda function from [Ways to release](/lessons/release-strategies/), with a `live` alias that can send a share of calls to a second version. The pipeline shifts 25% and then 50% to the new version. At each step it calls the alias until enough calls reach the new version, then compares that version's error rate with the limit. About 40 minutes.
+
+You need the Jenkins on your Mac from [The Jenkinsfile](/lessons/jenkinsfile/), started with `AWS_PROFILE=quickcart` as in [Continuous delivery](/lessons/continuous-delivery/).
+
+<Note title="Smaller numbers than production">
+
+To keep the lab quick, each step needs only 10 calls to the new version, and there's no bake time. In production you'd use the larger numbers from the table above, and read the numbers from CloudWatch rather than making calls yourself.
+
+</Note>
+
+<Steps>
+
+<Step title="Create the function and version 1">
+
+If you still have `quickcart-menu` from [Ways to release](/lessons/release-strategies/), delete it first (**Lambda** → **Functions** → `quickcart-menu` → **Actions** → **Delete function**), so the version numbers below match.
+
+<ConsolePath path="Lambda > Functions > Create function" />
+
+| Field | Enter |
+|---|---|
+| Create function | **Author from scratch** |
+| Function name | `quickcart-menu` |
+| Runtime | The newest **Node.js** version offered |
+| Architecture | **arm64** |
+
+Choose **Create function**. In the **Code** tab, replace the contents of `index.mjs` with version 1, then choose **Deploy**:
+
+```js title="index.mjs"
+export const handler = async () => {
+  return { version: 1, dishes: ["Margherita", "Pad thai", "Falafel wrap"] };
+};
+```
+
+Publish it as a version:
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Actions > Publish new version" />
+
+| Field | Enter |
+|---|---|
+| Version description | `stable` |
+
+Then create the alias that customers call:
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Aliases > Create alias" />
+
+| Field | Enter |
+|---|---|
+| Name | `live` |
+| Version | `1` |
+
+<See>
+
+The alias `live` pointing at version `1`, with no weighted version.
+
+</See>
+
+</Step>
+
+<Step title="Publish a version that fails">
+
+Replace `index.mjs` with version 2. It fails on about 4 calls in 10. Choose **Deploy**:
+
+```js title="index.mjs"
+export const handler = async () => {
+  if (Math.random() < 0.4) {
+    throw new Error("menu lookup failed");
+  }
+  return { version: 2, dishes: ["Margherita", "Pad thai", "Falafel wrap", "Ramen"] };
+};
+```
+
+Publish it: **Actions** → **Publish new version**, description `adds ramen`, then **Publish**.
+
+<See>
+
+**Versions** lists `1` and `2`. The `live` alias still sends every call to version `1`: publishing a version changes nothing for customers.
+
+</See>
+
+</Step>
+
+<Step title="Create the canary pipeline">
+
+In Jenkins, choose **New Item**:
+
+| Field | Enter |
+|---|---|
+| Enter an item name | `quickcart-canary` |
+| Type | **Pipeline** |
+
+Choose **OK**, and paste this into **Pipeline** → **Script**:
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'STABLE', defaultValue: '1', description: 'The version customers get today')
+        string(name: 'CANARY', defaultValue: '2', description: 'The new version to try')
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_PAGER  = ''
+        FUNCTION   = 'quickcart-menu'
+        ALIAS      = 'live'
+    }
+
+    stages {
+        stage('Check the versions') {
+            steps {
+                script {
+                    if (params.STABLE == params.CANARY) {
+                        error('STABLE and CANARY must be different versions')
+                    }
+                }
+                sh 'aws lambda get-function --function-name "$FUNCTION" --qualifier "$CANARY" --query Configuration.Version --output text'
+            }
+        }
+        stage('Canary at 25%') {
+            steps {
+                script {
+                    shift(0.25)
+                    judge()
+                }
+            }
+        }
+        stage('Canary at 50%') {
+            steps {
+                script {
+                    shift(0.5)
+                    judge()
+                }
+            }
+        }
+        stage('Promote') {
+            steps {
+                sh 'aws lambda update-alias --function-name "$FUNCTION" --name "$ALIAS" --function-version "$CANARY" --routing-config \'{"AdditionalVersionWeights":{}}\' --query FunctionVersion --output text'
+                echo "Version ${params.CANARY} now takes all traffic. Version ${params.STABLE} is still there for a quick rollback."
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Rolling back: all traffic to version ${params.STABLE}"
+            sh 'aws lambda update-alias --function-name "$FUNCTION" --name "$ALIAS" --function-version "$STABLE" --routing-config \'{"AdditionalVersionWeights":{}}\' --query FunctionVersion --output text'
+        }
+    }
+}
+
+def shift(double share) {
+    def weights = '{"AdditionalVersionWeights":{"' + params.CANARY + '":' + share + '}}'
+    echo "Sending ${share * 100}% of calls to version ${params.CANARY}"
+    sh "aws lambda update-alias --function-name \"\$FUNCTION\" --name \"\$ALIAS\" --function-version \"\$STABLE\" --routing-config '${weights}' --query RoutingConfig --output json"
+}
+
+def judge() {
+    int minCalls = 10
+    int maxTries = 150
+    double maxErrorPercent = 2.0
+    int canaryCalls = 0
+    int canaryErrors = 0
+    int tries = 0
+    while (canaryCalls < minCalls && tries < maxTries) {
+        def result = sh(
+            script: 'aws lambda invoke --function-name "$FUNCTION" --qualifier "$ALIAS" --query "[ExecutedVersion, FunctionError]" --output text /dev/null',
+            returnStdout: true
+        ).trim().split(/\s+/)
+        tries++
+        if (result[0] == params.CANARY) {
+            canaryCalls++
+            if (result.length > 1 && result[1] != 'None') {
+                canaryErrors++
+            }
+        }
+    }
+    if (canaryCalls < minCalls) {
+        error("Only ${canaryCalls} of ${tries} calls reached version ${params.CANARY}. Too few to judge, so not promoting.")
+    }
+    double errorPercent = canaryErrors * 100.0 / canaryCalls
+    echo "Version ${params.CANARY}: ${canaryCalls} calls, ${canaryErrors} errors (${Math.round(errorPercent)}%). Limit: ${maxErrorPercent}%."
+    if (errorPercent > maxErrorPercent) {
+        error("Abort: version ${params.CANARY} failed ${Math.round(errorPercent)}% of its calls, above the ${maxErrorPercent}% limit")
+    }
+}
+```
+
+| Line | What it does | If you leave it out |
+|---|---|---|
+| `parameters` → `STABLE`, `CANARY` | Which version customers get now, and which one to try. Jenkins also sets them as environment variables | You'd edit the pipeline for every release |
+| `timeout(time: 20, …)` | Ends the build, and so triggers the rollback, if it runs too long | A hung call would leave the canary running at 25% indefinitely |
+| `disableConcurrentBuilds()` | One canary at a time | Two builds would fight over the same alias |
+| `Check the versions` | Stops at once if both versions are the same, or the canary version doesn't exist | The canary step would fail halfway, after moving traffic |
+| `get-function … --qualifier "$CANARY"` | Fails the build if that version doesn't exist | — |
+| `shift(0.25)` | Sets the alias to version `STABLE`, sending 25% of calls to `CANARY` | — |
+| `--routing-config '{"AdditionalVersionWeights":{"2":0.25}}'` | The weighted part: which extra version gets calls, and what share, from 0 to 1 | All calls stay on the stable version |
+| `judge()` | Calls the alias, counts only the calls that reached the new version, and fails the build if too few arrived or too many failed | Traffic would widen with nobody checking |
+| `aws lambda invoke … --qualifier "$ALIAS"` | Calls the function through `live`, exactly as a customer would | Calling a version directly would bypass the weights |
+| `--query "[ExecutedVersion, FunctionError]" --output text` | Prints which version answered, and `Unhandled` if it threw an error, or `None` if not | You couldn't tell the versions apart |
+| `/dev/null` | Where `invoke` writes the function's reply. The pipeline doesn't need it | Required: `invoke` always takes an output file |
+| `minCalls = 10`, `maxTries = 150` | Needs 10 calls to the new version, and gives up after 150 tries | Without a minimum, four lucky calls could pass a broken version |
+| `maxErrorPercent = 2.0` | The abort criterion, written down before the release | — |
+| `Promote` | Points `live` at the new version with no weights: 100% of calls | The canary would stay at 50% |
+| `post` → `failure` | Points `live` back at `STABLE` with no weights, **whatever** made the build fail | A failed canary would leave customers on the bad version |
+
+Choose **Save**.
+
+<Mistake title="a JSON quoting error from update-alias">
+
+```output title="The step fails with something like"
+Error parsing parameter '--routing-config': Invalid JSON
+```
+
+**Why:** the routing config is JSON inside a shell command inside a Groovy string. A quote lost in copying breaks it.
+
+**The fix:** copy the pipeline again exactly as shown. Inside `shift`, the JSON is built by joining strings, so only the outer single quotes reach the shell.
+
+</Mistake>
+
+</Step>
+
+<Step title="Release the failing version">
+
+Choose **Build Now** (Jenkins uses the defaults, `1` and `2`, the first time). Open **Console Output**. Within a minute or two:
+
+```output title="The console output, shortened"
+Sending 25.0% of calls to version 2
+Version 2: 10 calls, 4 errors (40%). Limit: 2.0%.
+ERROR: Abort: version 2 failed 40% of its calls, above the 2.0% limit
+Rolling back: all traffic to version 1
+1
+Finished: FAILURE
+```
+
+Your error count will differ, because version 2 fails at random. It is very unlikely to stay under the limit.
+
+<See>
+
+In the console, **Lambda** → **quickcart-menu** → **Aliases** → `live` points at version `1` with **no** weighted version. The stage view shows `Canary at 25%` failed and `Canary at 50%` and `Promote` never ran. Nobody decided anything; the rule did.
+
+</See>
+
+</Step>
+
+<Step title="Fix it, and release again">
+
+Replace `index.mjs` with a fixed version, choose **Deploy**, and publish it as version `3` with the description `adds ramen, fixed`:
+
+```js title="index.mjs"
+export const handler = async () => {
+  return { version: 3, dishes: ["Margherita", "Pad thai", "Falafel wrap", "Ramen"] };
+};
+```
+
+In Jenkins, choose **Build with Parameters**, keep **STABLE** `1`, and set **CANARY** to `3`.
+
+```output title="The console output, shortened"
+Sending 25.0% of calls to version 3
+Version 3: 10 calls, 0 errors (0%). Limit: 2.0%.
+Sending 50.0% of calls to version 3
+Version 3: 10 calls, 0 errors (0%). Limit: 2.0%.
+3
+Version 3 now takes all traffic. Version 1 is still there for a quick rollback.
+Finished: SUCCESS
+```
+
+<See>
+
+The alias `live` points at version `3` with no weights. Every customer now gets the fixed version, and it got there without anyone watching a graph.
+
+</See>
+
+<Mistake title="the canary step gives up on a quiet function">
+
+```output title="The build fails with"
+ERROR: Only 6 of 150 calls reached version 3. Too few to judge, so not promoting.
+```
+
+**Why:** at 25%, about a quarter of calls should reach the new version, so this is rare — but it's the minimum-sample rule working. A step without enough data fails rather than passes.
+
+**The fix:** run the build again. In production, this is where a longer bake time helps.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Actions > Delete function" />
+
+Type `confirm` if asked, and choose **Delete**. Deleting the function deletes its versions and the `live` alias too.
+
+Lambda also made a log group, which keeps logs until you delete it:
+
+<ConsolePath path="CloudWatch > Log groups > /aws/lambda/quickcart-menu > Actions > Delete log group(s)" />
+
+The IAM role Lambda created, named like `quickcart-menu-role-` followed by random letters, costs nothing. You can delete it in **IAM → Roles** to keep things tidy.
+
+In Jenkins, open `quickcart-canary` and choose **Delete Pipeline**. If you've finished the Automation module, stop Jenkins with **Ctrl+C** in its terminal.
+
+<See>
+
+No `quickcart-menu` function or log group remains. Nothing from this lab is left costing money.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Idea or code | In one line |
+|---|---|
+| Canary | A small share of real traffic tries the new version first |
+| Abort criteria | Error rate, latency, minimum sample and bake time, written down before the release |
+| Too little data | Not a pass. Wait for more, or fail the step |
+| Judge per version | ALB: one target group per version. Lambda: the `ExecutedVersion` dimension |
+| ALB weighted forward | Two target groups with weights. Roll back by setting the canary's weight to 0 |
+| CodeDeploy | `CodeDeployDefault.ECSCanary10Percent5Minutes`, with alarms for automatic rollback |
+| Lambda alias | `--routing-config '{"AdditionalVersionWeights":{"2":0.1}}'` |
+| `post { failure { … } }` | The rollback runs whatever made the build fail |
+| Promote | 100% to the new version. Keep the old one briefly |
+
+</Cheat>
+
+</Part>

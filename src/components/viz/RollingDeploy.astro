@@ -1,0 +1,172 @@
+---
+/*
+ * Releases without downtime: a rolling deploy on ECS under steady load.
+ * Teaches: requests are dropped at three moments (new tasks starting, old
+ * tasks leaving the load balancer, old tasks stopping), and each of the
+ * three fixes closes one of them.
+ */
+import { STATE_TEXT, steps, type TaskId } from "../../scripts/rolling-deploy";
+const first = steps({ ready: true, drain: true, graceful: true })[0];
+const TASKS: { id: TaskId; name: string; y: number }[] = [
+  { id: "v1a", name: "v1 task A", y: 22 },
+  { id: "v1b", name: "v1 task B", y: 86 },
+  { id: "v2a", name: "v2 task A", y: 170 },
+  { id: "v2b", name: "v2 task B", y: 234 },
+];
+const FIXES = [
+  { key: "ready", label: "Readiness check" },
+  { key: "drain", label: "Drain (deregistration delay)" },
+  { key: "graceful", label: "Graceful shutdown" },
+];
+---
+<div class="viz" data-track="box" data-viz="rolling-deploy">
+  <div class="viz-controls rd-controls">
+    {FIXES.map((f) => (
+      <div class="rd-fix">
+        <span class="lbl" id={`rd-${f.key}`}>{f.label}</span>
+        <div class="seg" role="group" aria-labelledby={`rd-${f.key}`}>
+          <button type="button" data-fix={f.key} data-on="1" aria-pressed="true">On</button>
+          <button type="button" data-fix={f.key} data-on="0" aria-pressed="false">Off</button>
+        </div>
+      </div>
+    ))}
+    <div class="rd-btns">
+      <button class="btn line" type="button" data-a="play">Release v2</button>
+      <button class="btn" type="button" data-a="next">Next step</button>
+      <button class="btn" type="button" data-a="reset">Start again</button>
+    </div>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see every task</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 760 300" role="img" aria-labelledby="rd-title">
+      <title id="rd-title">Customers send requests to the load balancer, which forwards them to the order service's tasks: two v1 tasks now, and room for two v2 tasks during the release.</title>
+      <rect class="vz-node" x="16" y="115" width="140" height="70" rx="10" />
+      <text class="vz-t" x="86" y="143" text-anchor="middle">Customers</text>
+      <text class="vz-s" x="86" y="161" text-anchor="middle">10 requests a second</text>
+      <path class="rd-w on" d="M156 150 H226" />
+      <rect class="vz-node" x="226" y="115" width="140" height="70" rx="10" />
+      <text class="vz-t" x="296" y="143" text-anchor="middle">Load balancer</text>
+      <text class="vz-s" x="296" y="161" text-anchor="middle">quickcart-alb</text>
+      <text class="vz-label" x="470" y="14">Old version</text>
+      <text class="vz-label" x="470" y="162">New version</text>
+      {TASKS.map((t) => (
+        <path class:list={["rd-w", first.wires[t.id]]} data-w={t.id} d={`M366 150 C420 150 420 ${t.y + 25} 470 ${t.y + 25}`} />
+      ))}
+      {TASKS.map((t) => (
+        <g class:list={["rd-task", `st-${first.tasks[t.id]}`]} data-t={t.id}>
+          <rect x="470" y={t.y} width="270" height="50" rx="9" />
+          <text class="vz-t" x="486" y={t.y + 21}>{t.name}</text>
+          <text class="vz-s rd-st" x="486" y={t.y + 39}>{STATE_TEXT[first.tasks[t.id]]}</text>
+        </g>
+      ))}
+    </svg>
+  </div>
+  <div class="rd-count">
+    <span>Sent <b data-n="sent">0</b></span>
+    <span>OK <b data-n="ok">0</b></span>
+    <span>Failed <b data-n="failed" class="rd-failed">0</b></span>
+  </div>
+  <ol class="rd-log" data-n="log" aria-label="Failures, as load.py prints them"></ol>
+  <div class="viz-say" aria-live="polite" set:html={`<span class="step-l">${first.label}</span>${first.say}`} />
+</div>
+
+<style is:global>
+  [data-viz="rolling-deploy"] .rd-controls { gap: 12px 18px; }
+  [data-viz="rolling-deploy"] .rd-fix { display: flex; align-items: center; gap: 8px; }
+  [data-viz="rolling-deploy"] .rd-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  [data-viz="rolling-deploy"] .rd-w { fill: none; stroke: var(--rule-2); stroke-width: 1.5; stroke-dasharray: 3 4; transition: stroke .2s; }
+  [data-viz="rolling-deploy"] .rd-w.on { stroke: var(--box); stroke-width: 3; stroke-dasharray: none; }
+  [data-viz="rolling-deploy"] .rd-w.bad { stroke: var(--bad); stroke-width: 3; stroke-dasharray: none; }
+  [data-viz="rolling-deploy"] .rd-task rect { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.5; transition: fill .2s, stroke .2s; }
+  [data-viz="rolling-deploy"] .rd-task.st-off rect, [data-viz="rolling-deploy"] .rd-task.st-gone rect { fill: var(--bg); stroke: var(--rule-2); stroke-dasharray: 5 4; }
+  [data-viz="rolling-deploy"] .rd-task.st-off text, [data-viz="rolling-deploy"] .rd-task.st-gone text { fill: var(--ink-3); }
+  [data-viz="rolling-deploy"] .rd-task.st-start rect, [data-viz="rolling-deploy"] .rd-task.st-warm rect { fill: var(--warn-bg); stroke: var(--warn); }
+  [data-viz="rolling-deploy"] .rd-task.st-ready rect { fill: color-mix(in srgb, var(--box) 14%, var(--surface)); stroke: var(--box); stroke-width: 2.5; }
+  [data-viz="rolling-deploy"] .rd-task.st-drain rect { fill: var(--sunk); stroke: var(--ink-3); }
+  [data-viz="rolling-deploy"] .rd-task.st-stop rect { fill: var(--sunk); stroke: var(--ink-3); stroke-dasharray: 5 4; }
+  [data-viz="rolling-deploy"] .rd-count { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: baseline; padding: 10px 16px; border-top: 1px solid var(--rule); font-size: 15px; }
+  [data-viz="rolling-deploy"] .rd-count b { font-family: var(--mono); font-size: 16px; }
+  [data-viz="rolling-deploy"] .rd-count b.rd-failed.some { color: var(--bad); }
+  [data-viz="rolling-deploy"] .rd-log { margin: 0; list-style: none; padding: 0 16px 10px; font-family: var(--mono); font-size: 13.5px; color: var(--bad); }
+  [data-viz="rolling-deploy"] .rd-log:empty { display: none; }
+</style>
+
+<script>
+  import { STATE_TEXT, steps, totals, type Fixes, type TaskId } from "../../scripts/rolling-deploy";
+  import { press, reduced } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="rolling-deploy"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const play = root.querySelector<HTMLButtonElement>('[data-a="play"]')!;
+      const nextBtn = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+      const fixBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-fix]")];
+      const fixes: Fixes = { ready: true, drain: true, graceful: true };
+      let list = steps(fixes);
+      let i = 0;
+      let timer: ReturnType<typeof setInterval> | null = null;
+
+      function render() {
+        const s = list[i];
+        for (const id of ["v1a", "v1b", "v2a", "v2b"] as TaskId[]) {
+          const g = root.querySelector<SVGGElement>(`[data-t="${id}"]`)!;
+          g.setAttribute("class", `rd-task st-${s.tasks[id]}`);
+          g.querySelector(".rd-st")!.textContent = STATE_TEXT[s.tasks[id]];
+          root.querySelector(`[data-w="${id}"]`)!.setAttribute("class", `rd-w ${s.wires[id]}`);
+        }
+        const t = totals(list, i);
+        q("sent").textContent = String(t.sent);
+        q("ok").textContent = String(t.ok);
+        const f = q<HTMLElement>("failed");
+        f.textContent = String(t.failed);
+        f.classList.toggle("some", t.failed > 0);
+        const log = q<HTMLOListElement>("log");
+        log.innerHTML = "";
+        for (let j = 0; j <= i; j++) if (list[j].log) {
+          const li = document.createElement("li");
+          li.textContent = list[j].log!;
+          log.append(li);
+        }
+        say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+        say.innerHTML = `<span class="step-l">${s.label}</span>${s.say}`;
+        const atEnd = i >= list.length - 1;
+        nextBtn.disabled = atEnd;
+        play.disabled = atEnd;
+        fixBtns.forEach((b) => (b.disabled = i > 0 && !atEnd));
+      }
+      function stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+        play.textContent = "Release v2";
+      }
+      function step() {
+        if (i < list.length - 1) { i++; render(); }
+        if (i >= list.length - 1) stop();
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.fix) {
+          const key = b.dataset.fix as keyof Fixes;
+          fixes[key] = b.dataset.on === "1";
+          press(fixBtns.filter((x) => x.dataset.fix === key), (x) => x === b);
+          stop(); list = steps(fixes); i = 0; render();
+        } else if (b.dataset.a === "next") { stop(); step(); }
+        else if (b.dataset.a === "reset") { stop(); list = steps(fixes); i = 0; render(); }
+        else if (b.dataset.a === "play") {
+          if (timer) { stop(); return; }
+          play.textContent = "Pause";
+          step();
+          timer = setInterval(step, reduced() ? 3000 : 2200);
+        }
+      });
+      stops.push(stop);
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

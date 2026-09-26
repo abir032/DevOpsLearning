@@ -1,0 +1,150 @@
+---
+/*
+ * Project 5: the pipeline, stage by stage.
+ * Teaches: a pull request and a merge run different stages, every stage is a
+ * gate, and a canary that breaks its abort criteria rolls itself back.
+ */
+const STAGES = [
+  { id: "version", label: "Version", sub: "short commit ID", on: "both" },
+  { id: "lint", label: "Lint", sub: "hadolint, shellcheck, fmt", on: "both" },
+  { id: "test", label: "Test", sub: "pytest and ruff", on: "both" },
+  { id: "build", label: "Build image", sub: "tagged with the version", on: "both" },
+  { id: "scan", label: "Scan", sub: "no critical findings", on: "both" },
+  { id: "plan", label: "Terraform plan", sub: "dev and prod, saved", on: "pr" },
+  { id: "push", label: "Push to ECR", sub: "once per version", on: "main" },
+  { id: "dev", label: "Deploy to dev", sub: "rolling release", on: "main" },
+  { id: "smoke", label: "Smoke test", sub: "/health says the version", on: "main" },
+  { id: "approve", label: "Approval", sub: "a person says go", on: "main" },
+  { id: "c10", label: "Canary 10%", sub: "bake, then check", on: "main" },
+  { id: "c50", label: "Canary 50%", sub: "bake, then check", on: "main" },
+  { id: "promote", label: "Promote", sub: "stable gets the version", on: "main" },
+];
+---
+<div class="viz" data-track="auto" data-viz="pipeline-map">
+  <div class="viz-controls">
+    <span class="lbl" id="pm-ev">Event</span>
+    <div class="seg" role="group" aria-labelledby="pm-ev">
+      <button type="button" data-ev="pr" aria-pressed="true">Pull request</button>
+      <button type="button" data-ev="main" aria-pressed="false">Merge to main</button>
+    </div>
+    <span class="lbl" id="pm-cn">Canary</span>
+    <div class="seg" role="group" aria-labelledby="pm-cn">
+      <button type="button" data-cn="good" aria-pressed="true">Healthy</button>
+      <button type="button" data-cn="bad" aria-pressed="false">Raises errors</button>
+    </div>
+    <button class="btn line" type="button" data-act="run">Run the pipeline</button>
+  </div>
+  <ol class="pm-flow">
+    {STAGES.map((s) => (
+      <li class="pm-stage" data-stage={s.id} data-on={s.on} data-state={s.on === "main" ? "skip" : "wait"}>
+        <b>{s.label}</b><span>{s.sub}</span><em class="pm-st">{s.on === "main" ? "skipped" : "waiting"}</em>
+      </li>
+    ))}
+  </ol>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Pull request</span>A pull request runs the checks and a Terraform plan, and stops. Nothing is pushed or deployed. Choose <b>Run the pipeline</b>.</div>
+</div>
+
+<style is:global>
+  [data-viz="pipeline-map"] .pm-flow { list-style: none; margin: 0; padding: 14px 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; counter-reset: pm; }
+  [data-viz="pipeline-map"] .pm-stage { position: relative; border: 1.5px solid var(--rule-2); border-radius: 10px; padding: 9px 11px 8px; background: var(--bg); font-size: 13px; counter-increment: pm; transition: background .2s, border-color .2s, opacity .2s; }
+  [data-viz="pipeline-map"] .pm-stage b { display: block; font-size: 14px; }
+  [data-viz="pipeline-map"] .pm-stage b::before { content: counter(pm) ". "; color: var(--ink-3); font-weight: 700; }
+  [data-viz="pipeline-map"] .pm-stage span { display: block; color: var(--ink-2); }
+  [data-viz="pipeline-map"] .pm-st { display: block; margin-top: 4px; font-style: normal; font-size: 12px; font-weight: 800; color: var(--ink-3); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="skip"] { border-style: dashed; background: transparent; }
+  [data-viz="pipeline-map"] .pm-stage[data-state="skip"] b, [data-viz="pipeline-map"] .pm-stage[data-state="skip"] span { color: var(--ink-3); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="run"] { border-color: var(--line); background: color-mix(in srgb, var(--line) 12%, var(--surface)); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="run"] .pm-st { color: var(--line-t); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="pass"] { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="pass"] .pm-st { color: var(--ok); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="fail"] { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="pipeline-map"] .pm-stage[data-state="fail"] .pm-st { color: var(--bad); }
+</style>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  const SAY: Record<string, string> = {
+    version: "The build takes the commit's short ID as its version. The image, the task definition and <code>/health</code> will all carry it.",
+    lint: "Lint: the Dockerfile, the scripts and the Terraform formatting. Cheap checks first, so a typo fails in seconds.",
+    test: "Tests run inside a Docker build stage, so the agent needs nothing but Docker.",
+    build: "The release image is built once. Everything after this uses that exact image.",
+    scan: "Trivy fails the build on any critical, fixable vulnerability.",
+    plan: "On a pull request: a Terraform plan for dev and prod, saved as an artifact for the reviewer. Nothing is applied.",
+    push: "Pushed to ECR, unless this version is already there. Running the build twice is safe.",
+    dev: "Deployed to dev as a rolling release. The script fails if the circuit breaker rolled it back.",
+    smoke: "Dev's <code>/health</code> must report this exact version.",
+    approve: "The pipeline waits, without holding an agent, until someone approves.",
+    c10: "The canary service starts one task with the new version, and gets 10% of production traffic for five minutes.",
+    c50: "Still healthy, so 50%. Every step checks the same abort criteria.",
+    promote: "The stable service gets the new version, then all traffic goes back to it and the canary scales to zero.",
+  };
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="pipeline-map"]').forEach((root) => {
+    if (!once(root)) return;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const stages = [...root.querySelectorAll<HTMLElement>(".pm-stage")];
+    const evBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-ev]")];
+    const cnBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-cn]")];
+    const runBtn = root.querySelector<HTMLButtonElement>('[data-act="run"]')!;
+    let ev = "pr";
+    let cn = "good";
+    let run = 0;
+
+    const setState = (el: HTMLElement, s: string, label: string) => { el.dataset.state = s; el.querySelector(".pm-st")!.textContent = label; };
+    const active = (el: HTMLElement) => el.dataset.on === "both" || el.dataset.on === ev;
+
+    function reset() {
+      run++;
+      runBtn.disabled = false;
+      stages.forEach((el) => setState(el, active(el) ? "wait" : "skip", active(el) ? "waiting" : "skipped"));
+    }
+
+    async function go() {
+      reset();
+      const me = run;
+      runBtn.disabled = true;
+      for (const el of stages) {
+        if (!active(el)) continue;
+        const id = el.dataset.stage!;
+        setState(el, "run", "running");
+        tell(say, el.querySelector("b")!.textContent!, SAY[id]);
+        await beat(id.startsWith("c") || id === "approve" ? 1500 : 900);
+        if (me !== run) return;
+        if (id === "c10" && cn === "bad") {
+          setState(el, "fail", "aborted");
+          stages.filter((x) => x.dataset.stage === "c50" || x.dataset.stage === "promote").forEach((x) => setState(x, "skip", "not reached"));
+          tell(say, "Aborted and rolled back", "The canary's error rate passed 1%. The script put <b>100% of traffic back on stable</b> and scaled the canary to zero. Only about 10% of requests saw the bad version, for five minutes. The build is red, and stable never changed.", "bad");
+          runBtn.disabled = false;
+          return;
+        }
+        setState(el, "pass", "passed");
+      }
+      tell(say, ev === "pr" ? "Pull request checked" : "In production",
+        ev === "pr"
+          ? "Every check passed and the plans are attached for review. <b>Nothing was deployed.</b> Merging is what releases."
+          : "The commit reached production. <b>Nobody opened the AWS console:</b> one person pressed one button to approve.", "good");
+      runBtn.disabled = false;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.ev) {
+        ev = b.dataset.ev; press(evBtns, (x) => x === b); reset();
+        tell(say, ev === "pr" ? "Pull request" : "Merge to main", ev === "pr"
+          ? "A pull request runs the checks and a Terraform plan, and stops. Nothing is pushed or deployed."
+          : "A merge to <code>main</code> runs the same checks, then pushes, deploys to dev, waits for approval and canaries to production.");
+      } else if (b.dataset.cn) {
+        cn = b.dataset.cn; press(cnBtns, (x) => x === b); reset();
+        tell(say, cn === "good" ? "Healthy canary" : "Broken canary", cn === "good"
+          ? "The new version behaves. Merge to main and run it to watch it promoted."
+          : "The new version returns errors. Merge to main and run it to watch the abort criteria catch it.");
+      } else if (b.dataset.act === "run") {
+        go();
+      }
+    });
+    return () => { run++; };
+  }));
+</script>

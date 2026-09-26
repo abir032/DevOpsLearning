@@ -1,0 +1,348 @@
+---
+time: 25 minutes
+level: Beginner
+before: []
+cost: free
+quiz:
+  - q: QuickCart needs 2 servers at night and 8 during the dinner rush. If it buys its own servers, how many does it pay for at 3am?
+    answer: 3
+    options:
+      - t: "2"
+        why: That's what it uses at 3am. But servers you buy cost the same whether they're busy or idle.
+      - t: "0"
+        why: Owned servers don't stop costing money at night. The hardware, power and space are paid for either way.
+      - t: "5"
+        why: There's no averaging. You own whatever you bought for the peak.
+      - t: "8"
+        why: To survive the dinner rush it has to own 8, and it pays for all 8 every hour of every day. Renting would pay for 2 at 3am.
+  - q: In the shared responsibility model, whose job is it to allow only the right traffic into QuickCart's database?
+    answer: 1
+    options:
+      - t: AWS's, because the database runs on AWS
+        why: AWS secures the building, the hardware and the service itself. Who is allowed to connect is a setting you choose.
+      - t: QuickCart's. Network rules, access and data are always the customer's job
+        why: AWS gives you the controls, like security groups and IAM, but it can't know who should reach your database. Setting them is on you.
+      - t: Nobody's. Databases on AWS are private automatically
+        why: Many are private by default, but a single setting can expose one. Choosing those settings is your side of the model.
+      - t: The internet provider's
+        why: Your internet provider has no say in what AWS lets through to your resources.
+  - q: You create a server, then can't find it the next day. The Instances page says you have none. What's most likely?
+    answer: 0
+    options:
+      - t: The console is showing a different region from the one you created it in
+        why: Each region has its own list. The region selector at the top right decides which one you're looking at. Switch it back and the server reappears.
+      - t: AWS deleted it overnight
+        why: AWS doesn't delete your running resources. They keep running, and billing, until you delete them.
+      - t: It ran out of free tier and was stopped
+        why: Nothing stops automatically when a free allowance ends. It just starts costing money.
+      - t: Servers only last 24 hours
+        why: A server runs until you stop or terminate it.
+  - q: What does an AWS budget do when your spending crosses its limit?
+    answer: 2
+    options:
+      - t: Shuts down everything in the account
+        why: A basic budget never stops anything. It only warns you.
+      - t: Refuses to let you create new resources
+        why: A budget doesn't block anything by itself.
+      - t: Sends you an email alert, so you can act
+        why: That's all a simple budget does, and it's enough to catch a forgotten resource in days instead of at the end of the month.
+      - t: Moves your resources to a cheaper region
+        why: Nothing in AWS moves your resources for you.
+  - q: Which of these are global, the same whichever region the console shows?
+    answer: 1
+    options:
+      - t: EC2 servers
+        why: Servers live in one region. You only see them with that region selected.
+      - t: IAM users and roles
+        why: IAM is global. The region selector shows Global on the IAM pages, and a role works in every region.
+      - t: VPCs
+        why: A VPC belongs to one region.
+      - t: RDS databases
+        why: A database lives in one region, in one or more of its zones.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, before the cloud">
+
+QuickCart's first real server sat in a cupboard in Noor's flat. It was fine on a normal Tuesday.
+
+Then a food writer mentioned the app, and at 7pm on Friday ten times the usual number of people tried to order. The server ran out of memory and stopped answering. By the time Noor had restarted it, the rush was over, and so were a few hundred orders.
+
+Buying a second server would take two weeks to arrive. And once it did, it would sit idle every day except the busiest hour of the busiest evening.
+
+</Story>
+
+QuickCart's problem isn't one server. It's that **owning** servers means guessing, in advance, how much you'll ever need, then paying for that guess every hour of every day.
+
+<Case title="A very common mistake">
+
+The cloud turns the problem round. Starting a server takes a minute, and it's easy to forget one is running. People try something out, close the browser tab, and find out a month later from the bill that a large server, a NAT gateway or a database kept running the whole time. Leaked access keys used to start servers for crypto mining are a well-known version of the same surprise.
+
+Paying only for what you use also means paying for everything you forgot to turn off.
+
+</Case>
+
+This lesson is about what the cloud really is, who is responsible for what, and how to keep an eye on the bill from the first day.
+
+</Part>
+
+<Part id="idea">
+
+The cloud is **renting computers from someone else, by the second**, instead of buying them. The computers sit in the provider's buildings. You start them, use them and delete them from a web page or a command, and you pay only while they exist.
+
+This course uses **AWS**, Amazon Web Services, the largest cloud provider. Google Cloud and Microsoft Azure work the same way under different names.
+
+<YouKnow title="You already know this: services you don't run">
+
+If your app uses Firebase for push notifications, or a crash reporting service, you already use the cloud. You never see the servers. You pay for what you use, and it grows when your app grows. AWS is the same idea, one level down: instead of a finished service, you can rent the raw pieces too.
+
+</YouKnow>
+
+### What changes when you rent
+
+| | Owning servers | Renting from the cloud |
+|---|---|---|
+| Getting a new server | Order it, wait days or weeks, install it | A minute or two |
+| Paying | Up front, for the most you'll ever need | Per second or per hour, for what exists right now |
+| A quiet night | You still pay for every server | You can run fewer and pay less |
+| A sudden rush | You're stuck with what you bought | Start more, then remove them afterwards |
+| A broken disk | Your problem, at 3am | The provider replaces the hardware |
+| Forgetting something | It's already paid for | It keeps costing money until you delete it |
+
+Most AWS servers running Linux are billed **per second**, with a minimum of 60 seconds each time one starts. Other services charge per hour, per gigabyte stored or per request. Prices change and differ by region, so this course gives rough figures and always says so.
+
+<Key>In the cloud you pay for what exists, not what you use it for. Delete what you don't need.</Key>
+
+### Regions: where the computers are
+
+AWS runs its computers in **regions**: separate groups of data centres in different parts of the world, such as `us-east-1` in Northern Virginia or `eu-west-2` in London. There are more than 30.
+
+You choose a region for almost everything you create, and each region is independent. A server in `us-east-1` doesn't appear in the list for London. [Regions and zones](/lessons/regions-and-zones/) explains why QuickCart uses two buildings inside one region.
+
+A few services aren't tied to a region: they're **global**. IAM, which controls who can do what, is the one you'll meet first.
+
+### Services: the pieces you rent
+
+AWS has hundreds of services. This course uses about fifteen. These are the ones you'll meet first:
+
+| Service | What it is | QuickCart uses it for |
+|---|---|---|
+| IAM | Users, roles and permissions | Deciding who and what can change anything |
+| VPC | Your own private network | Keeping the database off the internet |
+| EC2 | Virtual servers | Running the API |
+| Elastic Load Balancing | One address in front of many servers | Sharing orders across servers |
+| RDS | Managed databases | Storing every order |
+| S3 | Storage for files | Menu photos and receipts |
+| CloudWatch | Logs, metrics and alarms | Knowing when something breaks |
+| Route 53 | DNS, for domain names | Pointing `example.com` at the load balancer |
+
+### Who is responsible for what
+
+Renting a server doesn't mean AWS looks after everything on it. AWS calls the split the **shared responsibility model**: AWS is responsible for the security *of* the cloud, and you're responsible for security *in* the cloud.
+
+| AWS looks after | You look after |
+|---|---|
+| The buildings, guards and power | Who can log in to your account, and with what permissions |
+| The physical servers, disks and network cables | Which traffic your network rules let in |
+| The software that splits one physical machine into many virtual ones | Updating the operating system on your servers |
+| Keeping managed services such as RDS running | Your app's code and its secrets |
+| Replacing broken hardware | Encrypting and backing up your data, using the tools AWS provides |
+
+The more managed a service is, the more AWS takes on. With EC2 you patch the operating system. With RDS, AWS patches the database software, but who can connect is still up to you.
+
+A database left open to the internet is never AWS's fault. The setting was yours.
+
+### Keeping the bill under control
+
+The cloud's biggest strength, paying for what exists, is also how people get surprised. Three habits prevent almost every surprise:
+
+| Habit | What it means |
+|---|---|
+| A **budget** from day one | AWS Budgets emails you when spending crosses a limit you set, or is forecast to |
+| **Tags** on everything | A label like `Project = quickcart` on each resource, so you can see what costs what |
+| **Clean up after every lab** | Every lab in this course ends with a clean-up step. Do it, every time |
+
+<Mistake title="looking in the wrong region">
+
+You created a server yesterday. Today the EC2 page is empty:
+
+```output title="The Instances page shows"
+No instances
+You do not have any instances in this region
+```
+
+**Why:** the console remembers the last region you used, and something switched it. Your server is still running, and still costing money, in the region where you made it.
+
+**The fix:** check the region selector at the top right of the console, and switch it back to **N. Virginia (us-east-1)**, which this course uses throughout.
+
+</Mistake>
+
+</Part>
+
+<Part id="see">
+
+Below is one day of QuickCart orders, as the number of servers needed each hour. The dashed line is how many servers QuickCart owns. Pick a day and a number of servers, then **play the day** and compare owning with renting.
+
+<OwnVsRent />
+
+**What to notice:** on the rush days there's no good number to own. Own few and you turn orders away at dinner; own many and most of them sit idle and paid for, all day. Renting follows the bars. Owning only wins when the load is flat and predictable.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">looking around the console and creating a budget that emails you costs nothing.</Cost>
+
+You'll find the four things you'll use in every lab: the region selector, your account ID, the billing pages, and a budget that warns you before a surprise. About 15 minutes.
+
+You need an AWS account you can sign in to. If you're signing in as the **root user**, the email address the account was created with, that's fine for this lab only. [Who can do what: IAM](/lessons/iam/) shows why you should stop using it straight afterwards.
+
+<Steps>
+
+<Step title="Find the region selector">
+
+Sign in to the AWS console. Look at the top right of the page, next to your account name.
+
+<See>
+
+A region name such as **N. Virginia** or **Ireland**. Open it: a list of regions with their codes, like **US East (N. Virginia) us-east-1**.
+
+</See>
+
+Choose **US East (N. Virginia) us-east-1**. This course uses it for every lab.
+
+Now type `IAM` in the search bar at the top and open it.
+
+<See>
+
+The region selector now says **Global** and can't be changed. IAM is one of the few services that isn't tied to a region.
+
+</See>
+
+</Step>
+
+<Step title="Find your account ID">
+
+Choose your account name at the top right of the console.
+
+<See>
+
+A menu showing **Account ID**, a 12-digit number with a copy button. In this course it's always shown as `111122223333`. Wherever you see that, use your own.
+
+</See>
+
+Copy it somewhere handy. You'll need it for bucket names and permissions later. An account ID isn't a secret on its own, but there's no reason to post it publicly either.
+
+</Step>
+
+<Step title="Open the billing home page">
+
+<ConsolePath path="Billing and Cost Management > Home" />
+
+<See>
+
+A summary of this month's costs so far, a forecast for the month, and your costs broken down by service. In a new account, everything is $0.00 or close to it.
+
+</See>
+
+<Note title="If you're not the root user">
+
+By default, only the root user can see billing pages. If an IAM user sees an access error here, the root user has to turn on **IAM user and role access to Billing information** under **Account**, and the user needs a policy that allows billing access. For this lab, the root user is simplest.
+
+</Note>
+
+Now open **Free Tier** in the left menu of the same page.
+
+<See>
+
+What your account can use for free, and how much of it you've used this month. What's free depends on when your account was created and changes over time, so check here rather than relying on any list you read elsewhere, including this one.
+
+</See>
+
+</Step>
+
+<Step title="Create a budget that emails you">
+
+<ConsolePath path="Billing and Cost Management > Budgets > Create budget" />
+
+| Field | Enter |
+|---|---|
+| Budget setup | **Use a template (simplified)** |
+| Templates | **Monthly cost budget** |
+| Budget name | `quickcart-monthly` |
+| Enter your budgeted amount ($) | `10.00`, or whatever you're comfortable spending on this course each month |
+| Email recipients | your own email address |
+
+Choose **Create budget**.
+
+<See>
+
+`quickcart-monthly` in the list of budgets. The template sets up three alerts for you: when actual spending reaches 85% and 100% of the amount, and when the *forecast* for the month is going to pass 100%.
+
+</See>
+
+If you'd rather hear about the very first cent, choose the **Zero spend budget** template instead. It emails you as soon as anything costs money.
+
+A budget that only sends email is free. AWS charges only for large numbers of budgets, or ones that take actions for you. Check **Budgets** pricing if you ever go past a couple.
+
+<Mistake title="expecting a budget to stop spending">
+
+```output title="The alert email says something like"
+AWS Budget Notification
+You requested that we alert you when the Actual Cost associated with your quickcart-monthly budget is greater than 85.00% of $10.00 for the current month.
+```
+
+**Why:** the email is all a simple budget does. Nothing is stopped, and costs keep growing until someone deletes what's running.
+
+**The fix:** treat the alert as an instruction. Open **Billing and Cost Management → Bills** or **Cost Explorer**, find which service is costing money, and delete what you don't need. The exact wording of the email may differ from this.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing to delete: you only looked around, and the budget is free.
+
+**Keep the budget.** It's the one thing from this lab worth leaving in place for the whole course. If you do want to remove it later:
+
+<ConsolePath path="Billing and Cost Management > Budgets > quickcart-monthly > Actions > Delete" />
+
+<See>
+
+On the billing home page, this month's costs are still $0.00, or a few cents at most.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| The cloud | Renting computers by the second instead of buying them |
+| Pay for what exists | A forgotten resource keeps costing money until you delete it |
+| Region | A separate group of data centres, like `us-east-1`. Most things live in one |
+| Global service | Not tied to a region. IAM is the main one |
+| Region selector | Top right of the console. Empty list? Check it first |
+| Account ID | 12 digits, in the account menu. Shown in this course as `111122223333` |
+| Shared responsibility | AWS secures the cloud; you secure what you put in it |
+| Budget | Emails you when spending crosses a limit. Never stops anything |
+| Every lab | Ends with a clean-up step. Always do it |
+
+</Cheat>
+
+</Part>

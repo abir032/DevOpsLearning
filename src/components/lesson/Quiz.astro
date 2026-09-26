@@ -1,0 +1,84 @@
+---
+/*
+ * Multiple-choice questions with instant feedback. Every option carries its
+ * own explanation, so a wrong pick explains why it is wrong.
+ */
+interface Option { t: string; why: string }
+interface Question { q: string; options: Option[]; answer: number }
+interface Props { questions: Question[] }
+const { questions } = Astro.props;
+const letters = "ABCDE";
+---
+<div class="quiz" data-quiz>
+  {questions.map((q, qi) => (
+    <div class="q" data-answer={q.answer}>
+      <p class="q-t" id={`q-${qi}`}>{q.q}</p>
+      <ul class="opts" role="list" aria-labelledby={`q-${qi}`}>
+        {q.options.map((o, oi) => (
+          <li>
+            <button class="opt" type="button" data-o={oi}>
+              <span class="sr">{letters[oi]}. </span><span class="ot">{o.t}</span>
+              <span class="why" data-why>{o.why}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p class="q-fb" aria-live="polite"></p>
+    </div>
+  ))}
+  <p class="score" aria-live="polite"></p>
+  <button class="btn quiz-reset" type="button" hidden>Try the questions again</button>
+</div>
+
+<script>
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>("[data-quiz]").forEach((quiz) => {
+    if (!once(quiz)) return;
+    const qs = [...quiz.querySelectorAll<HTMLElement>(".q")];
+    const score = quiz.querySelector<HTMLElement>(".score")!;
+    const again = quiz.querySelector<HTMLButtonElement>(".quiz-reset")!;
+
+    quiz.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>(".opt");
+      if (!b || b.getAttribute("aria-disabled") === "true") return;
+      const q = b.closest<HTMLElement>(".q")!;
+      const right = Number(q.dataset.answer);
+      const pick = Number(b.dataset.o);
+      const opts = [...q.querySelectorAll<HTMLButtonElement>(".opt")];
+      opts.forEach((o, i) => {
+        o.setAttribute("aria-disabled", "true");
+        if (i === right) o.classList.add("right");
+      });
+      if (pick !== right) b.classList.add("wrong");
+      q.classList.add("answered");
+      q.dataset.correct = String(pick === right);
+      const why = (i: number) => opts[i].querySelector("[data-why]")!.textContent;
+      const answerText = opts[right].querySelector(".ot")!.textContent;
+      q.querySelector(".q-fb")!.textContent = pick === right
+        ? `Right. ${why(pick)}`
+        : `Not quite. ${why(pick)} The answer is “${answerText}”: ${why(right)}`;
+
+      const answered = qs.filter((x) => x.classList.contains("answered"));
+      if (answered.length === qs.length) {
+        const n = qs.filter((x) => x.dataset.correct === "true").length;
+        score.textContent = `You got ${n} of ${qs.length}. ` + (n === qs.length
+          ? "Every one — well done."
+          : "Read the explanations on the ones you missed, then try again.");
+        again.hidden = false;
+      }
+    });
+
+    again.addEventListener("click", () => {
+      qs.forEach((q) => {
+        q.classList.remove("answered");
+        delete q.dataset.correct;
+        q.querySelector(".q-fb")!.textContent = "";
+        q.querySelectorAll(".opt").forEach((o) => { o.classList.remove("right", "wrong"); o.removeAttribute("aria-disabled"); });
+      });
+      score.textContent = "";
+      again.hidden = true;
+      qs[0].querySelector<HTMLButtonElement>(".opt")?.focus();
+    });
+  }));
+</script>

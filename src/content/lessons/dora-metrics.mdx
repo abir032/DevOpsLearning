@@ -1,0 +1,344 @@
+---
+time: 30 minutes
+level: Beginner
+before: [devops-lifecycle]
+cost: free
+quiz:
+  - q: Which two DORA metrics measure speed?
+    answer: 1
+    options:
+      - t: Change failure rate and time to restore
+        why: Those two measure stability. They tell you how often releases hurt users, and how quickly you recover.
+      - t: Deployment frequency and lead time for changes
+        why: Right. How often you ship, and how long a change takes to get from commit to production.
+      - t: Deployment frequency and change failure rate
+        why: One of each. Frequency is speed; failure rate is stability.
+      - t: Lead time and time to restore
+        why: One of each. Lead time is speed; time to restore is stability.
+  - q: A team starts deploying ten times more often, and their change failure rate goes up. What should they conclude?
+    answer: 3
+    options:
+      - t: Deploying often is dangerous, so they should go back to monthly releases
+        why: The research says the opposite. Frequent, small releases are usually safer. Something else is wrong.
+      - t: Nothing. Change failure rate doesn't matter if you're fast
+        why: Speed without stability means users get hurt more often. All four numbers matter together.
+      - t: The metrics are wrong
+        why: The metrics are doing their job. They're showing a real problem.
+      - t: They sped up the release without making each change small and well tested, so they should fix that
+        why: Right. Frequency should come from smaller, tested changes. Shipping the same big batches more often, or skipping tests to go faster, is what raises the failure rate.
+  - q: What does lead time for changes measure?
+    answer: 0
+    options:
+      - t: The time from a change being committed to it running in production
+        why: Right. It's how long working code sits between being written and helping anyone.
+      - t: How long a developer takes to write a feature
+        why: DORA's lead time starts at the commit, so it measures the delivery process, not how fast people code.
+      - t: How long a deploy takes to run
+        why: That's one small part of lead time. Most of it is usually waiting.
+      - t: How long it takes to fix an outage
+        why: That's time to restore.
+  - q: QuickCart made 20 deployments last month. 3 of them caused problems that needed a fix. What is the change failure rate?
+    answer: 2
+    options:
+      - t: 3%
+        why: That would be 3 out of 100. Here it's 3 out of 20.
+      - t: 6.7%
+        why: That's 20 divided by 3, then divided by 100. Divide the failures by the deployments.
+      - t: 15%
+        why: Right. 3 failed deployments out of 20 is 3 ÷ 20 = 0.15, or 15%.
+      - t: 17%
+        why: Close, but that's 3 out of 17, the successful deployments. Divide by all of them.
+  - q: A manager wants to rank every developer by their personal deployment frequency. What's the problem?
+    answer: 1
+    options:
+      - t: Deployment frequency can't be measured per person
+        why: It can be counted, but that's not the problem.
+      - t: The metrics describe how a team's delivery system works; used as personal targets, people game them
+        why: Right. Split one change into ten tiny deploys and the number looks great while nothing improves. The numbers are for finding a team's bottlenecks, not for ranking people.
+      - t: Only managers are allowed to see the metrics
+        why: The metrics are most useful when the whole team can see them.
+      - t: It's fine, as long as change failure rate is included
+        why: Adding a second number to game doesn't fix the problem of using them as personal targets.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the planning meeting">
+
+QuickCart has started releasing every week instead of every month. At the planning meeting, the founder asks a simple question: **"Are we getting better?"**
+
+Leo says yes: they ship four times as often. Noor says no: last Tuesday's release broke checkout. Theo says the on-call nights feel worse. Everyone is describing something real, and nobody can answer the question.
+
+</Story>
+
+<Case title="This really happened: the research behind the numbers">
+
+For years, people argued about whether shipping faster makes software less reliable. Starting in 2014, a research programme called **DORA**, short for DevOps Research and Assessment, surveyed tens of thousands of people who build and run software, every year.
+
+Its best-known finding, published in the 2018 book *Accelerate* and repeated in report after report: the teams that deploy most often also have the fewest failed changes and recover the fastest. **Speed and stability go together.** The same research settled on four numbers to measure both.
+
+</Case>
+
+QuickCart doesn't need opinions. It needs those four numbers.
+
+</Part>
+
+<Part id="idea">
+
+The **DORA metrics** are four numbers that together describe how well a team delivers software. Two measure **speed**. Two measure **stability**.
+
+| Metric | The question it answers | How to measure it | Measures |
+|---|---|---|---|
+| **Deployment frequency** | How often do we put changes in production? | Count deployments to production in a period | Speed |
+| **Lead time for changes** | How long does a change take from commit to production? | For each change: time deployed minus time of its first commit | Speed |
+| **Change failure rate** | What share of our deployments hurt users? | Deployments that needed a fix, rollback or hotfix, divided by all deployments | Stability |
+| **Time to restore** | When a deployment hurts users, how long until it's fixed? | For each failure: time fixed minus time it started | Stability |
+
+<Note title="The list keeps growing">
+
+The DORA reports are updated every year, and the details shift. Recent reports call time to restore *failed deployment recovery time*, and have added a fifth measure, **rework rate**: how many deployments were unplanned fixes for problems users hit. The four above are still the core, and they're what people mean by "the DORA metrics".
+
+</Note>
+
+### Why all four, and never just one
+
+Any one number on its own can be made to look good in a harmful way:
+
+| If you only watch | You can "improve" it by | Which hurts |
+|---|---|---|
+| Deployment frequency | Deploying the same big batch more often, or skipping tests | Change failure rate |
+| Change failure rate | Deploying rarely and testing for weeks | Deployment frequency and lead time |
+| Lead time | Rushing changes through | Change failure rate |
+| Time to restore | Marking incidents fixed before they really are | Users, who are still affected |
+
+Watched together, the only reliable way to improve all four is the one the previous lesson showed: **smaller batches**, with automated testing and deployment. A small change is quick to ship, rarely breaks things, and is easy to undo when it does.
+
+<Key>Measure speed and stability together. Good teams improve both at once, by making each change smaller.</Key>
+
+### What good looks like
+
+Past DORA reports sorted teams into groups. The boundaries change from year to year, so treat these as rough:
+
+| Metric | The strongest teams | The weakest teams |
+|---|---|---|
+| Deployment frequency | Several times a day | Less than once a month |
+| Lead time for changes | Under a day | More than a month |
+| Change failure rate | Around 5 to 15% | Around half of deployments |
+| Time to restore | Under an hour | More than a week |
+
+The point isn't to hit a group's numbers. It's to know where you are, and to see whether a change you make, like adding automated tests, moves all four the right way.
+
+### Two rules for using them
+
+- **They describe a team's system, not a person.** Rank people by them and people will game them: split one change into ten tiny deploys, and frequency looks wonderful while nothing gets better.
+- **Measure from what your tools already record.** Your git history, your deploy logs and your incident records hold most of it. The lab shows how far plain git gets you.
+
+</Part>
+
+<Part id="see">
+
+Change how many changes go out in each release, and watch all four numbers. The squares are the changes in one release; red ones are bad changes hiding among the rest.
+
+<BatchSlider />
+
+**What to notice:** all four numbers get worse together as the batch grows. There's no setting where you trade a little speed for a lot of stability. Big batches make you slower **and** more fragile.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">you only read your own project's history.</Cost>
+
+You'll measure deployment frequency, lead time, change failure rate and time to restore for a real project, using only git. About 20 minutes.
+
+You need a git project that deploys from its main branch, where each merge to `main` goes to production. Most web and backend projects work like this. If your project's main branch is called something else, such as `master`, use that name wherever you see `main`. Open the terminal in the project's folder.
+
+The example output below comes from QuickCart's order service. Yours will show your own history.
+
+<Steps>
+
+<Step title="List what reached main in the last 30 days">
+
+```sh
+git log --first-parent --since="30 days ago" --format="%h  %ad  %s" --date=iso main
+```
+
+| Part | What it means |
+|---|---|
+| `git log` | list commits, newest first |
+| `--first-parent` | only the commits made **on** `main`, such as merges, not every commit inside each branch that was merged |
+| `--since="30 days ago"` | only the last 30 days |
+| `--format="%h  %ad  %s"` | each line shows the short ID, the date and the message |
+| `--date=iso` | dates with the time of day, like `2026-09-16 10:45:00 +0000` |
+| `main` | the branch to read |
+
+```output
+c14440c  2026-09-22 15:30:00 +0000  Merge pull request #45 from eta
+dc69072  2026-09-16 10:45:00 +0000  Merge pull request #44 from promo2
+9c91e1d  2026-09-09 18:02:00 +0000  Merge pull request #43 from fix-total
+6bb6f9d  2026-09-09 16:20:00 +0000  Merge pull request #42 from promo
+15374d9  2026-09-03 11:05:00 +0000  Merge pull request #41 from menu-photos
+```
+
+Each line is one change reaching `main`, so, in a project that deploys every merge, one deployment. Keep this list open; the later steps use its times.
+
+</Step>
+
+<Step title="Count them: deployment frequency">
+
+```sh
+git rev-list --count --first-parent --since="30 days ago" main
+```
+
+| Part | What it means |
+|---|---|
+| `git rev-list` | list commit IDs, with no other detail |
+| `--count` | print only how many there are |
+| `--first-parent --since="30 days ago"` | the same commits as the last step |
+| `main` | the branch to count |
+
+```output
+5
+```
+
+QuickCart deployed 5 times in 30 days: a little more than once a week. That's its **deployment frequency**.
+
+<Note title="If you release with tags instead">
+
+Some projects, including most mobile apps, mark each release with a git tag rather than deploying every merge. Then count tags instead: `git tag --list --sort=creatordate` lists them oldest first, and the store's release history tells you when each one reached users.
+
+</Note>
+
+</Step>
+
+<Step title="Measure one change: lead time">
+
+Pick a merge from your list. Put its ID in place of the highlighted one in both places, and list the commits it brought in:
+
+```sh ph="dc69072"
+git log --reverse --format="%h  %ad  %s" --date=iso "dc69072^1..dc69072^2"
+```
+
+| Part | What it means |
+|---|---|
+| `git log --reverse` | list commits, oldest first |
+| `--format="%h  %ad  %s" --date=iso` | ID, date with time, and message |
+| `dc69072^1` | the merge's **first parent**: what `main` looked like just before the merge |
+| `dc69072^2` | its **second parent**: the tip of the branch that was merged in |
+| `A..B` | commits reachable from B but not from A. Here: exactly the commits the branch added |
+| the quotes | stop the terminal treating `^` as a special character |
+
+```output
+e1159a2  2026-09-14 09:00:00 +0000  Promo codes at checkout, with tests for totals
+dea5847  2026-09-15 14:10:00 +0000  Handle expired codes
+```
+
+The first commit was on 14 September at 09:00. From step 1, the merge was on 16 September at 10:45. So this change's **lead time** was about **2 days and 2 hours**, plus however long your deploy takes after a merge. Do the same for three or four merges and take the typical value.
+
+<Mistake title="the command fails with unknown revision">
+
+```output title="Git stops with"
+fatal: ambiguous argument 'e1159a2^1..e1159a2^2': unknown revision or path not in the working tree.
+Use '--' to separate paths from revisions, like this:
+'git <command> [<revision>...] -- [<file>...]'
+```
+
+**Why:** the commit you picked has only one parent, so `^2` doesn't exist. Either you picked an ordinary commit instead of a merge, or your team uses **squash merging**, which turns each pull request into a single commit on `main`.
+
+**The fix:** check you copied an ID from the step 1 list. If your team squash-merges, the individual commits aren't on `main` any more; open the pull request in your code hosting site, and use the time of its first commit and the time it was merged.
+
+</Mistake>
+
+</Step>
+
+<Step title="Find the failures: change failure rate">
+
+Look for changes that undid or patched an earlier one:
+
+```sh
+git log --since="30 days ago" --format="%h  %ad  %s" --date=iso -i --grep="revert" --grep="hotfix" main
+```
+
+| Part | What it means |
+|---|---|
+| `git log --since="30 days ago"` | commits from the last 30 days. No `--first-parent` this time, so commits inside merged branches are included |
+| `--format="%h  %ad  %s" --date=iso` | ID, date with time, and message |
+| `-i` | ignore upper and lower case |
+| `--grep="revert" --grep="hotfix"` | messages containing either word |
+| `main` | the branch to read |
+
+```output
+a8bbe85  2026-09-09 17:05:00 +0000  Revert promo codes: totals wrong for some orders
+```
+
+One of QuickCart's 5 deployments, the promo codes in #42, had to be undone. Its **change failure rate** is 1 ÷ 5 = **20%**.
+
+Git only knows about failures someone fixed with a commit. If your team keeps incident records, count from those instead; they're more complete.
+
+</Step>
+
+<Step title="Time the recovery: time to restore">
+
+For each failure, find when the bad change went out and when the fix went out, both in the step 1 list:
+
+| Event | From the list | Time |
+|---|---|---|
+| The bad change is deployed | `6bb6f9d  Merge pull request #42 from promo` | 16:20 |
+| The fix is deployed | `9c91e1d  Merge pull request #43 from fix-total` | 18:02 |
+
+QuickCart's **time to restore** was **1 hour 42 minutes**. Strictly, the clock starts when users were first affected, which your monitoring knows better than git. The deploy time is a good first estimate.
+
+</Step>
+
+<Step title="Write down your four numbers">
+
+| Metric | QuickCart | Yours |
+|---|---|---|
+| Deployment frequency | 5 in 30 days | |
+| Lead time for changes | About 2 days | |
+| Change failure rate | 20% | |
+| Time to restore | About 2 hours | |
+
+<See>
+
+Four numbers for your project. Look at the one that's furthest from the strongest teams in [the idea](#idea). Measure again in a month to see if it moved.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing to delete. Every command here only reads git history.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Metric or command | In one line |
+|---|---|
+| Deployment frequency | How often you deploy to production. Speed |
+| Lead time for changes | Commit to running in production. Speed |
+| Change failure rate | Share of deployments that needed a fix. Stability |
+| Time to restore | From a failure starting to it being fixed. Stability |
+| The rule | Watch all four together. Smaller batches improve all of them |
+| Never | Use them to rank individual people |
+| `git rev-list --count --first-parent --since="30 days ago" main` | How many changes reached main |
+| `git log --reverse "ID^1..ID^2"` | The commits a merge brought in, oldest first |
+| `git log -i --grep="revert"` | Changes that undid earlier ones |
+
+</Cheat>
+
+</Part>

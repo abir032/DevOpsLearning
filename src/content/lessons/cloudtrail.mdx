@@ -1,0 +1,353 @@
+---
+time: 30 minutes
+level: Beginner
+before: [iam]
+cost: free
+quiz:
+  - q: Someone removed a security group rule yesterday. Where is the quickest free place to find out who?
+    answer: 1
+    options:
+      - t: The security group's own settings page
+        why: The security group only shows its current rules. It keeps no history of who changed them.
+      - t: CloudTrail event history, filtered to RevokeSecurityGroupIngress
+        why: Event history is on in every account, free, and keeps 90 days of management events. Removing an inbound rule is the RevokeSecurityGroupIngress call, and its record names who made it.
+      - t: The application's logs in CloudWatch
+        why: Your app's logs record what your app did. Changes to AWS resources are made through AWS's API, and CloudTrail records those.
+      - t: VPC flow logs
+        why: Flow logs record network traffic — which addresses talked to which. They don't record who changed a rule.
+  - q: Which of these would NOT appear in CloudTrail event history?
+    answer: 2
+    options:
+      - t: Someone deleting an S3 bucket
+        why: Deleting a bucket changes a resource, so it's a management event. It's in event history.
+      - t: Someone launching an EC2 server
+        why: RunInstances is a management event.
+      - t: Someone deleting one file inside an S3 bucket
+        why: Reading or changing what's inside a resource is a data event. Data events are only recorded by a trail that has them turned on, and they cost extra.
+      - t: A failed attempt to delete a security group, refused as AccessDenied
+        why: Failed calls are recorded too, with an errorCode. That's what makes CloudTrail useful for debugging permissions.
+  - q: How long does event history keep events?
+    answer: 0
+    options:
+      - t: 90 days
+        why: Event history keeps the last 90 days of management events, for free. For longer, you need a trail that writes to S3.
+      - t: 7 days
+        why: It's much longer than that.
+      - t: Forever
+        why: Only if you create a trail and keep its files in S3.
+      - t: Until you delete them
+        why: You can't delete events from event history. They age out after 90 days.
+  - q: In an event record, what does the userIdentity type AssumedRole usually mean?
+    answer: 3
+    options:
+      - t: The root user made the call
+        why: The root user shows as type Root.
+      - t: AWS made the call by itself, with no person involved
+        why: AWS services acting for you show as AWSService, or appear under their own service-linked role.
+      - t: The call failed
+        why: Success or failure is shown by errorCode, not by the identity type.
+      - t: The caller was using temporary credentials from a role — for example a person signed in through single sign-on, a server, or a pipeline
+        why: The ARN names the role, and the part after the last slash is the session name, which usually identifies the person or the job.
+  - q: You want to keep a record of every change for a year, across all regions. What do you set up?
+    answer: 1
+    options:
+      - t: Nothing — event history already does that
+        why: Event history keeps 90 days, and you look at it one region at a time.
+      - t: A trail that writes management events from all regions to an S3 bucket
+        why: A trail copies events to files in S3, where you control how long they stay. The first copy of management events is free; you pay for the S3 storage.
+      - t: A CloudWatch alarm on every resource
+        why: Alarms watch metrics. They don't record who changed what.
+      - t: Longer retention on your log groups
+        why: Log group retention only affects logs you send to CloudWatch Logs.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, Tuesday 14:20">
+
+The orders page started returning errors at 14:18. The logs showed every request timing out while connecting to the database. The database was running and healthy. The app hadn't been deployed in two days.
+
+Then Sam spotted it: the database's security group no longer had the rule letting the app in on port 3306. Nobody remembered removing it. There were five people with access to the console, and every one of them said "not me".
+
+Sam put the rule back, and the errors stopped. But the next question mattered as much: who removed it, and why? If it was a mistake, it would happen again. If it wasn't a mistake, that was worse.
+
+</Story>
+
+<Case title="A very common mistake">
+
+During an incident, someone makes a quick change in the console to test an idea, such as removing a rule or resizing a server, and forgets to put it back. Hours later, another problem appears, and nobody connects it to the change. Teams that don't look at "what changed recently?" early spend hours debugging code that was never the problem.
+
+</Case>
+
+Every change in AWS leaves a record. This lesson is about finding it.
+
+</Part>
+
+<Part id="idea">
+
+Everything you do in AWS, whether you click in the console, run a CLI command, or let Terraform apply, becomes a call to AWS's API. **CloudTrail** records those calls: who made each one, what it was, when, from where, and whether it worked.
+
+<YouKnow title="You already know this: git log and git blame">
+
+When a line of code changes and breaks something, `git log` and `git blame` tell you who changed it, when, and in which commit. CloudTrail is the same thing for your AWS account: a history of every change, with a name on each one.
+
+</YouKnow>
+
+<Key>Every change in AWS is an API call, and CloudTrail writes down who made it.</Key>
+
+### What gets recorded
+
+| Kind of event | What it covers | Examples | Recorded by default? |
+|---|---|---|---|
+| **Management events** | Creating, changing, deleting and describing resources | `RunInstances`, `RevokeSecurityGroupIngress`, `DeleteBucket`, `ConsoleLogin` | Yes, in event history |
+| **Data events** | Reading or writing what's *inside* a resource | `GetObject` and `DeleteObject` on S3 files, calling a Lambda function | No — only by a trail with data events turned on, at extra cost |
+
+Failed calls are recorded too. An event with `"errorCode": "AccessDenied"` shows exactly which action someone tried and was refused — which makes CloudTrail the best place to debug a permissions problem, as [the IAM lesson](/lessons/iam/) shows.
+
+### Event history: free, on, 90 days
+
+Every account has **event history** turned on from the start. It keeps 90 days of management events, costs nothing, and can't be turned off. You open it in the console under **CloudTrail → Event history**.
+
+| Fact | What it means for you |
+|---|---|
+| 90 days | For anything older, you need a trail |
+| Management events only | It can't tell you who deleted a file inside a bucket |
+| One region at a time | Look in the region where the change happened. Changes to global services such as IAM appear in us-east-1 |
+| Filter by one attribute at a time | Pick the one that narrows it most, usually the event name or the resource |
+| Arrives within minutes | Events typically appear within about 5 minutes of the call |
+
+You filter by one **lookup attribute**:
+
+| Lookup attribute | Use it when you know | Example |
+|---|---|---|
+| Event name | What kind of change it was | `RevokeSecurityGroupIngress` |
+| Resource name | Which resource changed | `sg-0db5e1f2` |
+| User name | Who might have done it | `noor` |
+| Event source | Which service | `ec2.amazonaws.com` |
+| Read only | You only want changes | `false` hides everything that only looked |
+| Resource type | What kind of resource | `AWS::EC2::SecurityGroup` |
+
+Most events are someone looking at something: `Describe…`, `List…`, `Get…`. Filtering by **Read only = false** removes all of them and leaves only the changes. That's usually the first filter to try when asking "what changed?"
+
+### Reading an event record
+
+Each event has a record in JSON. These are the fields that answer "who did what":
+
+| Field | What it tells you |
+|---|---|
+| `eventTime` | When, always in UTC |
+| `eventSource` | Which service: `ec2.amazonaws.com`, `s3.amazonaws.com` |
+| `eventName` | The API call, such as `RevokeSecurityGroupIngress` |
+| `userIdentity` | Who made the call. See the next table |
+| `sourceIPAddress` | Where the call came from. An AWS service name here means a service made the call for you |
+| `userAgent` | What made it: the console, the CLI, Terraform, an SDK |
+| `requestParameters` | What they asked for: which group, which port, which rule |
+| `responseElements` | What AWS answered |
+| `errorCode`, `errorMessage` | Only present if the call failed, for example `AccessDenied` |
+| `readOnly` | `true` if it only looked; `false` if it changed something |
+
+`userIdentity` has a `type` that tells you what sort of caller it was:
+
+| Type | Means | How to find the person |
+|---|---|---|
+| `IAMUser` | An IAM user with its own password or keys | `userName` |
+| `AssumedRole` | Temporary credentials from a role: someone signed in through single sign-on, a server, a pipeline | The end of the `arn`, after the last `/`, is the session name: usually a person's name or a job name |
+| `Root` | The account's root user | It's the account owner. Root should almost never appear |
+| `AWSService` | An AWS service acting for you | The service name, such as `autoscaling.amazonaws.com` |
+
+### Trails: keeping it longer, and in one place
+
+Event history is enough to answer "who did this, this week?" For anything more, create a **trail**: it writes every event to files in an S3 bucket, where you decide how long they stay.
+
+<ConsolePath path="CloudTrail > Trails > Create trail" />
+
+| Setting | What it does | QuickCart's choice |
+|---|---|---|
+| Trail name | A name for the trail | `quickcart-trail` |
+| Storage location | The S3 bucket the files go to | **Create new S3 bucket** |
+| Log file SSE-KMS encryption | Encrypts the files with your own KMS key, which costs about $1 a month | Off for a small team; S3's own encryption still applies |
+| Log file validation | Adds signed digest files, so you can prove later that nobody edited or deleted a log file | On |
+| CloudWatch Logs | Also sends events to a log group, so you can alarm on them — for example on `ConsoleLogin` by the root user | Optional |
+| Events | Management events (read and write), data events, Insights events | Management events only |
+
+Trails created in the console record every region, which is what you want. Costs, roughly and as of writing: the first copy of management events is free, apart from the S3 storage; data events cost about $0.10 per 100,000 events; a second copy of management events is charged too. The bucket holds your audit record, so lock it down: no public access, and few people allowed to delete from it.
+
+**CloudTrail Lake** is a paid option that stores events for years and lets you search them with SQL. You won't need it for QuickCart; if you do later, check the current pricing and availability first. A trail in S3 plus Athena can answer the same questions.
+
+</Part>
+
+<Part id="see">
+
+Someone removed the rule that lets the app reach the database. Below is the last hour of QuickCart's event history. Try each lookup, then open the event that answers the question. Finally, try to find who deleted a file in S3.
+
+<TrailLookup />
+
+**What to notice:** unfiltered, most of the history is people looking at things. **Read-only: false** or the exact event name gets you to the one change in seconds. And the S3 file deletion isn't there at all: that's a data event, and event history doesn't record them.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">security groups cost nothing, and event history is free.</Cost>
+
+You'll make a change, undo part of it, and then find both in CloudTrail — exactly as you would after an incident. About 20 minutes, most of it waiting for events to arrive.
+
+Check the region selector says **N. Virginia (us-east-1)**. Event history shows one region at a time, so the change and the lookup must be in the same region.
+
+<Steps>
+
+<Step title="Create a security group with one rule">
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-trail-lab` |
+| Description | `CloudTrail lab` |
+| VPC | the default VPC, or any VPC you have |
+
+Under **Inbound rules**, choose **Add rule**:
+
+| Type | Port range | Source |
+|---|---|---|
+| **Custom TCP** | `8080` | **Custom**, `10.0.0.0/16` |
+
+Leave the outbound rules as they are, and choose **Create security group**.
+
+<See>
+
+The new group's page. Copy its **Security group ID**, which starts `sg-`. You'll look it up later.
+
+</See>
+
+</Step>
+
+<Step title="Remove the rule, as someone might during an incident">
+
+On the group's page, open the **Inbound rules** tab and choose **Edit inbound rules**. Choose **Delete** next to the 8080 rule, then **Save rules**.
+
+<See>
+
+**Inbound rules (0)**. Note the time. Now wait about 5 minutes: events usually take a few minutes to reach CloudTrail.
+
+</See>
+
+</Step>
+
+<Step title="Find the change by its event name">
+
+<ConsolePath path="CloudTrail > Event history" />
+
+| Field | Enter |
+|---|---|
+| Lookup attributes | **Event name** |
+| Value | `RevokeSecurityGroupIngress` |
+
+<See>
+
+One row (or more, if you've done this before): **Event name** `RevokeSecurityGroupIngress`, **User name** with your own sign-in name, **Event source** `ec2.amazonaws.com`, and your security group ID under **Resource name**.
+
+</See>
+
+Choose the event name to open it.
+
+<See>
+
+The event's details, and below them the **Event record**: the full JSON. Find these fields in it:
+
+- `eventName`: `RevokeSecurityGroupIngress`
+- `userIdentity`: you. `type` is `IAMUser` if you signed in as an IAM user, or `AssumedRole` if you signed in through single sign-on
+- `sourceIPAddress`: your own internet address
+- `requestParameters`: your group's ID, and the rule that was removed — shown either as the port and range, or as a rule ID starting `sgr-`
+- `readOnly`: `false`
+
+</See>
+
+<Note title="Nothing there yet?">
+
+Wait a few more minutes and refresh. Then check the region selector: event history only shows the region you're looking at, and the change was made in us-east-1.
+
+</Note>
+
+</Step>
+
+<Step title="See the whole life of one resource">
+
+Change the lookup:
+
+| Field | Enter |
+|---|---|
+| Lookup attributes | **Resource name** |
+| Value | your security group ID, like `sg-0db5e1f2` |
+
+<See>
+
+Every change to that one group, newest first: `RevokeSecurityGroupIngress`, then `AuthorizeSecurityGroupIngress` (the rule being added), then `CreateSecurityGroup`. The console did it in two calls; you clicked once. Your list may also include read-only calls the console made to show you the group.
+
+</See>
+
+</Step>
+
+<Step title="Ask what changed in the last hour">
+
+This is the question to ask early in any incident.
+
+| Field | Enter |
+|---|---|
+| Lookup attributes | **Read only** |
+| Value | `false` |
+
+Set the time range at the top to the last hour.
+
+<See>
+
+Only changes: your three security group calls, plus anything else that changed in this region in the last hour — including changes made by AWS services for you, such as auto scaling launching servers, if you have any running.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > quickcart-trail-lab > Actions > Delete security groups" />
+
+Choose **Delete**.
+
+<See>
+
+The group is gone. If you look in event history in a few minutes, you'll find `DeleteSecurityGroup` with your name on it. There's nothing else to clean up: event history can't be turned off, and it costs nothing.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term or action | In one line |
+|---|---|
+| CloudTrail | A record of every AWS API call: who, what, when, from where |
+| Management event | A change to, or a look at, a resource. In event history |
+| Data event | Reading or writing inside a resource, such as an S3 file. Only in a trail, at extra cost |
+| Event history | Free, always on, 90 days, one region at a time |
+| Read only = false | Only changes. The first filter in any incident |
+| `userIdentity.type` | `IAMUser`, `AssumedRole` (session name at the end of the ARN), `Root`, `AWSService` |
+| `errorCode: AccessDenied` | A refused call — how to debug permissions |
+| Trail | Copies events to S3, all regions, kept as long as you like |
+| Log file validation | Proves the log files weren't edited |
+| `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=RevokeSecurityGroupIngress` | The same lookup from the CLI |
+
+</Cheat>
+
+</Part>

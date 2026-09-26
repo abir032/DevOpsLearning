@@ -1,0 +1,467 @@
+---
+time: 35 minutes
+level: Beginner
+before: [what-the-cloud-is]
+cost: free
+quiz:
+  - q: One policy on a role allows s3:DeleteObject on every bucket. Another policy on the same role denies s3:DeleteObject on every bucket. What happens when the role tries to delete a file?
+    answer: 2
+    options:
+      - t: It's allowed, because an Allow was found
+        why: AWS checks for a matching Deny first. Once it finds one, no Allow can change the answer.
+      - t: Whichever policy was attached most recently wins
+        why: Order doesn't matter in IAM. All the policies are read together as one set.
+      - t: It's denied, because an explicit Deny always beats an Allow
+        why: This is the one rule with no exceptions. A matching Deny ends the decision, whatever else says Allow.
+      - t: AWS returns an error saying the policies conflict
+        why: Conflicting policies are perfectly legal. AWS just applies the rule that Deny wins.
+  - q: A brand-new role has no policies attached. What can it do?
+    answer: 0
+    options:
+      - t: Nothing at all
+        why: Everything is denied unless something allows it. With no policies, nothing allows anything. This is the implicit deny.
+      - t: Read-only access to everything
+        why: There's no built-in read-only access. Even reading needs an Allow.
+      - t: Everything, until you add a Deny
+        why: It's the other way round. IAM starts closed, and you open it one action at a time.
+      - t: Whatever the account's root user can do
+        why: Roles never inherit the root user's power. A role can only do what its own policies allow.
+  - q: QuickCart's API server needs to read menu photos from S3. What is the safest way to give it access?
+    answer: 3
+    options:
+      - t: Create access keys for an IAM user and put them in the app's config file
+        why: Long-lived keys in a file get copied, committed and leaked. They also never expire on their own.
+      - t: Use the root user's access keys, so it never gets an AccessDenied
+        why: If those keys leak, whoever has them owns the whole account, billing included. Root should have no access keys at all.
+      - t: Attach AmazonS3FullAccess to the server, to be sure it works
+        why: It works, but a bug or an attacker on that server could then read or delete every bucket in the account.
+      - t: Give the server a role whose policy allows s3:GetObject on that one bucket
+        why: The role hands the server short-lived credentials that renew themselves, with no key stored anywhere, and the policy allows only what it needs.
+  - q: A role has a trust policy and a permissions policy. What does the trust policy decide?
+    answer: 1
+    options:
+      - t: Which AWS services the role can use
+        why: That is the permissions policy's job.
+      - t: Who or what is allowed to take on the role
+        why: The trust policy names the principal, such as the EC2 service, that may assume the role. The permissions policy then says what the role can do.
+      - t: How long the role's credentials last
+        why: Session length is a separate setting on the role, not part of the trust policy.
+      - t: Which regions the role works in
+        why: Regions can be limited with conditions in a permissions policy, but that's not what a trust policy is for.
+  - q: A policy allows s3:GetObject on arn:aws:s3:::quickcart-menu-photos-111122223333, with no /* on the end. Reading burger.jpg from that bucket fails. Why?
+    answer: 2
+    options:
+      - t: S3 needs a few minutes before new policies apply
+        why: IAM changes can take a few seconds to spread, but this fails however long you wait.
+      - t: GetObject must be written in capitals
+        why: Action names aren't case-sensitive. That's not the problem.
+      - t: That ARN is the bucket itself, and GetObject acts on the files inside it
+        why: Files have their own ARNs, like the bucket ARN followed by /burger.jpg. Adding /* matches every file in the bucket.
+      - t: The Version line is missing
+        why: A missing Version changes how policy variables are read, but it wouldn't cause this.
+  - q: When should you sign in as the root user?
+    answer: 1
+    options:
+      - t: Every day, because it can do everything
+        why: That's exactly why it's dangerous. One stolen password or key would give away the whole account.
+      - t: Almost never — only for the few tasks that need it, with MFA turned on
+        why: A handful of things, like closing the account, need root. For everything else you use an IAM identity with only the access it needs.
+      - t: Whenever an IAM user gets an AccessDenied
+        why: AccessDenied means a policy is missing an Allow. Fix the policy instead of switching to root.
+      - t: Only from the AWS CLI, never the console
+        why: Root shouldn't have CLI access keys at all. Its rare jobs are done in the console, with MFA.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first AWS account">
+
+Leo opened QuickCart's AWS account with his email address and a password. That login is the **root user**. It can do anything in the account, including close it.
+
+He wanted the command line working quickly. So he created **access keys for the root user** and pasted them into a config file in the API's code. It worked first time.
+
+A week later, Noor pushed a copy of the code to a public repository, to show a friend how the API worked. The config file went with it.
+
+</Story>
+
+<Case title="This happens constantly">
+
+Bots scan public code on GitHub around the clock, looking for strings that look like AWS access keys. Keys pushed by mistake are widely reported to be found and used within minutes. The usual next step is to start as many large servers as possible to mine cryptocurrency, and the account owner finds out when the bill arrives.
+
+AWS now scans public repositories too, and attaches a restrictive quarantine policy to leaked keys it finds. That helps, but attackers are often quicker. And a leaked **root** key can't be limited by any IAM policy at all.
+
+</Case>
+
+Two things went wrong. The key belonged to an identity that could do **everything**, and it was a **long-lived key** sitting in a file. IAM is how QuickCart fixes both.
+
+</Part>
+
+<Part id="idea">
+
+**IAM** — Identity and Access Management — is the part of AWS that answers one question for every single request: *is this caller allowed to do this, to this thing?*
+
+Every click in the console and every API call goes through it. There is no way around it.
+
+### Who can make a request
+
+| Identity | What it is | QuickCart uses it for |
+|---|---|---|
+| **Root user** | The login you created the account with. Can do everything, and no IAM policy can limit it | Almost nothing. Locked away with MFA |
+| **IAM user** | A named person or program with its own password or access keys, which last until someone deletes them | People on small teams. Modern setups prefer single sign-on |
+| **IAM group** | A set of users that share the same policies | Giving every developer the same access in one place |
+| **IAM role** | An identity with no password and no permanent keys. Something *assumes* it and gets temporary credentials | The API servers, the pipeline, and engineers doing risky jobs |
+
+### What they're allowed to do
+
+A **policy** is a JSON document listing what is allowed or denied. You attach it to a user, a group or a role. On its own, an identity can do nothing: every permission comes from a policy.
+
+Here is the policy QuickCart's API servers need. It lets them list and read menu photos in one bucket, and nothing else:
+
+```json title="quickcart-menu-photos-read.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListMenuPhotos",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::quickcart-menu-photos-111122223333"
+    },
+    {
+      "Sid": "ReadMenuPhotos",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::quickcart-menu-photos-111122223333/*"
+    }
+  ]
+}
+```
+
+| Field | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `Version` | The version of the policy *language*. It is always `2012-10-17`: a fixed value, not today's date | AWS uses an old language version, and features like policy variables stop working | Never |
+| `Statement` | A list of rules. Each one allows or denies something | Required — the policy has no rules and is rejected | Add a statement for each separate permission |
+| `Sid` | A label for the statement, for people to read. Must be unique within the policy, letters and numbers only | Nothing changes. It's optional | To describe what the statement is for |
+| `Effect` | `Allow` or `Deny` | Required | `Deny` only for guard rails, like "never delete" |
+| `Action` | Which API calls, written `service:Action`. Can be one string or a list. `*` is a wildcard | Required (or its opposite, `NotAction`) | When the app needs another call, such as `s3:PutObject` to upload |
+| `Resource` | Which things, by **ARN** — Amazon Resource Name, the unique ID of every AWS resource | Required for identity policies | To point at a different bucket or file path |
+
+Two details catch everyone out:
+
+- `ListBucket` acts on the **bucket**, so its ARN has no slash. `GetObject` acts on the **files** inside, so its ARN ends in `/*`. They are different resources, so they need different statements.
+- S3 bucket ARNs have no region or account number in them — that's why there are three colons in a row. Most other services do include them, like `arn:aws:iam::111122223333:role/quickcart-api`.
+
+### How AWS decides
+
+Every request is checked in the same order:
+
+| Step | The question | If yes |
+|---|---|---|
+| 1 | Start: the answer is **deny** | — |
+| 2 | Does any attached policy have a **Deny** that matches? | **Denied.** Stop. Nothing can override it |
+| 3 | Does any attached policy have an **Allow** that matches? | **Allowed** |
+| 4 | Nothing matched | **Denied.** This is called the *implicit deny* |
+
+<Key>Everything is denied unless a policy allows it, and an explicit Deny beats every Allow.</Key>
+
+### Least privilege
+
+**Least privilege** means giving each identity exactly the actions and resources it needs, and nothing more. The API reads menu photos, so it gets `s3:GetObject` on that one bucket — not `s3:*` on `*`.
+
+It matters most when something goes wrong. If the API server is ever broken into, the attacker gets whatever the server was allowed to do. With least privilege, that is "read some pictures of burgers". Without it, that is "delete every bucket".
+
+### Roles instead of keys
+
+An **access key** is a pair of strings — an ID starting `AKIA` and a secret — that works until someone deletes it. It can be copied, committed to git, or left on an old laptop, and it still works.
+
+A **role** has no keys to leak. When something assumes the role, AWS hands it **temporary credentials** that expire, usually within hours, and renew automatically. A role has two policies, answering two separate questions:
+
+| Policy | The question | For QuickCart's API role |
+|---|---|---|
+| **Trust policy** | *Who* may assume this role? | The EC2 service — so servers can use it |
+| **Permissions policy** | *What* can the role do once assumed? | Read menu photos, as above |
+
+This is the trust policy the console writes when you choose EC2 as the trusted service:
+
+```json title="trust-policy.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+| Field | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `Version` | The policy language version, as before | Old language rules apply | Never |
+| `Effect` | `Allow`: the principal below may assume the role | Required | Almost never `Deny` in a trust policy |
+| `Principal` | Who is trusted. Here, the EC2 service, which fetches the credentials on the server's behalf | Required in a trust policy — the role can't be saved | `ecs-tasks.amazonaws.com` for containers, or another account's ARN for cross-account access |
+| `Action` | `sts:AssumeRole` — the call that swaps a trusted identity for temporary credentials | Required | Other values exist for web identity and SAML logins, used when a pipeline signs in without stored keys, in [Continuous delivery](/lessons/continuous-delivery/) |
+
+There's no `Resource` in a trust policy: it is attached to the role, so the resource is the role itself.
+
+### The root user
+
+The root user can't be limited by any IAM policy. So QuickCart does three things, once:
+
+| Rule | Why |
+|---|---|
+| Turn on **MFA** for root | A stolen password alone is no longer enough to sign in |
+| **Never** create root access keys, and delete any that exist | A leaked root key is a leaked account |
+| Use root only for the few jobs that need it, like closing the account | Everything else is done as an IAM identity with less power |
+
+</Part>
+
+<Part id="see">
+
+Below is the API server's role. Pick a request, attach or detach statements, and check it. Try each request with only the first statement attached. Then attach the `s3:*` shortcut. Then attach the Deny.
+
+<IamEvaluator />
+
+**What to notice:** with only the least-privilege statement, reading the state file is denied without any Deny being written — that is the implicit deny doing its job. Attaching `s3:*` makes every request work, which is exactly why it's tempting and exactly why it's dangerous. And the Deny wins even when `s3:*` is attached.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">IAM itself costs nothing, and the policy simulator never touches a real bucket.</Cost>
+
+You'll check your root user is protected, write QuickCart's least-privilege policy, give it to a role, and then prove what the role can and can't do. About 20 minutes.
+
+Sign in as an IAM identity with administrator access, not as root. If you only have the root login so far, [Set up your Mac](/lessons/mac-setup/) shows how to create an everyday admin identity first.
+
+<Steps>
+
+<Step title="Check the root user is protected">
+
+<ConsolePath path="IAM > Dashboard" />
+
+Look at the **Security recommendations** panel.
+
+<See>
+
+Green ticks for **Root user has MFA** and **Root user has no active access keys**. The exact wording may differ slightly.
+
+</See>
+
+If either is missing, fix it before anything else. Sign in as root, open the account menu at the top right, choose **Security credentials**, and use **Assign MFA device** — an authenticator app on your phone is fine. On the same page, delete any root access keys under **Access keys**.
+
+</Step>
+
+<Step title="Create the least-privilege policy">
+
+<ConsolePath path="IAM > Policies > Create policy" />
+
+In the **Policy editor**, switch from **Visual** to **JSON**. Delete what's there and paste the policy from [the idea](#idea), above:
+
+```json title="quickcart-menu-photos-read.json"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListMenuPhotos",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::quickcart-menu-photos-111122223333"
+    },
+    {
+      "Sid": "ReadMenuPhotos",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::quickcart-menu-photos-111122223333/*"
+    }
+  ]
+}
+```
+
+The bucket doesn't need to exist for this lab. Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Policy name | `quickcart-menu-photos-read` |
+| Description | `Read-only access to the menu photos bucket` |
+
+Choose **Create policy**.
+
+<See>
+
+A green banner: **Policy quickcart-menu-photos-read created.** It's listed with **Type: Customer managed** — one you wrote, as opposed to the ones AWS provides.
+
+</See>
+
+<Mistake title="a comma after the last item">
+
+```output title="The policy editor shows an error like"
+Ln 16, Col 4 JSON Syntax Error: Fix the JSON syntax error at index 482 line 16 column 4
+```
+
+**Why:** JSON doesn't allow a comma after the last item in a list or object, and a missing comma between items breaks it too. The line and column numbers point near the problem. Your exact message may differ.
+
+**The fix:** check the commas around the line it names. Every item in a list has a comma after it, except the last one.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create a role that uses it">
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+| Field | Enter |
+|---|---|
+| Trusted entity type | **AWS service** |
+| Service or use case | **EC2** |
+| Use case | **EC2** — the first option, "Allows EC2 instances to call AWS services on your behalf" |
+
+Choose **Next**. In **Permissions policies**, search for `quickcart-menu-photos-read` and tick it. Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Role name | `quickcart-menu-reader` |
+| Description | `QuickCart API servers: read menu photos` |
+
+Before you create it, look at **Step 1: Select trusted entities** on this page. It shows the trust policy, with `"Service": "ec2.amazonaws.com"` — the same as in [the idea](#idea). Choose **Create role**.
+
+<See>
+
+**Role quickcart-menu-reader created.** Open it: the **Permissions** tab lists your one policy, and the **Trust relationships** tab lists the EC2 service.
+
+</See>
+
+</Step>
+
+<Step title="Open the policy simulator">
+
+<ConsolePath path="IAM > Dashboard > Tools > Policy simulator" />
+
+The **Tools** panel is on the right of the IAM dashboard. The simulator opens in a new tab. If you can't see the link, type `policy simulator` into the console's search bar.
+
+The simulator works out what a policy would allow **without making any real request**. Nothing is read, changed or charged.
+
+On the left, under **Users, Groups, and Roles**, change the drop-down to **Roles** and choose `quickcart-menu-reader`. Its policy appears, ticked.
+
+</Step>
+
+<Step title="Test reading a photo">
+
+On the right:
+
+| Field | Enter |
+|---|---|
+| Select service | **Amazon S3** |
+| Select actions | tick **GetObject** and **DeleteObject** |
+
+Expand **GetObject** in the list of actions and set its resource:
+
+| Field | Enter |
+|---|---|
+| Resource | `arn:aws:s3:::quickcart-menu-photos-111122223333/burger.jpg` |
+
+Do the same for **DeleteObject**, with the same ARN. Then choose **Run Simulation**.
+
+<See>
+
+**GetObject: allowed.** **DeleteObject: denied**, with a note that it's *implicitly denied* — no statement matched. Nobody wrote "don't delete"; it simply wasn't allowed.
+
+</See>
+
+</Step>
+
+<Step title="Test a bucket it shouldn't touch">
+
+Change the **GetObject** resource to the Terraform state bucket:
+
+| Field | Enter |
+|---|---|
+| Resource | `arn:aws:s3:::quickcart-tfstate-111122223333/dev/terraform.tfstate` |
+
+Choose **Run Simulation** again.
+
+<See>
+
+**GetObject: denied.** Same action, different bucket. The role can read menu photos and nothing else — least privilege, proven.
+
+</See>
+
+<Mistake title="leaving off the /* on the files">
+
+If you had written the second statement's resource as `arn:aws:s3:::quickcart-menu-photos-111122223333`, with no `/*`, reading a photo would fail. The simulator would show:
+
+```output title="The simulator shows"
+GetObject    denied    Implicitly denied (no matching statements)
+```
+
+An app running with that policy gets this instead:
+
+```output title="The app's AWS SDK reports"
+An error occurred (AccessDenied) when calling the GetObject operation: Access Denied
+```
+
+**Why:** the bucket and the files inside it are different resources with different ARNs. `GetObject` acts on a file, so it has to match the file's ARN. Newer SDKs may add more detail to the message.
+
+**The fix:** use the bucket ARN followed by `/*` for actions on files, and the bare bucket ARN for actions on the bucket itself, like `ListBucket`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing here costs money, but unused roles and policies are clutter that someone will one day be afraid to delete.
+
+<ConsolePath path="IAM > Roles > quickcart-menu-reader > Delete" />
+
+Type `quickcart-menu-reader` to confirm and choose **Delete**.
+
+<ConsolePath path="IAM > Policies > quickcart-menu-photos-read > Actions > Delete" />
+
+Type `quickcart-menu-photos-read` to confirm and choose **Delete**.
+
+<See>
+
+Neither the role nor the policy appears in its list. Close the simulator tab. Keep root's MFA on for good.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Root user | The account's first login. No IAM policy can limit it. MFA on, no access keys, almost never used |
+| IAM user | A named identity with long-lived credentials |
+| IAM group | Users that share the same policies |
+| IAM role | No password, no keys. Assumed, and hands out temporary credentials |
+| Policy | JSON: `Effect` + `Action` + `Resource` in each statement |
+| `Version` | Always `2012-10-17` |
+| Implicit deny | Nothing allowed it, so it's denied. The default |
+| Explicit deny | A matching `Deny`. Beats every `Allow` |
+| Least privilege | Exactly the actions and resources needed, nothing more |
+| Trust policy | *Who* may assume a role |
+| Permissions policy | *What* the role can do |
+| S3 ARNs | Bucket: `arn:aws:s3:::name`. Files: `arn:aws:s3:::name/*` |
+| AccessDenied? | Look for the missing Allow, or a Deny, in the policies. Never switch to root |
+
+</Cheat>
+
+</Part>

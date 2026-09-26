@@ -1,0 +1,83 @@
+---
+/*
+ * S3: versioning, delete markers and restoring.
+ * Teaches: with versioning on, a delete only adds a marker on top, so it can
+ * be undone. With it off, an overwrite or a delete is permanent.
+ */
+import { bucketHtml, empty } from "../../scripts/s3-versioning";
+---
+<div class="viz" data-track="cloud" data-viz="s3-versioning">
+  <div class="viz-controls">
+    <span class="lbl" id="s3v-lbl">Versioning</span>
+    <div class="seg" role="group" aria-labelledby="s3v-lbl">
+      <button type="button" data-v="on" aria-pressed="true">On</button>
+      <button type="button" data-v="off" aria-pressed="false">Off</button>
+    </div>
+    <button class="btn line" type="button" data-a="upload">Upload a menu photo</button>
+    <button class="btn" type="button" data-a="delete">Delete menu.jpg</button>
+    <button class="btn" type="button" data-a="unmark">Delete the delete marker</button>
+    <button class="btn" type="button" data-a="restore">Restore an older version</button>
+  </div>
+  <div class="s3-stage" set:html={bucketHtml(empty(true))} />
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>The bucket is empty. Choose <b>Upload a menu photo</b> twice, then delete it.</div>
+</div>
+
+<style is:global>
+  [data-viz="s3-versioning"] .s3-stage { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 12px; padding: 14px 16px; align-items: start; }
+  [data-viz="s3-versioning"] .s3-col { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+  [data-viz="s3-versioning"] .s3-h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 14.5px; }
+  [data-viz="s3-versioning"] .s3-sub { margin: 2px 0 10px; font-size: 12.5px; color: var(--ink-3); }
+  [data-viz="s3-versioning"] .s3-chip { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--sunk); color: var(--ink-2); }
+  [data-viz="s3-versioning"] .s3-chip.on { background: var(--line); color: var(--on-line); }
+  [data-viz="s3-versioning"] .s3-stack { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
+  [data-viz="s3-versioning"] .s3v { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--rule); background: var(--surface); font-size: 13.5px; }
+  [data-viz="s3-versioning"] .s3v.top { border-color: var(--line); border-width: 2px; }
+  [data-viz="s3-versioning"] .s3v.marker { background: var(--bad-bg); border-color: var(--bad); border-style: dashed; }
+  [data-viz="s3-versioning"] .s3-what { font-weight: 700; }
+  [data-viz="s3-versioning"] .s3-id { grid-column: 1; font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  [data-viz="s3-versioning"] .s3-tag { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: 12px; font-weight: 700; color: var(--ink-2); }
+  [data-viz="s3-versioning"] .s3v.marker .s3-tag { color: var(--bad); }
+  [data-viz="s3-versioning"] .s3-empty { font-size: 13.5px; color: var(--ink-3); font-style: italic; padding: 8px 2px; }
+  [data-viz="s3-versioning"] .s3-get { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+  [data-viz="s3-versioning"] .s3-get span { color: var(--ink-2); }
+  [data-viz="s3-versioning"] .s3-get b { font-size: 15px; }
+  [data-viz="s3-versioning"] .s3-get.ok { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="s3-versioning"] .s3-get.ok b { color: var(--ok); }
+  [data-viz="s3-versioning"] .s3-get.no b { color: var(--bad); }
+  @media (max-width: 700px) {
+    [data-viz="s3-versioning"] .s3-stage { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { act, bucketHtml, empty, type Act } from "../../scripts/s3-versioning";
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="s3-versioning"]').forEach((root) => {
+    if (!once(root)) return;
+    const stage = root.querySelector<HTMLElement>(".s3-stage")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const vBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-v]")];
+    let b = empty(true);
+
+    root.addEventListener("click", (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!btn || btn.disabled) return;
+      if (btn.dataset.v) {
+        const on = btn.dataset.v === "on";
+        press(vBtns, (x) => x === btn);
+        b = empty(on);
+        stage.innerHTML = bucketHtml(b);
+        tell(say, "Versioning " + (on ? "on" : "off"), on
+          ? "A fresh bucket with versioning <b>on</b>. Upload twice, delete, then try to get the photo back."
+          : "A fresh bucket with versioning <b>off</b>, the default for a new bucket. Upload twice, delete, then try to get the photo back.");
+        return;
+      }
+      if (!btn.dataset.a) return;
+      const [step, html, tone] = act(b, btn.dataset.a as Act);
+      stage.innerHTML = bucketHtml(b);
+      tell(say, step, html, tone);
+    });
+  }));
+</script>

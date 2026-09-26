@@ -1,0 +1,98 @@
+---
+import Base from "../layouts/Base.astro";
+import { ALL_MODULES, ORDER, TRACKS, href, lessonHref, moduleHref } from "../data/curriculum";
+import { readySlugs } from "../lib/lessons";
+
+const ready = await readySlugs();
+const finished = ORDER.filter((l) => ready.has(l.slug));
+const lines = ["ship", "cloud", "box", "code", "auto"] as const;
+---
+<Base title="Laptop to Production" description="Learn DevOps by following one food-ordering app from a laptop to millions of users." current={{ page: "home" }}>
+  <div class="page">
+    <section class="hero" data-pagefind-ignore>
+      <h1>Learn DevOps by shipping one app</h1>
+      <p>Follow QuickCart, a food-ordering app, from a laptop to millions of customers. Every idea arrives at the moment QuickCart needs it — and every lesson ends with you building it yourself, in your own AWS account.</p>
+      <p>Written for engineers who have never worked on backend infrastructure. If you build mobile or web apps, you already know more of this than you think.</p>
+      <div class="hero-actions">
+        <a class="btn primary" href={moduleHref(ALL_MODULES[0])}>Start at the beginning</a>
+        <a class="btn" href={href("/which-lesson/")}>Find the lesson for your question</a>
+      </div>
+    </section>
+
+    <div class="home-cols">
+      <section aria-labelledby="route-h">
+        <h2 class="section-title" id="route-h">The route</h2>
+        <p class="section-sub">Twelve stations, then five projects. Each station is a problem QuickCart runs into, and the tools that solve it. Stops you mark as done fill in here.</p>
+        <ol class="route" id="route">
+          {ALL_MODULES.map((m, i) => {
+            const n = m.lessons.length;
+            const r = m.lessons.filter((l) => ready.has(l.slug)).length;
+            const isProj = m.kind === "projects";
+            return (
+              <li class="station" data-track={m.track} style={`--i:${i}`}>
+                <div class="station-dot" data-progress={isProj ? undefined : m.lessons.map((l) => l.slug).join(",")}><span></span></div>
+                <a href={moduleHref(m)}>
+                  <div class="station-top">
+                    <span class="station-num" aria-hidden="true">{m.id}</span>
+                    <h3><span class="sr">{isProj ? "" : `Module ${m.id}: `}</span>{m.title}</h3>
+                    {r > 0
+                      ? <span class="count ready">{r} of {n} ready</span>
+                      : <span class="count">{n} {isProj ? "projects" : "lessons"}</span>}
+                  </div>
+                  <p>{m.blurb}</p>
+                  <span class="qc">{m.qc}</span>
+                </a>
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+
+      <aside class="aside-stack" aria-label="About the course">
+        <div class="aside-box">
+          <h2>The lines</h2>
+          <p>Each colour is one subject. You change lines as QuickCart grows.</p>
+          <ul class="line-key">
+            {lines.map((t) => <li data-track={t}><i></i>{TRACKS[t]}</li>)}
+          </ul>
+        </div>
+        <div class="aside-box">
+          <h2>Every lesson has six parts</h2>
+          <p>Always in this order, so you always know where you are.</p>
+          <ol class="six">
+            <li><div><b>The problem</b><span>What goes wrong for QuickCart without it</span></div></li>
+            <li><div><b>The idea</b><span>Explained plainly, before the jargon</span></div></li>
+            <li><div><b>See it</b><span>An interactive picture you can operate</span></div></li>
+            <li><div><b>Do it</b><span>Build it yourself, step by step, with a cost badge</span></div></li>
+            <li><div><b>Check yourself</b><span>A short quiz with explanations</span></div></li>
+            <li><div><b>Cheat sheet</b><span>The essentials on one card</span></div></li>
+          </ol>
+        </div>
+        {finished.length > 0 && (
+          <div class="aside-box">
+            <h2>Finished lessons</h2>
+            <p>The course is being written in order. These are complete.</p>
+            <div class="try">
+              {finished.map((l) => (
+                <a href={lessonHref(l.slug)} data-track={l.module.track}><b>{l.title}</b><span>{l.module.title}. {l.sum}</span></a>
+              ))}
+            </div>
+          </div>
+        )}
+      </aside>
+    </div>
+  </div>
+</Base>
+
+<script>
+  import { onPage } from "../scripts/page";
+
+  /* Draw the route map once, on the very first visit only. */
+  onPage(() => {
+    const route = document.getElementById("route");
+    if (!route) return;
+    let seen = false;
+    try { seen = localStorage.getItem("ltp-drawn") === "1"; localStorage.setItem("ltp-drawn", "1"); } catch { seen = true; }
+    if (!seen) route.classList.add("draw");
+  });
+</script>

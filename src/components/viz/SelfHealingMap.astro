@@ -1,0 +1,181 @@
+---
+/*
+ * Project 2: the self-healing environment, and what survives which failure.
+ * Teaches: losing a server or a zone costs seconds of errors, not an outage,
+ * and a Single-AZ database decides what the zone test really proves.
+ */
+const SERVERS: [string, number, string][] = [["a1", 60, "a"], ["a2", 215, "a"], ["b1", 450, "b"], ["b2", 605, "b"]];
+---
+<div class="viz" data-track="cloud" data-viz="self-healing">
+  <div class="viz-controls">
+    <span class="lbl" id="sh-lbl">Database</span>
+    <div class="seg" role="group" aria-labelledby="sh-lbl">
+      <button type="button" data-db="single" aria-pressed="true">Single-AZ</button>
+      <button type="button" data-db="multi" aria-pressed="false">Multi-AZ</button>
+    </div>
+    <button class="btn line" type="button" data-a="server">Lose a server</button>
+    <button class="btn" type="button" data-a="zone">Lose zone a</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole environment</p>
+  <div class="viz-stage" tabindex="0" role="group" aria-label="The environment diagram. Scrolls sideways on small screens.">
+    <svg viewBox="0 0 800 440" role="img" aria-labelledby="sh-title">
+      <title id="sh-title">The environment from Project 2. Customers reach a load balancer that has a node in each zone. Behind it, an auto scaling group runs four app servers, two in zone a and two in zone b. The database is in the data subnets.</title>
+      <rect data-n="cust" class="vz-node" x="330" y="8" width="140" height="42" rx="10" />
+      <text class="vz-t" x="400" y="34" text-anchor="middle">Customers</text>
+      <text data-n="count" class="vz-s sh-count" x="780" y="30" text-anchor="end">Healthy targets: 4 of 4</text>
+
+      <rect class="vz-vpc" x="16" y="64" width="768" height="366" rx="14" />
+      <rect data-n="zonea" class="sh-zone" x="30" y="80" width="355" height="340" rx="10" />
+      <rect class="sh-zone" x="415" y="80" width="355" height="340" rx="10" />
+      <text class="vz-label" x="44" y="100">us-east-1a</text>
+      <text class="vz-label" x="429" y="100">us-east-1b</text>
+
+      <path class="vz-wire" d="M400 50 L400 110" />
+      <rect data-n="alb" class="vz-node" x="60" y="110" width="680" height="42" rx="8" />
+      <text class="vz-t" x="400" y="130" text-anchor="middle">Load balancer: HTTPS, one node in each public subnet</text>
+      <text class="vz-s" x="400" y="145" text-anchor="middle">health check: GET /health every 10 s, 2 failures to remove</text>
+
+      {SERVERS.map(([id, x]) => <path class="vz-wire" d={`M${x + 65} 152 L${x + 65} 200`} />)}
+      <text class="vz-s" x="44" y="186">Auto scaling group: min 2, desired 4, max 8</text>
+      {SERVERS.map(([id, x]) => (
+        <g data-srv={id}>
+          <rect class="vz-node" x={x} y="200" width="130" height="54" rx="8" />
+          <text class="vz-t" x={x + 65} y="222" text-anchor="middle">App server</text>
+          <text class="vz-s sh-st" x={x + 65} y="240" text-anchor="middle">healthy</text>
+        </g>
+      ))}
+
+      <path class="vz-wire" d="M125 254 L190 318" /><path class="vz-wire" d="M280 254 L230 318" />
+      <path class="vz-wire" d="M515 254 L270 330" /><path class="vz-wire" d="M670 254 L290 336" />
+      <rect data-n="db" class="vz-node" x="120" y="318" width="190" height="60" rx="8" />
+      <text class="vz-t" x="215" y="342" text-anchor="middle">MySQL database</text>
+      <text data-n="dbst" class="vz-s" x="215" y="360" text-anchor="middle">primary</text>
+      <g data-n="standby" class="sh-standby" opacity="0.35">
+        <rect class="vz-node" x="505" y="318" width="190" height="60" rx="8" />
+        <text class="vz-t" x="600" y="342" text-anchor="middle">Standby copy</text>
+        <text data-n="sbst" class="vz-s" x="600" y="360" text-anchor="middle">Multi-AZ only</text>
+      </g>
+      <text class="vz-s" x="44" y="404">Data subnets: only the app security group can reach port 3306</text>
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Four healthy servers, two in each zone. Choose <b>Lose a server</b> or <b>Lose zone a</b>.</div>
+</div>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="self-healing"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const srv = (id: string) => root.querySelector<SVGGElement>(`[data-srv="${id}"]`)!;
+    const count = q<SVGTextElement>("count");
+    const zoneA = q<SVGRectElement>("zonea");
+    const db = q<SVGRectElement>("db");
+    const dbst = q<SVGTextElement>("dbst");
+    const standby = q<SVGGElement>("standby");
+    const sbst = q<SVGTextElement>("sbst");
+    const dbBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-db]")];
+    const acts = [...root.querySelectorAll<HTMLButtonElement>('[data-a="server"],[data-a="zone"]')];
+    let mode: "single" | "multi" = "single";
+    let run = 0;
+
+    function setSrv(id: string, cls: "" | "hit" | "lit" | "okk", text: string) {
+      const g = srv(id);
+      g.querySelector("rect")!.setAttribute("class", "vz-node" + (cls ? " " + cls : ""));
+      g.querySelector(".sh-st")!.textContent = text;
+    }
+    function healthy(n: number, note = "") { count.textContent = `Healthy targets: ${n} of 4${note}`; }
+    function setDb() {
+      standby.setAttribute("opacity", mode === "multi" ? "1" : "0.35");
+      sbst.textContent = mode === "multi" ? "in zone b, kept in sync" : "Multi-AZ only";
+      dbst.textContent = mode === "multi" ? "primary, in zone a" : "the only copy, in zone a";
+    }
+    function clear() {
+      ["a1", "a2", "b1", "b2"].forEach((id) => setSrv(id, "", "healthy"));
+      zoneA.setAttribute("class", "sh-zone");
+      db.setAttribute("class", "vz-node");
+      standby.querySelector("rect")!.setAttribute("class", "vz-node");
+      healthy(4);
+      setDb();
+    }
+    function busy(on: boolean) { [...acts, ...dbBtns].forEach((b) => (b.disabled = on)); }
+
+    async function loseServer() {
+      const me = ++run; const live = () => me === run;
+      busy(true); clear();
+      setSrv("a1", "hit", "terminated");
+      healthy(4, " (not noticed yet)");
+      tell(say, "0 s: a server is terminated", "It stops answering at once. Until the health check notices, the load balancer still sends it about <b>1 request in 4</b>, and those fail.", "bad");
+      await beat(1400); if (!live()) return;
+      healthy(3);
+      tell(say, "About 20 s: taken out of rotation", "Two failed checks, 10 seconds apart: the load balancer stops sending it traffic. From here on, <b>no request fails</b>. The other three servers carry the load.");
+      await beat(1400); if (!live()) return;
+      setSrv("a1", "lit", "launching");
+      tell(say, "Seconds later: a replacement launches", "The auto scaling group sees 3 running where it wants 4, and launches a new server from the launch template, in the same zone to keep the zones balanced.");
+      await beat(1400); if (!live()) return;
+      setSrv("a1", "okk", "healthy (new)");
+      healthy(4);
+      tell(say, "About 3 to 5 min: back to full strength", "The new server boots, installs the app, passes two health checks and joins. <b>Nobody touched anything.</b> The only cost was the failed requests in the first 20 seconds, which a graceful removal avoids: see the tests.", "good");
+      busy(false);
+    }
+
+    async function loseZone() {
+      const me = ++run; const live = () => me === run;
+      busy(true); clear();
+      zoneA.setAttribute("class", "sh-zone down");
+      setSrv("a1", "hit", "unreachable"); setSrv("a2", "hit", "unreachable");
+      healthy(4, " (not noticed yet)");
+      tell(say, "0 s: zone a goes dark", "Both servers in zone a stop answering. Until the checks notice, about <b>half the requests</b> go to them and fail.", "bad");
+      await beat(1400); if (!live()) return;
+      healthy(2);
+      tell(say, "About 20 s: zone b carries everything", "Zone a's servers are out of rotation, and the two in zone b take all the traffic. That's why <b>desired is 4, not 2</b>: each zone alone must be able to carry the whole site.");
+      await beat(1600); if (!live()) return;
+      if (mode === "single") {
+        db.setAttribute("class", "vz-node hit");
+        dbst.textContent = "lost with zone a";
+        tell(say, "But the database was in zone a", "Every order now fails on every server. <code>/health</code> doesn't touch the database, so it still says 200: the servers stay in, and the site is up but <b>can't take orders</b>. With a Single-AZ database, a zone test can only prove the <b>app tier</b> survives. Try again with <b>Multi-AZ</b>.", "bad");
+      } else {
+        db.setAttribute("class", "vz-node hit");
+        dbst.textContent = "lost with zone a";
+        standby.querySelector("rect")!.setAttribute("class", "vz-node lit");
+        sbst.textContent = "being promoted";
+        tell(say, "The database fails over", "RDS makes the standby in zone b the new primary and points the same address at it. Orders fail for about <b>1 to 2 minutes</b> while that happens.");
+        await beat(1600); if (!live()) return;
+        standby.querySelector("rect")!.setAttribute("class", "vz-node okk");
+        sbst.textContent = "now the primary";
+        tell(say, "About 1 to 2 min: fully working again", "The app reconnects to the same address and orders work. <b>Zone b alone runs the whole site</b>: two app servers and the database. The auto scaling group keeps trying to add servers back as zone a recovers.", "good");
+      }
+      busy(false);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.db) {
+        mode = b.dataset.db as typeof mode;
+        press(dbBtns, (x) => x === b);
+        run++; clear();
+        tell(say, mode === "single" ? "Single-AZ database" : "Multi-AZ database", mode === "single"
+          ? "One copy of the database, in one zone. Cheaper, and on some account plans the only choice."
+          : "A second, synchronised copy in the other zone that RDS switches to if the first one is lost. It costs about twice as much.");
+      } else if (b.dataset.a === "server") loseServer();
+      else if (b.dataset.a === "zone") loseZone();
+      else if (b.dataset.a === "reset") {
+        run++; busy(false); clear();
+        tell(say, "Ready", "Four healthy servers, two in each zone. Choose <b>Lose a server</b> or <b>Lose zone a</b>.");
+      }
+    });
+    setDb();
+    return () => { run++; };
+  }));
+</script>
+
+<style is:global>
+  [data-viz="self-healing"] .sh-zone { fill: var(--bg); stroke: var(--rule-2); stroke-width: 1.5; stroke-dasharray: 4 4; transition: fill .2s; }
+  [data-viz="self-healing"] .sh-zone.down { fill: var(--bad-bg); stroke: var(--bad); }
+  [data-viz="self-healing"] .sh-count { font-weight: 700; fill: var(--ink); font-size: 13px; }
+  [data-viz="self-healing"] .viz-stage svg { min-width: 680px; }
+</style>

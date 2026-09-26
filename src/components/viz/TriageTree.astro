@@ -1,0 +1,70 @@
+---
+/*
+ * Where to look first: a triage decision tree.
+ * Teaches: the exact symptom tells you which layer to check first.
+ */
+import { START, nodeHtml, sayHtml } from "../../scripts/triage-tree-viz";
+---
+<div class="viz" data-track="ship" data-viz="triage-tree">
+  <div class="viz-controls">
+    <button class="btn" type="button" data-a="back" disabled>Back one step</button>
+    <button class="btn" type="button" data-a="reset" disabled>Start again</button>
+  </div>
+  <div class="tt-body">
+    <ol class="tt-trail" aria-label="Your answers so far"></ol>
+    <div class="tt-node" set:html={nodeHtml(START)} />
+  </div>
+  <div class="viz-say" aria-live="polite" set:html={sayHtml(START)} />
+</div>
+
+<style is:global>
+  [data-viz="triage-tree"] .tt-body { padding: 16px; }
+  [data-viz="triage-tree"] .tt-trail { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  [data-viz="triage-tree"] .tt-trail:not(:empty) { margin-bottom: 14px; padding-left: 14px; border-left: 3px solid var(--line); }
+  [data-viz="triage-tree"] .tt-trail li { font-size: 14px; }
+  [data-viz="triage-tree"] .tt-trail span { color: var(--ink-3); margin-right: 8px; }
+  [data-viz="triage-tree"] .tt-q { font-size: 17px; font-weight: 800; margin: 0 0 10px; }
+  [data-viz="triage-tree"] .tt-opts { display: flex; flex-direction: column; align-items: stretch; gap: 8px; max-width: 520px; }
+  [data-viz="triage-tree"] .tt-opt { justify-content: flex-start; text-align: left; }
+  [data-viz="triage-tree"] .tt-leaf { border: 2px solid var(--line); border-radius: 12px; padding: 14px 16px; background: var(--bg); }
+  [data-viz="triage-tree"] .tt-cause { margin: 0 0 10px; }
+  [data-viz="triage-tree"] .tt-look-h { font-size: 14px; font-weight: 800; color: var(--ink-2); margin: 0 0 4px; }
+  [data-viz="triage-tree"] .tt-look { margin: 0 0 10px; padding-left: 22px; }
+  [data-viz="triage-tree"] .tt-look li { margin: 3px 0; }
+  [data-viz="triage-tree"] .tt-lesson { margin: 0; font-size: 14.5px; }
+</style>
+
+<script>
+  import { START, nodeHtml, trailHtml, sayHtml } from "../../scripts/triage-tree-viz";
+  import { onPage, once } from "../../scripts/page";
+
+  const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="triage-tree"]').forEach((root) => {
+    if (!once(root)) return;
+    const trail = root.querySelector<HTMLElement>(".tt-trail")!;
+    const node = root.querySelector<HTMLElement>(".tt-node")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const back = root.querySelector<HTMLButtonElement>('[data-a="back"]')!;
+    const reset = root.querySelector<HTMLButtonElement>('[data-a="reset"]')!;
+    let path = [...START];
+
+    function render() {
+      trail.innerHTML = trailHtml(path);
+      node.innerHTML = nodeHtml(path, BASE);
+      say.innerHTML = sayHtml(path);
+      back.disabled = reset.disabled = path.length === 1;
+      /* keep keyboard focus inside the visual after the buttons are replaced */
+      (node.querySelector<HTMLElement>(".tt-opt") || (path.length > 1 ? back : null))?.focus();
+    }
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.to) path = [...path, b.dataset.to];
+      else if (b.dataset.a === "back") path = path.slice(0, -1);
+      else if (b.dataset.a === "reset") path = [...START];
+      else return;
+      render();
+    });
+  }));
+</script>

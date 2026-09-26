@@ -1,0 +1,188 @@
+---
+/*
+ * Dockerfile: the layer cache.
+ * Teaches: once one step's input changes, every step below it runs again,
+ * so the order of the lines decides how long a rebuild takes.
+ */
+import { rowsHtml } from "../../scripts/layer-cache";
+---
+<div class="viz" data-track="box" data-viz="layer-cache">
+  <div class="viz-controls">
+    <span class="lc-grp"><span class="lbl" id="lc-order">Dockerfile order</span>
+    <div class="seg" role="group" aria-labelledby="lc-order">
+      <button type="button" data-order="good" aria-pressed="true">Libraries first</button>
+      <button type="button" data-order="bad" aria-pressed="false">Copy everything first</button>
+    </div></span>
+    <span class="lc-grp"><span class="lbl" id="lc-edit">Edit</span>
+    <div class="seg" role="group" aria-labelledby="lc-edit">
+      <button type="button" data-edit="app" aria-pressed="true">A line in app.py</button>
+      <button type="button" data-edit="req" aria-pressed="false">requirements.txt</button>
+      <button type="button" data-edit="none" aria-pressed="false">Nothing</button>
+    </div></span>
+    <button class="btn line" type="button" data-act="build">Rebuild</button>
+  </div>
+  <div class="viz-stage">
+    <div class="lc-file" aria-label="The Dockerfile and what each step did in the last build">
+      <div class="lc-head"><span>Dockerfile</span><span>Last build</span></div>
+      <ol class="lc-rows" set:html={rowsHtml("good")} />
+      <div class="lc-total">
+        <span class="lc-total-l">Build time</span>
+        <span class="lc-bar"><span class="lc-fill"></span></span>
+        <b class="lc-secs">not built yet</b>
+      </div>
+      <p class="lc-hist" aria-label="Your recent builds"></p>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>The image was built once already. Choose what you edit, then <b>Rebuild</b> and watch which steps run again.</div>
+</div>
+
+<script>
+  import { beat, press, reduced, sleep, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+  import { FILES, esc, rowsHtml, type Edit, type Order } from "../../scripts/layer-cache";
+
+  const EDIT_NAME = { app: "a line in app.py", req: "requirements.txt", none: "nothing" };
+  const MAX = 40;
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="layer-cache"]').forEach((root) => {
+      if (!once(root)) return;
+      const rows = root.querySelector<HTMLOListElement>(".lc-rows")!;
+      const fill = root.querySelector<HTMLElement>(".lc-fill")!;
+      const secsEl = root.querySelector<HTMLElement>(".lc-secs")!;
+      const hist = root.querySelector<HTMLElement>(".lc-hist")!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const orderBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-order]")];
+      const editBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-edit]")];
+      const buildBtn = root.querySelector<HTMLButtonElement>('[data-act="build"]')!;
+      let order: Order = "good";
+      let edit: Edit = "app";
+      let run = 0;
+      const history: string[] = [];
+
+      function draw() { rows.innerHTML = rowsHtml(order); }
+      function setTotal(secs: number | null) {
+        if (secs === null) { fill.style.width = "0"; secsEl.textContent = "not built yet"; return; }
+        fill.style.width = Math.max(1.5, Math.min(100, (secs / MAX) * 100)) + "%";
+        fill.classList.toggle("slow", secs > 5);
+        secsEl.textContent = `${secs.toFixed(1)} s`;
+      }
+      function busy(on: boolean) {
+        [...orderBtns, ...editBtns, buildBtn].forEach((b) => (b.disabled = on));
+      }
+
+      async function build() {
+        const me = ++run;
+        const live = () => me === run;
+        busy(true);
+        draw();
+        const lines = FILES[order];
+        const els = [...rows.querySelectorAll<HTMLElement>(".lc-row")];
+        const plan: ("cached" | "run" | "meta")[] = [];
+        let broken = false;
+        let firstRun = -1;
+        for (let i = 0; i < lines.length; i++) {
+          const l = lines[i];
+          if (l.secs === undefined) { plan.push("meta"); continue; }
+          if (!broken && edit !== "none" && l.reads?.includes(edit)) { broken = true; firstRun = i; }
+          plan.push(broken ? "run" : "cached");
+        }
+        const total = 0.4 + lines.reduce((s, l, i) => s + (plan[i] === "run" ? l.secs! : 0), 0);
+        const ran = plan.filter((p) => p === "run").length;
+        tell(say, "Building", `You edited <b>${EDIT_NAME[edit]}</b>. Docker checks each step, top to bottom: has this step, or anything it reads, changed?`);
+        setTotal(0);
+        const fast = reduced();
+        let elapsed = 0.4;
+        for (let i = 0; i < lines.length; i++) {
+          const st = els[i].querySelector<HTMLElement>(".lc-st")!;
+          if (plan[i] === "meta") continue;
+          if (plan[i] === "cached") {
+            st.dataset.st = "cached";
+            st.textContent = "CACHED";
+            if (!fast) await sleep(140);
+          } else {
+            st.dataset.st = "running";
+            st.textContent = "running";
+            if (!fast) await sleep(Math.max(260, lines[i].secs! * 45));
+            elapsed += lines[i].secs!;
+            st.dataset.st = "ran";
+            st.textContent = `ran again: ${lines[i].secs! < 1 ? lines[i].secs!.toFixed(1) : Math.round(lines[i].secs!)} s`;
+          }
+          if (!live()) return;
+          setTotal(elapsed);
+        }
+        if (fast) await beat(200);
+        if (!live()) return;
+        setTotal(total);
+        history.unshift(`${order === "good" ? "Libraries first" : "Copy everything first"}, edited ${EDIT_NAME[edit]}: ${total.toFixed(1)} s`);
+        hist.innerHTML = "<b>Your builds:</b> " + history.slice(0, 4).map(esc).join(" · ");
+        const secs = `<b>${total.toFixed(1)} seconds</b>`;
+        if (edit === "none") {
+          tell(say, "Done: everything cached", `Nothing changed, so every step was reused. ${secs}. A rebuild with no changes is almost free.`, "good");
+        } else if (order === "good" && edit === "app") {
+          tell(say, "Done: 1 step ran", `Only <code>COPY app.py .</code> read the file you changed. Every step above it, including the slow <code>pip install</code>, was reused: ${secs}. Now switch to <b>Copy everything first</b> and edit app.py again.`, "good");
+        } else if (order === "bad" && edit === "app") {
+          tell(say, `Done: ${ran} steps ran`, `<code>COPY . .</code> copies app.py too, so its input changed. Once one step changes, <b>every step below it runs again</b>, so <code>pip install</code> ran for a one-line code change: ${secs}. That happens on every single edit.`, "bad");
+        } else {
+          const step = firstRun >= 0 ? `<code>${esc(lines[firstRun].code)}</code>` : "a step";
+          tell(say, `Done: ${ran} steps ran`, `You changed the libraries, so ${step} changed and <code>pip install</code> had to run: ${secs}. That is correct, and rare. The order only matters for things you change often, like your code.`);
+        }
+        busy(false);
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.order) {
+          order = b.dataset.order as typeof order;
+          press(orderBtns, (x) => x === b);
+          run++; busy(false); draw(); setTotal(null);
+          tell(say, order === "good" ? "Libraries first" : "Copy everything first", order === "good"
+            ? "This Dockerfile copies <code>requirements.txt</code> and installs the libraries <b>before</b> it copies the code. Pick an edit and rebuild."
+            : "This Dockerfile copies <b>the whole folder</b>, code included, before installing the libraries. Pick an edit and rebuild.");
+        } else if (b.dataset.edit) {
+          edit = b.dataset.edit as typeof edit;
+          press(editBtns, (x) => x === b);
+        } else if (b.dataset.act === "build") build();
+      });
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>
+
+<style is:global>
+  [data-viz="layer-cache"] .lc-grp { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+  [data-viz="layer-cache"] .lc-file { border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; margin-bottom: 8px; background: var(--bg); }
+  [data-viz="layer-cache"] .lc-head { display: flex; justify-content: space-between; padding: 8px 14px; font-size: 13px; font-weight: 800; color: var(--ink-2); border-bottom: 1px solid var(--rule); background: var(--surface); }
+  [data-viz="layer-cache"] .lc-rows { list-style: none; margin: 0; padding: 4px 0; }
+  [data-viz="layer-cache"] .lc-row { display: grid; grid-template-columns: 26px 1fr auto auto; align-items: center; gap: 10px; padding: 5px 14px; font-size: 14px; }
+  [data-viz="layer-cache"] .lc-row + .lc-row { border-top: 1px dashed var(--rule); }
+  [data-viz="layer-cache"] .lc-row code { font-family: var(--mono); font-size: 13px; color: var(--ink); background: none; padding: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  [data-viz="layer-cache"] .lc-row.meta code { color: var(--ink-2); }
+  [data-viz="layer-cache"] .lc-n { font-weight: 800; color: var(--box-t); font-size: 13px; text-align: right; }
+  [data-viz="layer-cache"] .lc-reads { font-size: 12px; font-weight: 700; color: var(--ink-2); border: 1px solid var(--rule-2); border-radius: 20px; padding: 1px 8px; white-space: nowrap; }
+  [data-viz="layer-cache"] .lc-row:not(:has(.lc-reads)) .lc-st { grid-column: 4; }
+  [data-viz="layer-cache"] .lc-st { font-size: 12.5px; font-weight: 700; border-radius: 6px; padding: 2px 8px; min-width: 104px; text-align: center; white-space: nowrap; color: var(--ink-2); background: var(--surface); border: 1px solid var(--rule); }
+  [data-viz="layer-cache"] .lc-st.meta { border-style: dashed; font-weight: 600; }
+  [data-viz="layer-cache"] .lc-st[data-st="cached"] { color: var(--ok); background: var(--ok-bg); border-color: var(--ok); }
+  [data-viz="layer-cache"] .lc-st[data-st="running"] { color: var(--warn); background: var(--warn-bg); border-color: var(--warn); }
+  [data-viz="layer-cache"] .lc-st[data-st="ran"] { color: var(--bad); background: var(--bad-bg); border-color: var(--bad); }
+  [data-viz="layer-cache"] .lc-total { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--rule); background: var(--surface); }
+  [data-viz="layer-cache"] .lc-total-l { font-size: 13px; font-weight: 800; color: var(--ink-2); }
+  [data-viz="layer-cache"] .lc-bar { flex: 1; height: 12px; border-radius: 6px; background: var(--sunk); border: 1px solid var(--rule); overflow: hidden; }
+  [data-viz="layer-cache"] .lc-fill { display: block; height: 100%; width: 0; background: var(--box); transition: width .25s; }
+  [data-viz="layer-cache"] .lc-fill.slow { background: var(--bad); }
+  [data-viz="layer-cache"] .lc-secs { min-width: 92px; text-align: right; font-size: 14px; }
+  [data-viz="layer-cache"] .lc-hist { margin: 0; max-width: none; padding: 8px 14px 10px; font-size: 13px; color: var(--ink-2); border-top: 1px solid var(--rule); background: var(--surface); }
+  [data-viz="layer-cache"] .lc-hist:empty { display: none; }
+  @media (max-width: 640px) {
+    [data-viz="layer-cache"] .lc-row { grid-template-columns: 22px 1fr; gap: 4px 8px; padding: 7px 10px; }
+    [data-viz="layer-cache"] .lc-row code { white-space: normal; overflow-wrap: anywhere; }
+    [data-viz="layer-cache"] .lc-reads, [data-viz="layer-cache"] .lc-st, [data-viz="layer-cache"] .lc-row:not(:has(.lc-reads)) .lc-st { grid-column: 2; justify-self: start; }
+    [data-viz="layer-cache"] .lc-total { flex-wrap: wrap; }
+    [data-viz="layer-cache"] .lc-bar { flex-basis: 100%; order: 3; }
+  }
+  @media (prefers-reduced-motion: reduce) { [data-viz="layer-cache"] .lc-fill { transition: none; } }
+</style>

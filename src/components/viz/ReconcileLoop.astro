@@ -1,0 +1,256 @@
+---
+/*
+ * Kubernetes: the reconcile loop.
+ * Teaches: you declare the desired state (replicas: 2). A controller keeps
+ * observing what is running, comparing it with what you asked for, and
+ * acting on the difference. Delete a pod, or lose a node, and it comes back.
+ */
+---
+<div class="viz" data-track="box" data-viz="reconcile-loop">
+  <div class="viz-controls">
+    <span class="lbl" id="rl-lbl">Replicas you ask for</span>
+    <div class="seg" role="group" aria-labelledby="rl-lbl">
+      <button type="button" data-rep="1" aria-pressed="false">1</button>
+      <button type="button" data-rep="2" aria-pressed="true">2</button>
+      <button type="button" data-rep="3" aria-pressed="false">3</button>
+      <button type="button" data-rep="4" aria-pressed="false">4</button>
+    </div>
+    <button class="btn line" type="button" data-a="del">Delete a pod</button>
+    <button class="btn" type="button" data-a="node">Stop node B</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+  </div>
+  <div class="viz-stage rl-stage">
+    <div class="rl-top">
+      <div class="rl-spec">
+        <div class="rl-k">Desired state, from order-service.yaml</div>
+        <code class="rl-code">replicas: <b data-n="desired">2</b></code>
+        <div class="rl-count">Running and ready: <b data-n="actual">2</b> of <b data-n="desired2">2</b></div>
+      </div>
+      <ol class="rl-loop" aria-label="The reconcile loop">
+        <li data-ph="observe"><b>Observe</b><span>count the pods</span></li>
+        <li data-ph="compare"><b>Compare</b><span>with replicas</span></li>
+        <li data-ph="act"><b>Act</b><span>create or delete</span></li>
+      </ol>
+    </div>
+    <div class="rl-nodes">
+      <section class="rl-node" data-node="a" aria-label="Node A">
+        <div class="rl-nh"><b>Node A</b><span class="rl-ns" data-n="ns-a">Ready</span></div>
+        <ul class="rl-pods" data-pods="a"><li class="rl-pod ph-ready"><span class="rl-pn">order-service-7d4b9c8f6-x2kqp</span><span class="rl-pp">Running, ready</span></li></ul>
+      </section>
+      <section class="rl-node" data-node="b" aria-label="Node B">
+        <div class="rl-nh"><b>Node B</b><span class="rl-ns" data-n="ns-b">Ready</span></div>
+        <ul class="rl-pods" data-pods="b"><li class="rl-pod ph-ready"><span class="rl-pn">order-service-7d4b9c8f6-m8zrt</span><span class="rl-pp">Running, ready</span></li></ul>
+      </section>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Desired 2, pods 2</span>Everything matches, so the controller does nothing. Choose <b>Delete a pod</b> and watch what it does about it.</div>
+</div>
+
+<style is:global>
+  [data-viz="reconcile-loop"] .rl-stage { padding: 14px 16px; display: grid; gap: 14px; }
+  [data-viz="reconcile-loop"] .rl-top { display: flex; flex-wrap: wrap; gap: 14px; align-items: stretch; }
+  [data-viz="reconcile-loop"] .rl-spec { flex: 1 1 220px; border: 1px solid var(--rule); border-radius: 10px; padding: 10px 14px; background: var(--bg); }
+  [data-viz="reconcile-loop"] .rl-k { font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  [data-viz="reconcile-loop"] .rl-code { display: inline-block; margin: 6px 0; font-family: var(--mono); font-size: 16px; }
+  [data-viz="reconcile-loop"] .rl-count { font-size: 15px; }
+  [data-viz="reconcile-loop"] .rl-count.off b { color: var(--bad); }
+  [data-viz="reconcile-loop"] .rl-loop { flex: 2 1 320px; list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  [data-viz="reconcile-loop"] .rl-loop li { border: 1.5px solid var(--rule-2); border-radius: 10px; padding: 8px 10px; background: var(--surface); display: flex; flex-direction: column; justify-content: center; position: relative; transition: background .2s, border-color .2s; }
+  [data-viz="reconcile-loop"] .rl-loop li span { font-size: 13px; color: var(--ink-2); }
+  [data-viz="reconcile-loop"] .rl-loop li:not(:last-child)::after { content: "→"; position: absolute; right: -9px; top: 50%; transform: translateY(-50%); color: var(--ink-3); font-weight: 800; background: var(--surface); line-height: 1; }
+  [data-viz="reconcile-loop"] .rl-loop li.on { border-color: var(--box); background: color-mix(in srgb, var(--box) 16%, var(--surface)); }
+  [data-viz="reconcile-loop"] .rl-nodes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  [data-viz="reconcile-loop"] .rl-node { border: 1.5px solid var(--ink-3); border-radius: 12px; padding: 10px 12px; min-height: 150px; background: var(--bg); transition: opacity .2s; }
+  [data-viz="reconcile-loop"] .rl-node.down { border-style: dashed; border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="reconcile-loop"] .rl-nh { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 14.5px; }
+  [data-viz="reconcile-loop"] .rl-ns { font-size: 13px; font-weight: 700; color: var(--ok); }
+  [data-viz="reconcile-loop"] .rl-node.down .rl-ns { color: var(--bad); }
+  [data-viz="reconcile-loop"] .rl-pods { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  [data-viz="reconcile-loop"] .rl-pod { border: 1.5px solid var(--rule-2); border-radius: 8px; padding: 6px 9px; background: var(--surface); display: flex; flex-direction: column; min-width: 0; }
+  [data-viz="reconcile-loop"] .rl-pn { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+  [data-viz="reconcile-loop"] .rl-pp { font-size: 13px; font-weight: 700; color: var(--ink-2); }
+  [data-viz="reconcile-loop"] .rl-pod.ph-ready { border-color: var(--box); background: color-mix(in srgb, var(--box) 12%, var(--surface)); }
+  [data-viz="reconcile-loop"] .rl-pod.ph-ready .rl-pp { color: var(--ok); }
+  [data-viz="reconcile-loop"] .rl-pod.ph-pending, [data-viz="reconcile-loop"] .rl-pod.ph-creating, [data-viz="reconcile-loop"] .rl-pod.ph-running { border-color: var(--warn); background: var(--warn-bg); }
+  [data-viz="reconcile-loop"] .rl-pod.ph-pending .rl-pp, [data-viz="reconcile-loop"] .rl-pod.ph-creating .rl-pp, [data-viz="reconcile-loop"] .rl-pod.ph-running .rl-pp { color: var(--warn); }
+  [data-viz="reconcile-loop"] .rl-pod.ph-terminating { border-style: dashed; opacity: .75; }
+  [data-viz="reconcile-loop"] .rl-pod.ph-terminating .rl-pp { color: var(--bad); }
+  @media (max-width: 560px) {
+    [data-viz="reconcile-loop"] .rl-nodes { grid-template-columns: 1fr; }
+    [data-viz="reconcile-loop"] .rl-node { min-height: 0; }
+    [data-viz="reconcile-loop"] .rl-loop li:not(:last-child)::after { display: none; }
+  }
+</style>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Phase = "pending" | "creating" | "running" | "ready" | "terminating";
+  interface Pod { name: string; node: "a" | "b"; phase: Phase }
+  const PHASE_TEXT: Record<Phase, string> = {
+    pending: "Pending",
+    creating: "ContainerCreating",
+    running: "Running, not ready yet",
+    ready: "Running, ready",
+    terminating: "Terminating",
+  };
+  const NEXT: Partial<Record<Phase, Phase>> = { pending: "creating", creating: "running", running: "ready" };
+  const SUFFIX = ["x2kqp", "m8zrt", "c4vnd", "h7wbs", "p9lfg", "t3jkx", "b6qzm", "w5ncr", "f2hyd", "k8vtl", "r4dmq", "g7spz"];
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="reconcile-loop"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const repBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-rep]")];
+      const nodeBtn = root.querySelector<HTMLButtonElement>('[data-a="node"]')!;
+      const delBtn = root.querySelector<HTMLButtonElement>('[data-a="del"]')!;
+      const phases = [...root.querySelectorAll<HTMLElement>("[data-ph]")];
+
+      let desired = 2;
+      let nodeBUp = true;
+      let pods: Pod[] = [];
+      let made = 0;
+      let run = 0;
+      let looping = false;
+
+      const newName = () => `order-service-7d4b9c8f6-${SUFFIX[made++ % SUFFIX.length]}`;
+      const alive = () => pods.filter((p) => p.phase !== "terminating");
+      const readyCount = () => pods.filter((p) => p.phase === "ready").length;
+      const head = () => `Desired ${desired}, pods ${alive().length}`;
+
+      function start() {
+        made = 0;
+        pods = [{ name: newName(), node: "a", phase: "ready" }, { name: newName(), node: "b", phase: "ready" }];
+      }
+
+      function draw(ph: string = "") {
+        for (const n of ["a", "b"] as const) {
+          const ul = root.querySelector<HTMLUListElement>(`[data-pods="${n}"]`)!;
+          ul.innerHTML = "";
+          for (const p of pods.filter((x) => x.node === n)) {
+            const li = document.createElement("li");
+            li.className = `rl-pod ph-${p.phase}`;
+            li.innerHTML = `<span class="rl-pn">${p.name}</span><span class="rl-pp">${PHASE_TEXT[p.phase]}</span>`;
+            ul.append(li);
+          }
+        }
+        root.querySelector('[data-node="b"]')!.classList.toggle("down", !nodeBUp);
+        q("ns-b").textContent = nodeBUp ? "Ready" : "NotReady: stopped";
+        q("desired").textContent = String(desired);
+        q("desired2").textContent = String(desired);
+        q("actual").textContent = String(readyCount());
+        root.querySelector(".rl-count")!.classList.toggle("off", readyCount() !== desired);
+        for (const li of phases) li.classList.toggle("on", li.dataset.ph === ph);
+        press(repBtns, (b) => Number(b.dataset.rep) === desired);
+        nodeBtn.textContent = nodeBUp ? "Stop node B" : "Start node B";
+        delBtn.disabled = alive().length === 0;
+      }
+
+      /* the controller: observe, compare, act, until reality matches */
+      async function reconcile() {
+        if (looping) return;
+        looping = true;
+        const me = run;
+        const live = () => me === run;
+        /* let the learner read what they just did before the controller reacts */
+        await beat(1100);
+        while (live()) {
+          const have = alive();
+          const notReady = pods.filter((p) => p.phase !== "ready");
+          if (have.length === desired && notReady.length === 0) break;
+
+          if (have.length !== desired) {
+            draw("observe");
+            tell(say, head(), `<b>Observe.</b> The ReplicaSet controller counts the pods labelled <code>app: order-service</code>: <b>${have.length}</b>.`);
+            await beat(900); if (!live()) break;
+            draw("compare");
+            const diff = desired - alive().length;
+            tell(say, head(), `<b>Compare.</b> The Deployment asks for <b>${desired}</b>. ${diff > 0 ? `${diff} ${diff === 1 ? "is" : "are"} missing.` : `${-diff} too many.`}`, "bad");
+            await beat(900); if (!live()) break;
+            draw("act");
+            const d2 = desired - alive().length;
+            if (d2 > 0) {
+              const names: string[] = [];
+              for (let k = 0; k < d2; k++) {
+                const up: ("a" | "b")[] = nodeBUp ? ["a", "b"] : ["a"];
+                const node = up.sort((x, y) => alive().filter((p) => p.node === x).length - alive().filter((p) => p.node === y).length)[0];
+                const p: Pod = { name: newName(), node, phase: "pending" };
+                pods.push(p);
+                names.push(`<code>${p.name}</code> on node ${node.toUpperCase()}`);
+              }
+              draw("act");
+              tell(say, head(), `<b>Act.</b> It creates ${names.join(" and ")}. Nobody asked it to; the numbers didn't match.`);
+            } else if (d2 < 0) {
+              const extra = alive().slice(d2);
+              extra.forEach((p) => (p.phase = "terminating"));
+              draw("act");
+              tell(say, head(), `<b>Act.</b> It deletes ${extra.map((p) => `<code>${p.name}</code>`).join(" and ")}. They get SIGTERM, time to finish, and then they're gone.`);
+            }
+            await beat(900); if (!live()) break;
+            continue;
+          }
+
+          /* the counts match; the new pods are still starting up */
+          pods = pods.filter((p) => p.phase !== "terminating");
+          for (const p of pods) if (NEXT[p.phase]) p.phase = NEXT[p.phase]!;
+          draw("");
+          const starting = pods.filter((p) => p.phase !== "ready");
+          if (starting.length) {
+            const ph = starting[0].phase;
+            tell(say, head(), ph === "creating"
+              ? "The scheduler has placed the new pod. The node's kubelet is pulling the image and starting the container: <b>ContainerCreating</b>."
+              : "The container is running, but its <b>readiness probe</b> hasn't passed yet, so the Service sends it no traffic.");
+          }
+          await beat(900);
+        }
+        pods = pods.filter((p) => p.phase !== "terminating");
+        looping = false;
+        if (!live()) return;
+        draw("");
+        tell(say, head(), `Back to <b>${desired} of ${desired}</b> ready. Reality matches the desired state, so the controller does nothing, and keeps watching.`, "good");
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.rep) {
+          desired = Number(b.dataset.rep);
+          draw("");
+          tell(say, head(), `You changed <code>replicas</code> to <b>${desired}</b>. You didn't say how; the controller works that out.`);
+          reconcile();
+        } else if (b.dataset.a === "del") {
+          const victim = alive().find((p) => p.phase === "ready") || alive()[0];
+          if (!victim) return;
+          victim.phase = "terminating";
+          draw("");
+          tell(say, head(), `You deleted <code>${victim.name}</code>. It's terminating. Nothing in your file changed: it still says <b>${desired}</b>.`, "bad");
+          reconcile();
+        } else if (b.dataset.a === "node") {
+          nodeBUp = !nodeBUp;
+          if (!nodeBUp) {
+            const lost = pods.filter((p) => p.node === "b");
+            pods = pods.filter((p) => p.node !== "b");
+            draw("");
+            tell(say, head(), `Node B stopped, and its ${lost.length === 1 ? "pod is" : lost.length + " pods are"} gone with it. (A real cluster waits about five minutes before giving up on a node that stops answering. It's sped up here.)`, "bad");
+            reconcile();
+          } else {
+            draw("");
+            tell(say, head(), "Node B is back. The controller doesn't move pods back to it: the count already matches. New pods will use it.");
+          }
+        } else if (b.dataset.a === "reset") {
+          run++; looping = false;
+          desired = 2; nodeBUp = true; start(); draw("");
+          tell(say, "Desired 2, pods 2", "Everything matches, so the controller does nothing. Choose <b>Delete a pod</b> and watch what it does about it.");
+        }
+      });
+
+      start();
+      draw("");
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

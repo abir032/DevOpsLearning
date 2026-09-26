@@ -1,0 +1,394 @@
+---
+time: 35 minutes
+level: Beginner
+before: []
+cost: free
+quiz:
+  - q: What should you use the root user of your AWS account for, day to day?
+    answer: 3
+    options:
+      - t: Everything. It's your account, so it's the simplest login
+        why: Root can do anything, including closing the account, and nothing can limit it. A stolen root login is the worst thing that can happen to an account.
+      - t: Running Terraform and the AWS CLI
+        why: That would need root access keys, which are the most dangerous credentials there are. AWS recommends never creating them.
+      - t: Only for creating new servers
+        why: Your admin user can create servers. Root isn't needed for that.
+      - t: Almost nothing. Protect it with MFA and use your own admin user instead
+        why: Right. A few account-level tasks need root, like changing the support plan or closing the account. For everything else, sign in through IAM Identity Center.
+  - q: Your $10 budget alert email arrives. What has AWS done about the resources that are running?
+    answer: 0
+    options:
+      - t: Nothing. The alert only tells you. They keep running and charging until you delete them
+        why: A budget is a smoke alarm, not a sprinkler. It warns you, and the rest is up to you.
+      - t: Stopped everything, so you can't spend more
+        why: A normal budget doesn't stop anything. There are advanced budget actions that can, but you have to set them up on purpose.
+      - t: Deleted the most expensive resource
+        why: AWS never deletes your resources because of a budget.
+      - t: Moved your account to the free plan
+        why: Budgets don't change your plan. They only send emails.
+  - q: You finish a lab that used a NAT gateway and go to bed without cleaning up. What happens?
+    answer: 2
+    options:
+      - t: Nothing, because nobody is sending it any traffic
+        why: A NAT gateway charges for every hour it exists, even with no traffic at all. Data it carries is charged on top.
+      - t: AWS turns it off automatically after a few hours
+        why: AWS keeps it running for as long as it exists. That's what you're paying for.
+      - t: It keeps charging by the hour until you delete it
+        why: Right. About a dollar a day doesn't sound like much, but a few forgotten resources for a month adds up to real money.
+      - t: It's free for the first month
+        why: NAT gateways are not part of the free offers. Always check the cost badge at the start of a lab.
+  - q: Why does this course use IAM Identity Center for your login instead of an IAM user with access keys?
+    answer: 1
+    options:
+      - t: IAM users are being removed from AWS
+        why: IAM users still exist, and some tools still need them. They're just not the best way for a person to sign in.
+      - t: It gives you short-lived credentials that expire, so there are no long-lived keys on your laptop to leak
+        why: Right. Access keys work forever until someone deletes them. Identity Center hands out credentials that last hours, and you sign in again with MFA when they expire.
+      - t: It's the only way to use the AWS CLI
+        why: The CLI works with access keys too. Identity Center is safer, not the only option.
+      - t: It's cheaper
+        why: Both are free. The difference is safety.
+  - q: Which part of every lesson should you check before you start its lab?
+    answer: 0
+    options:
+      - t: The cost badge at the top of the lab
+        why: It tells you whether the lab is free, costs pennies, or costs money while it runs. Paid labs also warn you at the start and have a clean-up step at the end.
+      - t: The cheat sheet
+        why: The cheat sheet is for afterwards, when you want the essentials on one card.
+      - t: The quiz
+        why: The quiz checks what you learned. It doesn't tell you what the lab will cost.
+      - t: Nothing. All labs are free
+        why: Most are, but not all. A few use things that charge by the hour.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first AWS bill">
+
+Leo, QuickCart's second engineer, wanted to learn AWS. He created an account, followed a tutorial that built a network with a NAT gateway and a load balancer, got it working, and closed his laptop.
+
+He forgot about it. Nothing was using any of it. A month later, the bill arrived: about fifty dollars, for a network nobody had sent a single request to.
+
+Leo got off lightly. He'd also made access keys for his root user, so the tutorial's commands would work. Those keys were sitting in a file on his laptop, and they could do anything to his account, forever.
+
+</Story>
+
+<Case title="A very common mistake: keys in a public repository">
+
+Someone puts AWS access keys into their code, maybe in a config file, "just for now", and pushes it to a public repository. Automated bots scan public repositories all day looking for exactly this. Within minutes, the keys are used to start as many large servers as the account allows, usually to mine cryptocurrency.
+
+The owner finds out when the bill arrives, often for thousands of dollars. This has been reported again and again for years. AWS now scans public code for its own keys and restricts the ones it finds, but the attackers are often faster.
+
+</Case>
+
+Neither of these needs bad luck. Both come from how the account was set up. This lesson sets yours up so neither can happen quietly, and explains how the rest of the course works.
+
+</Part>
+
+<Part id="idea">
+
+Two ideas: how each lesson is built, and how to practise on a real AWS account without risk.
+
+### Every lesson has the same six parts
+
+| Part | What it gives you |
+|---|---|
+| **The problem** | What goes wrong for QuickCart without this idea, and a real case where it went wrong for someone |
+| **The idea** | The concept in plain words, before any jargon, with one sentence to remember |
+| **See it** | An interactive picture you can operate. It narrates what happens in words, too |
+| **Do it** | A hands-on lab with numbered steps, a cost badge, and a clean-up step |
+| **Check yourself** | A few questions. Every answer, right or wrong, explains why |
+| **Cheat sheet** | The essentials on one card. You can print it |
+
+The order never changes, so you always know where you are. The tracker on the right of wide screens shows which part you're reading.
+
+### Practising on a real account is safe if you set it up properly
+
+The labs run on your own AWS account. That's the only way to really learn it. It's also where the two dangers are:
+
+| Danger | What protects you |
+|---|---|
+| Someone gets into your account | MFA on the root user, and you never use root day to day |
+| Keys on your laptop leak | No long-lived access keys. You sign in through **IAM Identity Center**, which hands out credentials that expire after a few hours |
+| You forget to delete something | A budget alert, a clean-up step at the end of every lab, and a cost badge at the start |
+
+The **root user** is the email address you signed up with. It can do anything, including close the account, and no rule can limit it. So you lock it away and create a separate admin login for yourself.
+
+<Key>Something that charges by the hour keeps charging until you delete it. A budget alert tells you; only deleting stops it.</Key>
+
+### What the cost badges mean
+
+| Badge | Means | Examples |
+|---|---|---|
+| **Free** | Nothing in the lab costs money | Setting up IAM, a VPC with no NAT gateway |
+| **Pennies** | A few cents at most, even if you're slow | A small S3 bucket, a few minutes of a small server |
+| **Costs money** | Charges every hour while it runs. The lab gives a rough figure, warns you at the start, and ends with a clean-up step | NAT gateways, load balancers, managed databases, Kubernetes clusters |
+
+Rough prices in this course are for `us-east-1`, rounded, and AWS changes them over time. Treat them as "about this much", not as a quote.
+
+### The free tier, honestly
+
+AWS's free offers changed in 2025, and which ones you get depends on when your account was created.
+
+| Your account | What you get, at the time of writing |
+|---|---|
+| Created from **mid-July 2025** | Credits: $100 when you sign up, and up to $100 more for trying certain services. You choose a **free plan**, which never charges you but ends after about six months or when the credits run out, and limits some services. Or a **paid plan**, where the credits are used first and then you pay |
+| Created **before** that | The older free tier: some services free for 12 months, within limits, such as 750 hours a month of a small server |
+| Either | Some things are always free within limits, and a few services charge nothing at all |
+
+Check what applies to you in **Billing and Cost Management → Free Tier**. Don't rely on "it's probably free". Some things this course uses, like NAT gateways and Kubernetes clusters, aren't covered by the older free tier at all. If a lab needs something your plan doesn't allow, the console tells you when you try.
+
+### The rules for every lab
+
+| Rule | Why |
+|---|---|
+| Work in **us-east-1**, N. Virginia | Everything is in one place, so nothing gets forgotten in another region |
+| Read the cost badge first | You know before you start whether anything will charge |
+| Always do the clean-up step, even if the lab went wrong | A half-built lab costs the same as a finished one |
+| Sign in as your admin user, not root | If your login leaks, it can be taken away without losing the account |
+
+</Part>
+
+<Part id="see">
+
+Start some of the things that charge by the hour, then let the days pass. Watch the bill, and the $10 budget. Then clean up and let more days pass.
+
+<BillMeter />
+
+**What to notice:** nothing in this picture is doing any work. There are no users. The bill grows anyway, because you pay for things existing, not for them being used. And the budget emails arrive while everything keeps running. The only thing that stops the number is **Clean up everything**.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">creating an account, MFA, IAM Identity Center and a budget cost nothing.</Cost>
+
+You'll create an AWS account and set it up safely: MFA on the root user, a budget alert, and a separate admin login through IAM Identity Center. About 30 minutes. If you already have an account, skip the first step and check the rest are done.
+
+You need an email address that nobody else can read, a phone, and a payment card. AWS asks for a card even if you only use free things.
+
+<Steps>
+
+<Step title="Create the account">
+
+Search the web for **AWS create account**, and open the sign-up page on AWS's own site. The screens change from time to time, but they ask for these things:
+
+| Screen | Enter |
+|---|---|
+| Root user email address | An email only you can read. This email **is** the root user |
+| AWS account name | `quickcart-learning` |
+| Verify email address | The code AWS emails you |
+| Root user password | A long, unique password from a password manager |
+| Account plan | **Free plan** or **Paid plan**, if you're asked. See the free tier table in [the idea](#idea). If you're unsure, the free plan is the safer choice; you can upgrade later |
+| Contact information | Your details. Choose **Personal** |
+| Billing information | Your card |
+| Confirm your identity | Your phone number, then the code AWS sends |
+| Support plan | **Basic support – Free** |
+
+<See>
+
+A page saying your account is being activated. It can take a few minutes, sometimes longer, before every service works.
+
+</See>
+
+</Step>
+
+<Step title="Turn on MFA for the root user">
+
+Sign in to the console as the root user: choose **Root user** on the sign-in page and use your email and password. AWS now requires MFA for the root user, so it may ask you to set it up straight away. If it doesn't, do it now.
+
+<ConsolePath path="Account menu (top right) > Security credentials > Assign MFA device" />
+
+| Field | Enter |
+|---|---|
+| Device name | `root-phone` |
+| MFA device | **Passkey or security key** if you have one, otherwise **Authenticator app** |
+
+Choose **Next**. For an authenticator app, choose **Show QR code**, scan it with the app, then type two codes in a row from the app into **MFA code 1** and **MFA code 2**. Choose **Add MFA**.
+
+<See>
+
+Back on **Security credentials**, the **Multi-factor authentication (MFA)** section lists `root-phone`. Further down, the **Access keys** section says there are none. Keep it that way: never create access keys for root.
+
+</See>
+
+<Note title="If the codes are rejected">
+
+The two codes must be consecutive: wait for the app to show a new code before you type the second one. The codes also depend on the time, so set your phone's clock to automatic if they keep failing.
+
+</Note>
+
+</Step>
+
+<Step title="Create a budget alert">
+
+You're signed in as root, which can always see billing, so create the budget now. Pick your monthly limit from [the roadmap lab](/lessons/roadmap/). This course uses $10.
+
+<ConsolePath path="Billing and Cost Management > Budgets > Create budget" />
+
+| Field | Enter |
+|---|---|
+| Budget setup | **Use a template (simplified)** |
+| Templates | **Monthly cost budget** |
+| Budget name | `quickcart-monthly` |
+| Enter your budgeted amount ($) | `10` |
+| Email recipients | Your email address |
+
+Choose **Create budget**.
+
+<See>
+
+`quickcart-monthly` in the list of budgets, with a budgeted amount of $10.00. The template emails you when your actual spend passes 85% and 100% of the amount, and when AWS forecasts you'll pass 100%. The exact thresholds may differ if AWS changes the template.
+
+</See>
+
+<Note title="An alert is not a limit">
+
+AWS has no simple spending cap. The budget sends emails. It checks your costs a few times a day, so an alert can arrive hours after the moment you crossed the line. Treat it as a safety net, and keep doing the clean-up steps.
+
+</Note>
+
+</Step>
+
+<Step title="Turn on IAM Identity Center">
+
+IAM Identity Center is where you'll create your everyday admin login. Check the region selector at the top right says **N. Virginia (us-east-1)** first: Identity Center lives in one region, and that's where you'll find it later.
+
+<ConsolePath path="IAM Identity Center > Enable" />
+
+If it asks how to enable it, choose to **enable it with AWS Organizations**. That makes your account the only member of a new organization. It's free, and it's what lets Identity Center give you access to the account.
+
+<See>
+
+The IAM Identity Center dashboard. Under **Settings summary**, note the **AWS access portal URL**: a web address ending in `awsapps.com/start`. Bookmark it. It's where you'll sign in from now on.
+
+</See>
+
+</Step>
+
+<Step title="Create your user">
+
+<ConsolePath path="IAM Identity Center > Users > Add user" />
+
+| Field | Enter |
+|---|---|
+| Username | Your first name in lowercase, like `maya` |
+| Password | **Send an email to this user with password setup instructions** |
+| Email address | Your email address |
+| Confirm email address | The same again |
+| First name | Your first name |
+| Last name | Your last name |
+
+Choose **Next**, skip **Add user to groups** with **Next**, then choose **Add user**.
+
+<See>
+
+Your user in the list, with a note that an invitation email was sent.
+
+</See>
+
+</Step>
+
+<Step title="Create an admin permission set">
+
+A **permission set** is a named bundle of permissions that Identity Center can give to people in an account.
+
+<ConsolePath path="IAM Identity Center > Permission sets > Create permission set" />
+
+| Field | Enter |
+|---|---|
+| Permission set type | **Predefined permission set** |
+| Policy for predefined permission set | **AdministratorAccess** |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Permission set name | `AdministratorAccess`, the default |
+| Session duration | **1 hour**, the default. Choose up to **12 hours** if you'd rather sign in less often |
+
+Choose **Next**, then **Create**.
+
+</Step>
+
+<Step title="Give your user admin access to the account">
+
+<ConsolePath path="IAM Identity Center > AWS accounts" />
+
+Tick your account, then choose **Assign users or groups**. On the **Users** tab, tick your user and choose **Next**. Tick **AdministratorAccess**, choose **Next**, then **Submit**.
+
+<See>
+
+A message saying the assignment succeeded. Under your account, your user is listed with **AdministratorAccess**.
+
+</See>
+
+</Step>
+
+<Step title="Sign in as your admin user">
+
+Open the email with the subject **Invitation to join AWS IAM Identity Center** and choose **Accept invitation**. Set a password, then register an MFA device when asked. It's a separate login from root, so give it its own entry in your authenticator app.
+
+You land on the **AWS access portal**. Open your account and choose **AdministratorAccess**.
+
+<See>
+
+The AWS console. The account menu at the top right shows `AdministratorAccess/maya`, with your own name in place of `maya`. This is how you'll sign in from now on.
+
+</See>
+
+<Mistake title="billing pages say access denied">
+
+As your admin user, open **Billing and Cost Management**. If it says you don't have permission:
+
+```output title="The console shows a message like"
+You don't have permission to access billing information for this account.
+```
+
+**Why:** by default, only the root user can see billing, even for an admin, until root allows it.
+
+**The fix:** sign in as root once more. Open **Account menu → Account**, find **IAM user and role access to Billing information**, choose **Edit**, tick **Activate IAM Access**, and choose **Update**. Then sign out of root and back in as your admin user.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing here costs money, so there's nothing to delete. **Keep all of it**: the MFA, the budget and your admin user are what keep the rest of the course safe.
+
+Sign out of root, and put the root password and MFA somewhere safe. From now on, sign in only through your access portal bookmark.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Idea | In one line |
+|---|---|
+| The six parts | Problem, idea, see it, do it, check yourself, cheat sheet |
+| Root user | The sign-up email. MFA on, no access keys, almost never used |
+| IAM Identity Center | Where your everyday admin login lives. Credentials expire after hours |
+| Access portal | The `awsapps.com/start` address you sign in from. Bookmark it |
+| Permission set | A named bundle of permissions, like `AdministratorAccess` |
+| Budget | Emails you at 85% and 100%. It does not stop anything |
+| Free badge | Nothing costs money |
+| Pennies badge | A few cents at most |
+| Costs money badge | Charges every hour until the clean-up step |
+| Region | Always `us-east-1` in this course |
+| Free tier | Depends on when the account was made. Check **Billing → Free Tier** |
+
+</Cheat>
+
+</Part>

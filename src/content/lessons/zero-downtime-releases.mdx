@@ -1,0 +1,606 @@
+---
+time: 60 minutes
+level: Intermediate
+before: [ecs-fargate]
+cost: paid
+quiz:
+  - q: During a release, new tasks get traffic while the app inside is still loading, and those requests fail. Which fix is missing?
+    answer: 1
+    options:
+      - t: A longer deregistration delay
+        why: The deregistration delay protects the old tasks as they leave. This problem is with the new ones arriving.
+      - t: A health check that only passes once the app can really serve requests
+        why: The load balancer sends traffic to a target as soon as its health check passes. If the check passes before the app is ready, customers get the errors.
+      - t: Graceful shutdown in the app
+        why: That protects requests on tasks that are stopping, not on tasks that are starting.
+      - t: A bigger task size
+        why: More CPU might make start-up quicker, but traffic would still arrive before the app is ready.
+  - q: A service has 2 tasks, Min running tasks 100% and Max running tasks 200%. What does ECS do first when you release a new version?
+    answer: 0
+    options:
+      - t: Starts two new tasks, and only removes old ones once the new ones are healthy
+        why: 100% means it may never have fewer than 2 healthy tasks. 200% means it may run up to 4. So it adds before it removes, and capacity never drops.
+      - t: Stops both old tasks, then starts two new ones
+        why: That would drop to 0 healthy tasks, which 100% forbids. It's also exactly how you get downtime.
+      - t: Stops one old task, then starts one new one
+        why: That's closer to Min 50%. With 100%, it may not go below 2 healthy tasks at any point.
+      - t: Starts four new tasks
+        why: 200% of 2 is 4 in total, old and new together, so there's room for only 2 new ones.
+  - q: What does the deregistration delay give a task that's being removed?
+    answer: 2
+    options:
+      - t: Time to download the new image
+        why: The old task never runs the new image. New tasks start separately.
+      - t: Time for its health checks to pass
+        why: That's the health check grace period, for tasks that are starting.
+      - t: Time for requests it's already answering to finish, while the load balancer sends it nothing new
+        why: The load balancer stops sending new requests at once, then waits up to the delay for the ones in progress. Only then does ECS stop the task.
+      - t: Time for the circuit breaker to decide
+        why: The circuit breaker watches whether new tasks fail. It's unrelated to draining.
+  - q: A Dockerfile ends with CMD gunicorn --bind 0.0.0.0:8080 app:app, with no square brackets. Why can that hurt releases?
+    answer: 3
+    options:
+      - t: gunicorn can't start without brackets
+        why: It starts fine. The problem is at the other end, when it's asked to stop.
+      - t: The container starts more slowly
+        why: The start time barely changes.
+      - t: The app can't read environment variables
+        why: Both forms can read environment variables.
+      - t: A shell runs gunicorn, and the stop signal may never reach it, so it's killed after the stop timeout instead of finishing its requests
+        why: Without brackets, Docker starts /bin/sh -c and gunicorn runs under it. SIGTERM goes to the shell, which may not pass it on. After the stop timeout, everything is killed, mid-request if any are running.
+  - q: A new version can't start at all. Its tasks keep failing. What does the deployment circuit breaker with rollback do?
+    answer: 1
+    options:
+      - t: Keeps retrying for ever, until someone notices
+        why: That's what happens without it. The circuit breaker exists to stop that.
+      - t: Stops the release after repeated failures and goes back to the last version that deployed successfully
+        why: The old tasks were never removed, because the new ones never became healthy. The circuit breaker marks the release as failed and returns the service to the last good deployment, by itself.
+      - t: Deletes the service
+        why: It never deletes anything you'd need. It only changes which revision the service runs.
+      - t: Raises the desired count to add capacity
+        why: The desired count doesn't change. More copies of a broken version wouldn't help.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, release day">
+
+QuickCart releases the order service every few days. Each time, the same thing happens. For about 30 seconds, some customers tapping **Place order** get an error. Theo, who is on call, watches the error graph jump every release, then settle again.
+
+Nobody changed any code that was broken. The new version works. The old version worked. The errors happen **in between**, while one is replacing the other.
+
+One Friday a release goes out that really is broken. It takes forty minutes to notice, find the previous version, and put it back.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Teams decide a short burst of errors during every release is simply the cost of releasing. So they release less often, and bundle more changes into each release. Each release is now bigger and riskier, so it breaks more often, so they release even less. The errors were never the price of releasing. They came from three specific gaps, and each one has a fix.
+
+</Case>
+
+QuickCart wants to release in the middle of a busy lunchtime with **zero** failed requests, and to undo a broken release in minutes without anyone having to be awake. This lesson finds the three moments where requests get dropped, closes each one, and proves it with a count.
+
+</Part>
+
+<Part id="idea">
+
+A **rolling deployment** replaces the old copies of your app with new ones, a few at a time, while the service keeps running. On ECS, pointing a service at a new task definition revision starts one.
+
+It looks seamless from a distance. Close up, every task goes through a life: it **starts**, becomes **ready**, **serves traffic**, is **removed** from the load balancer, and is **stopped**. Requests fail at the edges of that life.
+
+<Key>A release drops requests at three moments: when new copies start, when old ones leave the load balancer, and when they're stopped. Each needs its own fix.</Key>
+
+### The three moments, and the three fixes
+
+| Moment | What goes wrong | The fix |
+|---|---|---|
+| **A new task starts** | The load balancer sends it real requests before the app can answer them | A **health check that only passes when the app is ready**, and a **health check grace period** so a slow starter isn't killed |
+| **An old task leaves the load balancer** | Requests it's still answering are cut off, and the load balancer takes a few seconds to stop sending new ones | A **deregistration delay**: stop sending new requests, and let the ones in progress finish |
+| **An old task is stopped** | The app dies mid-request instead of finishing | **Graceful shutdown**: the app hears the stop signal, finishes what it's doing, then exits |
+
+### Rolling settings: how many at once
+
+Two numbers control how ECS swaps tasks, both as a percentage of the desired count. The console calls them **Min running tasks %** and **Max running tasks %**; in the ECS API they're `minimumHealthyPercent` and `maximumPercent`, part of the service's deployment configuration.
+
+| Setting | Meaning | With 2 desired tasks |
+|---|---|---|
+| Min running tasks 100% | Never fewer than 100% healthy tasks during a release | at least 2 healthy, all the time |
+| Max running tasks 200% | Never more than 200% tasks in total | up to 4 at once, so 2 new ones can start beside the 2 old ones |
+| Min 50% / Max 100% | Remove before adding: cheaper, but capacity halves during the release | 1 healthy at the worst moment |
+
+**100 and 200 is the safe choice.** New tasks start first, and old ones are only removed once the new ones are healthy. You briefly pay for four tasks instead of two.
+
+### Moment 1: starting, and being ready
+
+The load balancer decides whether a target gets traffic from its **health check**. So the health check must answer one question honestly: *can this copy serve an order right now?* QuickCart's `/health` only answers once gunicorn and the app have loaded. A check that only tests whether a port is open can pass while the app is still loading.
+
+A separate setting protects slow starters. The **health check grace period** tells ECS to ignore failed load balancer health checks for the first few seconds of a task's life. Without it, a task that takes 40 seconds to warm up is marked unhealthy and replaced, over and over, and the release never finishes.
+
+| Setting | Where | QuickCart uses | Too low | Too high |
+|---|---|---|---|---|
+| Health check path | Target group | `/health` | — | — |
+| Healthy threshold × interval | Target group | 2 × 10 seconds | A flaky check lets a bad task in | Every release waits longer |
+| Health check grace period | ECS service | 30 seconds | Slow starters are killed and replaced in a loop | A task that really is broken takes longer to be replaced |
+
+### Moment 2: leaving the load balancer
+
+When ECS removes a task, it first **deregisters** it from the target group. The load balancer stops sending it new requests, but lets the ones already in progress carry on for up to the **deregistration delay**. When they've finished, or the delay runs out, ECS stops the task.
+
+The default delay is **300 seconds**. That's safe, but it makes every release wait five minutes per batch of tasks. QuickCart's slowest request takes a few seconds, so **30 seconds** is plenty. Choose a number longer than your slowest normal request.
+
+| Deregistration delay | What happens |
+|---|---|
+| 0 | The task is stopped almost at once, while requests are in progress and while the load balancer is still catching up |
+| 30 seconds | In-progress requests finish; releases take about 30 seconds per batch longer |
+| 300 seconds (the default) | Safe, but slow releases |
+
+### Moment 3: stopping
+
+To stop a task, ECS sends its container **SIGTERM**, the polite "please stop" signal. It then waits for the **stop timeout**, 30 seconds by default on Fargate and at most 120, and if the process is still running it sends **SIGKILL**, which can't be refused.
+
+A well-behaved app hears SIGTERM, stops accepting new work, finishes what it's doing and exits. gunicorn does this: `--graceful-timeout 20` gives its workers up to 20 seconds to finish. That has to be **shorter than the stop timeout**, or gunicorn is killed before it's done.
+
+| Dockerfile line | Who receives SIGTERM | Result |
+|---|---|---|
+| `CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]` | gunicorn itself | It finishes its requests and exits, usually in under a second |
+| `CMD gunicorn --bind 0.0.0.0:8080 app:app` | a shell, `/bin/sh -c`, which runs gunicorn | Depending on the shell, gunicorn may never hear it. It's killed after the stop timeout, mid-request if it has one |
+
+The square brackets are the **exec form**. The [Dockerfile lesson](/lessons/dockerfile/) covers it in full.
+
+### When a release is broken: the circuit breaker
+
+If the new version can't start, or keeps failing its health checks, ECS would keep trying for ever. Meanwhile the old tasks are still serving, because the new ones never became healthy, so customers see nothing. But the release is stuck, and someone has to notice.
+
+The **deployment circuit breaker** notices for you. After a number of failed tasks, which depends on the desired count and is at least a few, it marks the release as failed. With **rollback** turned on, it returns the service to the last deployment that completed successfully.
+
+<YouKnow title="You already know this: pulling a bad release">
+
+When a mobile release crashes on launch, you halt the rollout and re-promote the previous build. The circuit breaker does that for ECS, automatically: it halts the rollout of the bad revision and puts the last good one back.
+
+</YouKnow>
+
+### Changing the database during a release
+
+During a rolling release, old and new versions run **at the same time**, against the **same database**. So a database change must not break the old version. Do it in three separate releases:
+
+| Release | Change | Why it's safe |
+|---|---|---|
+| 1 | **Add** the new column | The old code ignores a column it doesn't know |
+| 2 | Release code that **uses** the new column | Both versions work with the new database |
+| 3 | **Remove** the old column, once nothing uses it | No running version needs it any more |
+
+Renaming or deleting a column in one step breaks the version that's still running, instantly.
+
+</Part>
+
+<Part id="see">
+
+Below, QuickCart releases v2 while customers send about ten requests a second. First release with all three fixes on. Then switch one fix off at a time, release again, and watch the failed count.
+
+<RollingDeploy />
+
+**What to notice:** each fix protects one moment, and the failures it prevents are different. Readiness protects the **start**, the drain protects the **handover**, and graceful shutdown protects the **stop**. And the results don't simply add up: with the drain on, a missing graceful shutdown got away with it. On Kubernetes, where removal and stopping happen at the same moment, it wouldn't.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $2 a day while it runs, the same as [ECS on Fargate](/lessons/ecs-fargate/): two small tasks, the load balancer and their public IP addresses. During each release you briefly pay for four tasks instead of two. Prices are for us-east-1 and change. Delete everything at the end.</Cost>
+
+<Note title="This lab costs money until you clean up">
+
+The load balancer and the tasks are billed every hour they exist. Do the lab in one sitting, and do the **Clean up** step before you stop.
+
+</Note>
+
+You'll release v2 of the order service while a script sends it traffic, and count the failed requests. Then you'll switch one fix off and see the difference, and release a broken version to watch the circuit breaker undo it. About 45 minutes.
+
+This lab uses the service from [ECS on Fargate](/lessons/ecs-fargate/): the `quickcart` cluster, the `order-service` service with 2 tasks, `quickcart-alb` and `quickcart-orders-tg`. **If you deleted it, rebuild it with that lesson first.** You also need Docker and your `order-service` folder from [Storing images: ECR](/lessons/ecr/), and Python 3, which macOS already has.
+
+<Steps>
+
+<Step title="Check the service is healthy">
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > order-service" />
+
+<See>
+
+**2/2 tasks running**, and one deployment, marked **Completed**. In **EC2 → Target groups → quickcart-orders-tg → Targets**, two healthy targets.
+
+</See>
+
+Copy the load balancer's **DNS name** from **EC2 → Load balancers → quickcart-alb**. It looks like `quickcart-alb-1234567890.us-east-1.elb.amazonaws.com`. You'll use it several times.
+
+</Step>
+
+<Step title="Check the three fixes are in place">
+
+Check each setting where it lives. The ECS lab set most of them already.
+
+| Fix | Where to look | Should be |
+|---|---|---|
+| Readiness | **EC2 → Target groups → quickcart-orders-tg → Health checks** | Path `/health`, healthy threshold 2, interval 10 seconds |
+| Grace period | **ECS → order-service → Configuration and networking** (or the service's **Update** form) | Health check grace period 30 seconds |
+| Drain | **EC2 → Target groups → quickcart-orders-tg → Attributes** | Deregistration delay 30 seconds |
+| Graceful shutdown | Your `Dockerfile` | The last line is `CMD ["gunicorn", ` followed by the rest, with square brackets |
+
+Then check the rolling settings and turn on the circuit breaker:
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > order-service > Update service" />
+
+Open **Deployment options**. The console moves sections around from time to time, so find each field by its name:
+
+| Field | Enter |
+|---|---|
+| Deployment type | **Rolling update** |
+| Min running tasks % | `100` |
+| Max running tasks % | `200` |
+| Deployment failure detection | tick **Use the Amazon ECS deployment circuit breaker** and **Rollback on failures** |
+
+Choose **Update**. Some consoles tick the circuit breaker for new services already; if so, leave it on.
+
+<See>
+
+A new deployment starts and completes within a few minutes, with the same revision. Changing service settings is itself a small rolling release.
+
+</See>
+
+</Step>
+
+<Step title="Write the load test">
+
+You need a way to count failed requests during a release, not a feeling that "it looked fine". In your `order-service` folder, create `load.py`:
+
+```python title="load.py"
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = sys.argv[1]
+seconds = int(sys.argv[2]) if len(sys.argv) > 2 else 60
+
+ok = 0
+failed = 0
+end = time.time() + seconds
+
+while time.time() < end:
+    try:
+        with urllib.request.urlopen(url, timeout=3) as response:
+            response.read()
+        ok += 1
+    except urllib.error.HTTPError as err:
+        failed += 1
+        print(time.strftime("%H:%M:%S"), "FAILED with HTTP", err.code)
+    except (urllib.error.URLError, OSError) as err:
+        failed += 1
+        reason = getattr(err, "reason", err)
+        print(time.strftime("%H:%M:%S"), "FAILED:", reason)
+    time.sleep(0.1)
+
+print("----")
+print("requests:", ok + failed, "  ok:", ok, "  failed:", failed)
+```
+
+| Line | What it does |
+|---|---|
+| `import` lines | load parts of Python's standard library. Nothing to install |
+| `url = sys.argv[1]` | the first thing you type after `load.py`: the address to test |
+| `seconds = int(sys.argv[2])` | the second thing you type: how long to run. If you leave it out, 60 seconds |
+| `while time.time() < end:` | keep going until the time is up |
+| `urllib.request.urlopen(url, timeout=3)` | fetch the page. Give up after 3 seconds, and count that as a failure |
+| `ok += 1` | the page came back with a success code, so add one to `ok` |
+| `except urllib.error.HTTPError` | the load balancer answered with an error code, like 502 or 503. Count it and print the time and code |
+| `except (urllib.error.URLError, OSError)` | no answer at all: refused, reset or timed out. Count it and print why |
+| `time.sleep(0.1)` | wait a tenth of a second, so it sends roughly ten requests a second |
+| the last two `print` lines | the totals, when the time is up |
+
+Try it for 10 seconds. Put your DNS name in place of `ALB_DNS_NAME`, keeping `http://` in front and `/` after it:
+
+```sh ph="ALB_DNS_NAME"
+python3 load.py http://ALB_DNS_NAME/ 10
+```
+
+| Part | What it means |
+|---|---|
+| `python3 load.py` | run the script with Python 3 |
+| `http://ALB_DNS_NAME/` | the page to keep asking for: the home page, through the load balancer |
+| `10` | run for 10 seconds |
+
+```output
+----
+requests: 84   ok: 84   failed: 0
+```
+
+Your number of requests will differ. It depends on how long each round trip to us-east-1 takes from where you are. What matters is `failed: 0`.
+
+<Mistake title="every request fails with 404">
+
+```output
+12:04:31 FAILED with HTTP 404
+12:04:31 FAILED with HTTP 404
+```
+
+**Why:** a missing space. `python3 load.py http://ALB_DNS_NAME/10` asks for a page called `/10`, which doesn't exist, and runs for the default 60 seconds.
+
+**The fix:** put a space between the address and the number. When a measurement looks wrong, check the test before blaming the system.
+
+</Mistake>
+
+</Step>
+
+<Step title="Build and push v2">
+
+The repository is immutable, so v2 needs a new tag. In your `order-service` folder:
+
+```sh
+docker build --platform linux/amd64 --provenance=false --build-arg APP_VERSION=v2 -t order-service:v2 .
+```
+
+| Part | What it means |
+|---|---|
+| `docker build` | build an image from the `Dockerfile` in this folder |
+| `--platform linux/amd64` | for the x86 processors the task definition asks for |
+| `--provenance=false` | a single plain image, so ECR shows one row for it |
+| `--build-arg APP_VERSION=v2` | stamp this image as v2. The app prints it, so you can see which version answered |
+| `-t order-service:v2` | name it `order-service`, tag `v2` |
+| `.` | use the files in this folder |
+
+Give it its ECR name, with your account ID:
+
+```sh ph="111122223333"
+docker tag order-service:v2 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give the image a second name. Nothing is copied |
+| `order-service:v2` | the image you just built |
+| the long name after it | the new name: your registry (`111122223333.dkr.ecr.us-east-1.amazonaws.com`), the repository (`quickcart-orders`) and the tag (`v2`) |
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload the image to ECR |
+
+<See>
+
+Most layers say `Layer already exists`: only the layers that changed are uploaded. It ends with a line containing `v2: digest: sha256:`. If it says `no basic auth credentials`, your ECR login has expired after 12 hours: log in again as in [Storing images: ECR](/lessons/ecr/).
+
+</See>
+
+</Step>
+
+<Step title="Make revision 2 of the task definition">
+
+<ConsolePath path="Amazon Elastic Container Service > Task definitions > order-service > Create new revision > Create new revision with JSON" />
+
+Replace everything in the editor with this. It's revision 1 with two changes: the image tag is now `v2`, and `stopTimeout` is written out, so everyone can see how long a task gets to stop. Put your account ID in both highlighted places.
+
+```json title="order-service-task.json" ph="111122223333"
+{
+  "family": "order-service",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "operatingSystemFamily": "LINUX",
+    "cpuArchitecture": "X86_64"
+  },
+  "executionRoleArn": "arn:aws:iam::111122223333:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2",
+      "essential": true,
+      "stopTimeout": 30,
+      "portMappings": [
+        { "containerPort": 8080, "protocol": "tcp" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/order-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `image` | Now ends in `:v2`, the image you just pushed | — | Every release |
+| `stopTimeout` | Seconds between SIGTERM and SIGKILL. Must be longer than gunicorn's `--graceful-timeout 20` | 30 seconds on Fargate, the same as here, but invisible to anyone reading the file | Up to 120 on Fargate, if requests can legitimately take longer |
+
+Every other setting is explained in [ECS on Fargate](/lessons/ecs-fargate/). Choose **Create**.
+
+<See>
+
+**order-service:2**. Revision 1 is still there, unchanged. That's what makes going back easy.
+
+</See>
+
+</Step>
+
+<Step title="Release v2 under load">
+
+Open **two terminal windows**, both in your `order-service` folder.
+
+**Window 1:** start the load test for 4 minutes:
+
+```sh ph="ALB_DNS_NAME"
+python3 load.py http://ALB_DNS_NAME/ 240
+```
+
+| Part | What it means |
+|---|---|
+| `240` | run for 240 seconds: long enough to cover the whole release |
+
+**Window 2:** watch which version answers, once a second:
+
+```sh ph="ALB_DNS_NAME"
+while true; do curl -s ALB_DNS_NAME/; echo; sleep 1; done
+```
+
+| Part | What it means |
+|---|---|
+| `while true; do` … `done` | repeat everything between `do` and `done`, for ever, until you press Ctrl+C |
+| `curl -s ALB_DNS_NAME/` | fetch the home page, which says which version answered. `-s` hides curl's progress output |
+| `echo` | print a new line, so each answer is on its own line |
+| `sleep 1` | wait one second before the next one |
+
+Now start the release, in the console:
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > order-service > Update service" />
+
+| Field | Enter |
+|---|---|
+| Task definition revision | **2** (latest) |
+
+Choose **Update**, then open the service's **Deployments** tab to watch.
+
+<See>
+
+Window 2 shows `"version":"v1"`, then a mix of v1 and v2, then only v2. On the **Tasks** tab, four tasks for a while, then two. After a few minutes the new deployment says **Completed**.
+
+</See>
+
+When window 1 finishes:
+
+```output
+----
+requests: 1968   ok: 1968   failed: 0
+```
+
+Your number of requests will differ. **Write the numbers down:** this is your evidence. Press Ctrl+C in window 2 to stop it.
+
+</Step>
+
+<Step title="Switch the drain off, and release again">
+
+Now remove one fix to see it matter. Set the deregistration delay to zero:
+
+<ConsolePath path="EC2 > Target groups > quickcart-orders-tg > Attributes > Edit" />
+
+| Field | Enter |
+|---|---|
+| Deregistration delay | `0` seconds |
+
+Choose **Save changes**. Start `load.py` for 240 seconds again in window 1, then release **revision 1** (v1) the same way as the last step. Going back to an older revision is a release like any other.
+
+<See>
+
+Some runs show a handful of lines like `FAILED with HTTP 502` while the old tasks are stopped, and a `failed:` total above zero. How many depends on timing and on how busy each task is; a run can occasionally get lucky and show none. With the delay at 30, the same release should show zero.
+
+</See>
+
+**Put it back:** set the deregistration delay to `30` seconds again.
+
+</Step>
+
+<Step title="Release a broken version">
+
+Make a revision that can't possibly start. Open **Task definitions → order-service**, tick revision **2**, and choose **Create new revision** (the normal form this time). In the container's **Image URI**, change the tag at the end to `v9-broken`. There's no such image. Choose **Create** to make revision 3.
+
+Start `load.py` for 600 seconds in window 1, then update the service to **revision 3**. Watch the **Deployments** and **Events** tabs.
+
+<See>
+
+New tasks start, stop, and are replaced, several times. After a few minutes, the new deployment is marked as **failed** and a rollback deployment appears, back to the last one that completed. The events mention the circuit breaker and the rollback; the exact wording varies. Through all of it, `load.py` shows no failures: the old tasks were never removed, because the new ones never became healthy.
+
+</See>
+
+Find out why the tasks failed. On the **Tasks** tab, change the filter to **Stopped** and open one of the failed tasks.
+
+```output title="Its stopped reason starts roughly like this"
+CannotPullContainerError: pull image manifest has been retried
+```
+
+The rest of the message says the `v9-broken` tag was **not found**. There are no app logs, because the app never started. When a task won't start, the **stopped reason** is always the first place to look.
+
+Finally, remove the broken revision so nobody picks it by accident: tick **order-service:3** in **Task definitions**, then **Actions → Deregister**.
+
+<Mistake title="the release never finishes, and tasks are replaced in a loop">
+
+The service keeps starting new tasks and stopping them, and the events repeat a line like:
+
+```output title="Service events, roughly"
+(port 8080) is unhealthy in target-group quickcart-orders-tg due to (reason Request timed out).
+```
+
+**Why:** either the health check never reaches the app (a security group problem: "timed out" means the network), or the app takes longer to start than the grace period, so ECS gives up on it before it's ready.
+
+**The fix:** first check `quickcart-app-sg` allows port 8080 from `quickcart-alb-sg`. If it does, raise the health check grace period above your app's real start-up time, and read the task's logs to see how long start-up takes.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Everything from [ECS on Fargate](/lessons/ecs-fargate/) is still running. Delete it all now, in this order.
+
+**1. The service.** **ECS → Clusters → quickcart → Services → order-service → Delete service**. If the console asks, tick **Force delete**. Wait until the service and its tasks are gone.
+
+**2. The cluster.** **ECS → Clusters → quickcart → Delete cluster**, then type the confirmation text.
+
+**3. The task definition.** **Task definitions → order-service**: tick every revision, choose **Actions → Deregister**, then with them still ticked, **Actions → Delete**.
+
+**4. The load balancer.** **EC2 → Load balancers**: tick `quickcart-alb`, **Actions → Delete load balancer**, type `confirm`.
+
+**5. The target group.** **EC2 → Target groups**: tick `quickcart-orders-tg`, **Actions → Delete**.
+
+**6. The security groups.** **EC2 → Security Groups**: delete `quickcart-app-sg` first, then `quickcart-alb-sg`. If one won't delete, wait a minute and try again.
+
+**7. The log group.** **CloudWatch → Log groups**: tick `/ecs/order-service`, **Actions → Delete log group(s)**.
+
+**8. The image repository**, unless you're going on to [Kubernetes and EKS](/lessons/kubernetes-and-eks/), which uses the same images: **Amazon ECR → Repositories**, tick `quickcart-orders`, **Delete**, and type `delete`.
+
+<See>
+
+**ECS → Clusters**, **EC2 → Load balancers** and **EC2 → Target groups** are all empty. Nothing from this lab is still billing, except the ECR repository if you kept it, which costs pennies a month.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Setting or idea | What to remember |
+|---|---|
+| Rolling deployment | Replace copies a few at a time while the service keeps running |
+| Min 100% / Max 200% | Start new tasks before removing old ones. Capacity never drops |
+| Health check | Must only pass when the app can really serve a request |
+| Health check grace period | Ignore failed checks while a task starts. Longer than your real start-up time |
+| Deregistration delay | Let in-progress requests finish. Longer than your slowest request; QuickCart uses 30 seconds, the default is 300 |
+| SIGTERM, then SIGKILL | "Please stop", then after the stop timeout "stop now" |
+| `stopTimeout` | 30 seconds by default on Fargate, 120 at most. Longer than the app's own graceful timeout |
+| Exec form `CMD ["gunicorn", …]` | The app itself receives SIGTERM |
+| Circuit breaker + rollback | A release that keeps failing goes back to the last good one by itself |
+| Stopped reason | The first place to look when a task won't start |
+| Database changes | Add, then use, then remove: three releases, never one |
+| Proof | Count failed requests during a release. Target: 0 |
+
+</Cheat>
+
+</Part>

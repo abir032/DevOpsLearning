@@ -1,0 +1,919 @@
+---
+time: 50 minutes
+level: Intermediate
+before: [terraform-variables, terraform-loops]
+cost: free
+quiz:
+  - q: In the root module, Leo needs the ID of the VPC that module.network built. What does he write?
+    answer: 2
+    options:
+      - t: module.network.aws_vpc.this.id
+        why: A module's resources are private. Terraform stops with "Unsupported attribute", because the only things you can read from a module are its outputs.
+      - t: var.vpc_id
+        why: That reads a variable of the root module. Nothing sets it; the value lives inside the network module.
+      - t: module.network.vpc_id
+        why: The network module has an output called vpc_id. Outputs are the only way a value leaves a module, and this is how you read one.
+      - t: aws_vpc.this.id
+        why: That would look for a VPC resource declared in the root module itself. There isn't one; it's inside the child module.
+  - q: Maya adds a new module block and runs terraform plan. Terraform says "Module not installed". What does she do?
+    answer: 0
+    options:
+      - t: Run terraform init
+        why: init finds every module the code calls and records where it is. It has to run again whenever you add a module or change a module's source or version.
+      - t: Delete the .terraform folder
+        why: That removes the providers and modules init already set up. You'd still need to run init afterwards.
+      - t: Move the module's files into the root folder
+        why: Then it's no longer a module, and you lose the reuse. The module is fine; Terraform just hasn't been told about it yet.
+      - t: Add depends_on to the module block
+        why: depends_on changes the order things are built in. It has nothing to do with finding the module.
+  - q: QuickCart keeps shared modules in their own git repository. Which source is safe to use in production?
+    answer: 3
+    options:
+      - t: "git::https://git.example.com/quickcart/quickcart-modules.git//network"
+        why: With no ref, Terraform takes whatever the default branch holds on the day you run init. Two inits a week apart can build different things.
+      - t: "git::https://git.example.com/quickcart/quickcart-modules.git//network?ref=main"
+        why: A branch moves. This is the same problem as having no ref at all, written more explicitly.
+      - t: "./modules/network"
+        why: That's a folder in this repository, not the shared one. Fine for modules only this repository uses.
+      - t: "git::https://git.example.com/quickcart/quickcart-modules.git//network?ref=v1.4.0"
+        why: A tag names one exact version. Everyone who runs init gets the same code until someone deliberately changes the ref, in a pull request.
+  - q: A team's "app stack" module has 45 inputs, a third of them named enable_something. Every change risks breaking another team. What's the better design?
+    answer: 1
+    options:
+      - t: Add more validation to the inputs
+        why: Validation catches bad values. It doesn't make a 45-input module easier to understand or safer to change.
+      - t: Several small modules that each do one thing, composed together in the root
+        why: A root that calls network, load balancer and service modules reads like the architecture. Each small module can change without dragging the others along.
+      - t: Copy the module into each team's repository
+        why: Then fixes have to be made in every copy, which is the problem modules were meant to solve.
+      - t: Remove the module and write every resource in the root
+        why: That throws away the shared standards. The problem is the size of the module, not the idea of one.
+  - q: You change only the cidr_block input of module.network. Why does the plan also replace the security group in the root?
+    answer: 2
+    options:
+      - t: Terraform replaces everything in a root when a module changes
+        why: It doesn't. Change the name input instead, and the security group isn't touched at all.
+      - t: The security group reads cidr_block directly
+        why: It can't; cidr_block is a variable inside the module. The change reaches the security group another way.
+      - t: The VPC is replaced, so the vpc_id output changes, and a security group can't move to a new VPC
+        why: A VPC's range can't change, so it's replaced and gets a new ID. That new ID flows out through the vpc_id output into the security group, whose vpc_id forces replacement.
+      - t: Security groups are always replaced on every plan
+        why: Security groups are updated in place for most changes, like adding a rule.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a second service">
+
+QuickCart's orders service had its own ECR repository, written in Terraform by Maya. When the payments service arrived, Leo copied the block, changed `orders` to `payments`, and moved on.
+
+A month later, a security review asked for two things on every repository: scan images for known vulnerabilities when they're pushed, and never let a tag like `v1` be pointed at a different image. Maya added both to the orders repository.
+
+Nobody remembered the copy. The payments repository — the one handling card payments — was the one left unscanned, with tags anyone could overwrite.
+
+</Story>
+
+Copied code doesn't stay the same. Each copy gets its own fixes, at its own time, or none at all. By the third service, nobody can say which copy is the right one.
+
+<Case title="A very common mistake">
+
+A team keeps shared Terraform modules in their own git repository, and every project points at it with a source like `git::https://…/modules.git//network`, with no version. For months this works. Then someone merges a change to the network module, meant for one new project. The next time any other project runs `terraform init` and `plan`, it picks up the change too, and the plan wants to replace resources nobody touched. If nobody reads the plan closely, it's applied. Pinning each use to a tagged version prevents this.
+
+</Case>
+
+This lesson is about modules: how to write a piece of infrastructure once, use it many times, and control when a change to it reaches everyone.
+
+</Part>
+
+<Part id="idea">
+
+A **module** is a folder of `.tf` files. That's all. You've been writing one since your first resource: the folder you run `terraform` in is a module too.
+
+| Kind | What it is | Example |
+|---|---|---|
+| **Root module** | The folder you run `terraform plan` and `apply` in. It has the provider settings and the state | `quickcart-modules/` |
+| **Child module** | A folder the root module calls with a `module` block. It has no state of its own; its resources are stored in the root's state | `quickcart-modules/modules/ecr-repo/` |
+
+A child module has three kinds of files, by convention:
+
+| File | Holds | In a function, this is |
+|---|---|---|
+| `variables.tf` | The **inputs**: what the caller must or may pass in | The parameters |
+| `main.tf` | The **resources** it builds | The body |
+| `outputs.tf` | The **outputs**: values the caller can read back | The return value |
+
+The file names are only a habit. Terraform reads every `.tf` file in the folder as one.
+
+<YouKnow title="You already know this: a component with props">
+
+A UI component takes props, renders something, and hides how it does it. A parent can't reach into a component's internal state; it gets only what the component exposes.
+
+A module is the same. Variables are its props. Its resources are private. Outputs are the only values the parent can read.
+
+</YouKnow>
+
+<Key>A module is where your standards live: write them once, and every use of the module gets them.</Key>
+
+In the story, if the repository had been a module, Maya would have added scanning and immutable tags to the module once, and the next plan would have shown the change for **both** repositories.
+
+### A module for QuickCart's network
+
+Here's a small but real network module: a VPC, public subnets in two or three availability zones, an internet gateway, and the route that makes the subnets public. [What is a VPC?](/lessons/vpc/) explains each piece. Here we care about how it's packaged.
+
+The inputs first:
+
+```hcl title="modules/network/variables.tf"
+variable "name" {
+  description = "Name prefix for every resource, like quickcart-dev"
+  type        = string
+}
+
+variable "cidr_block" {
+  description = "The VPC's address range, like 10.10.0.0/16"
+  type        = string
+
+  validation {
+    condition     = can(cidrhost(var.cidr_block, 0))
+    error_message = "cidr_block must be an IPv4 range, like 10.10.0.0/16."
+  }
+}
+
+variable "zone_count" {
+  description = "How many availability zones to spread the public subnets across"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.zone_count >= 2 && var.zone_count <= 3
+    error_message = "zone_count must be 2 or 3."
+  }
+}
+
+variable "tags" {
+  description = "Extra tags to put on every resource in the module"
+  type        = map(string)
+  default     = {}
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "name"` | An input called `name`. Inside the module it's read as `var.name` | — | — |
+| `description` | Explains the input to whoever calls the module. Shown in errors and editor hints | Callers have to read the module's code to guess what it wants | Whenever the meaning changes |
+| `type = string` | Only text is accepted | Any type is accepted, and mistakes surface later with a vaguer error | Rarely |
+| No `default` on `name` and `cidr_block` | The caller **must** pass them | — | Never give these a default: every network should choose its own name and range on purpose |
+| `validation` → `condition` | A check that must be true. `cidrhost(var.cidr_block, 0)` fails on anything that isn't a range, and `can()` turns that failure into `false` | A typo like `10.10.0/16` is only caught by AWS, halfway through an apply | When you want stricter rules, such as only `/16` ranges |
+| `validation` → `error_message` | What the caller sees when the check fails | Required inside a `validation` block | To make the message clearer |
+| `zone_count` → `default = 2` | Two zones unless the caller asks for three | The caller would have to pass it every time | If three zones becomes your standard |
+| `zone_count` → validation | Refuses 1, because one zone can't survive losing a zone, and anything over 3 | Someone could build a single-zone network by accident | If you ever need four zones |
+| `tags` → `type = map(string)` | A set of name and value pairs, like `{ Project = "quickcart" }` | — | — |
+| `tags` → `default = {}` | No extra tags unless the caller passes some | The caller would have to pass tags every time, even an empty `{}` | Rarely |
+
+Then the resources:
+
+```hcl title="modules/network/main.tf"
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+locals {
+  zones = slice(data.aws_availability_zones.available.names, 0, var.zone_count)
+}
+
+resource "aws_vpc" "this" {
+  cidr_block           = var.cidr_block
+  enable_dns_hostnames = true
+
+  tags = merge(var.tags, { Name = var.name })
+}
+
+resource "aws_internet_gateway" "this" {
+  vpc_id = aws_vpc.this.id
+
+  tags = merge(var.tags, { Name = "${var.name}-igw" })
+}
+
+resource "aws_subnet" "public" {
+  for_each = { for index, zone in local.zones : zone => index }
+
+  vpc_id                  = aws_vpc.this.id
+  availability_zone       = each.key
+  cidr_block              = cidrsubnet(var.cidr_block, 8, each.value)
+  map_public_ip_on_launch = true
+
+  tags = merge(var.tags, { Name = "${var.name}-public-${each.key}" })
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.this.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.this.id
+  }
+
+  tags = merge(var.tags, { Name = "${var.name}-public" })
+}
+
+resource "aws_route_table_association" "public" {
+  for_each = aws_subnet.public
+
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.public.id
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `data "aws_availability_zones"` → `state = "available"` | Asks AWS which zones this region has, skipping any that are unavailable | The list may include a zone you can't build in | Never |
+| `local.zones` | The first `zone_count` zone names, like `us-east-1a` and `us-east-1b`. `slice(list, 0, 2)` takes items 0 and 1 | You'd type zone names in, and the module would break in any other region | Never; this is what makes the module work anywhere |
+| `aws_vpc` → `cidr_block` | The VPC's address range, from the input | Required | Never after creation: changing it replaces the VPC and everything in it |
+| `aws_vpc` → `enable_dns_hostnames` | Servers with a public IP also get a public DNS name. Several AWS features expect it on | Defaults to `false` | Rarely |
+| `tags = merge(var.tags, { Name = … })` | The caller's tags, plus a `Name` tag, which is what the console shows in its Name column | The console shows a blank name | To add tags every resource should have |
+| `aws_internet_gateway` → `vpc_id` | Attaches the gateway to this VPC | The gateway is created but attached to nothing | Never |
+| `aws_subnet` → `for_each` | One subnet per zone. The expression builds a map like `{ "us-east-1a" = 0, "us-east-1b" = 1 }`: the key is the zone, the value its position | One subnet only | Never; [Loops and lifecycle](/lessons/terraform-loops/) explains why keys beat positions |
+| `aws_subnet` → `vpc_id` | Which VPC the subnet belongs to | Required | Never; changing it replaces the subnet |
+| `aws_subnet` → `availability_zone` | The zone this subnet lives in: `each.key` | AWS picks a zone, maybe the same one twice | Never |
+| `aws_subnet` → `cidr_block` | `cidrsubnet(var.cidr_block, 8, each.value)` cuts a `/24` out of the VPC's `/16`: `10.10.0.0/24` for position 0, `10.10.1.0/24` for position 1 | Required | If you need bigger or smaller subnets: the `8` is how many bits to add |
+| `aws_subnet` → `map_public_ip_on_launch` | Servers started here get a public IP automatically | Defaults to `false`: servers get no public IP, even in a public subnet | `false` for private subnets |
+| `aws_route_table` → `vpc_id` | The VPC this route table belongs to | Required | Never; changing it replaces the route table |
+| `route` → `cidr_block = "0.0.0.0/0"` | This route matches traffic to anywhere outside the VPC | — | — |
+| `route` → `gateway_id` | …and sends it to the internet gateway. This one route is what makes a subnet public | The subnets have no way to the internet | Never, for public subnets |
+| `aws_route_table_association` → `for_each = aws_subnet.public` | One link for each subnet, keyed by the same zone names | Subnets stay on the VPC's main route table, with no internet route | Never |
+| `subnet_id` / `route_table_id` | Which subnet uses which route table | Both required | Never |
+
+And the outputs, the only values the caller can read:
+
+```hcl title="modules/network/outputs.tf"
+output "vpc_id" {
+  description = "The VPC's ID, for security groups and load balancers"
+  value       = aws_vpc.this.id
+}
+
+output "public_subnet_ids" {
+  description = "One public subnet ID per zone"
+  value       = [for subnet in aws_subnet.public : subnet.id]
+}
+
+output "zones" {
+  description = "The availability zones the subnets are in"
+  value       = local.zones
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `output "vpc_id"` | Makes the VPC's ID readable from outside as `module.network.vpc_id` | Nothing outside the module can find the VPC | — |
+| `description` | Explains the output to the caller | Callers guess what it holds | When the meaning changes |
+| `value` | What the output returns | Required | — |
+| `[for subnet in aws_subnet.public : subnet.id]` | Turns the map of subnets into a plain list of their IDs, which is what a load balancer expects | — | — |
+| `output "zones"` | The zone names the module chose, so the caller can see them | The caller can't tell which zones were used | — |
+
+**Notice what's not in the module:** no provider block, no region, no environment name. The root module decides those. That's what lets the same module build dev, stg and a second region in [Environments and regions](/lessons/environments-and-regions/).
+
+### Calling the module, and composing with it
+
+The root module calls the module with a `module` block, then passes one of its outputs to something else. That's **composition**: small pieces, wired together in the root.
+
+```hcl title="network.tf"
+module "network" {
+  source = "./modules/network"
+
+  name       = "quickcart-dev"
+  cidr_block = "10.10.0.0/16"
+  zone_count = 2
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+
+resource "aws_security_group" "web" {
+  name        = "quickcart-dev-web"
+  description = "HTTPS from anywhere to the load balancer"
+  vpc_id      = module.network.vpc_id
+
+  ingress {
+    description = "HTTPS from anywhere"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "Everything out"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `module "network"` | Calls a module. `network` is the root's name for this use of it, so its outputs are `module.network.…` | — | — |
+| `source` | Where the module's code is. `./` means a folder in this repository | Required | To use a shared or published module (see below) |
+| `name`, `cidr_block`, `zone_count`, `tags` | Values for the module's variables | `name` and `cidr_block` are required; the others fall back to their defaults | Per use: every network gets its own name and range |
+| `aws_security_group` → `name` | The security group's name in AWS | AWS generates a random name | Changing it later replaces the group |
+| `description` | Shown in the console | Defaults to `Managed by Terraform` | Changing it later replaces the group, so get it right first |
+| `vpc_id = module.network.vpc_id` | Puts the group in the module's VPC, read from the module's **output** | The group goes into the account's default VPC, not yours | Never |
+| `ingress` → `from_port`, `to_port`, `protocol`, `cidr_blocks` | Let TCP port 443 in from anywhere | No `ingress` block: nothing can connect in | To open other ports, or narrow who can connect |
+| `ingress` / `egress` → `description` | A note on the rule, shown in the console | Blank | Always write one |
+| `egress` with `protocol = "-1"` | Let every kind of traffic out. `-1` means all protocols; ports `0` to `0` then means all ports | Terraform **removes** AWS's usual allow-everything-out rule, so nothing can leave | To restrict outbound traffic |
+| `tags` | Labels for finding and costing it | No labels | — |
+
+You don't need to build this now. The lab in [Environments and regions](/lessons/environments-and-regions/) builds this exact network, three times.
+
+<Mistake title="reading a resource inside the module">
+
+Say you add an output to `network.tf` that reads the VPC's ID straight from the module's resource:
+
+```output title="Terraform stops with"
+Error: Unsupported attribute
+
+  on network.tf line 50, in output "vpc_id":
+  50:   value = module.network.aws_vpc.this.id
+    ├────────────────
+    │ module.network is object with 3 attributes
+
+This object does not have an attribute named "aws_vpc".
+```
+
+**Why:** from outside, a module is an object made only of its outputs: here, three of them. Its resources can't be seen.
+
+**The fix:** read the output instead: `module.network.vpc_id`. If the value you need has no output, add one to the module's `outputs.tf`.
+
+</Mistake>
+
+<Mistake title="forgetting a required input">
+
+Say you add a third module block, for a users service, and set only its `name`:
+
+```output title="Terraform stops with"
+Error: Missing required argument
+
+  on main.tf line 38:
+  38: module "users_repo" {
+
+The argument "environment" is required, but no definition was found.
+```
+
+**Why:** the module's `environment` variable has no default, so every call has to set it.
+
+**The fix:** add the input to the `module` block. That error is the module doing its job: it refuses to guess something that must be decided.
+
+</Mistake>
+
+### Where a module can come from
+
+The `source` setting says where Terraform fetches the module's code from. Three kinds cover almost everything:
+
+| Source | Looks like | Use it for |
+|---|---|---|
+| **A local folder** | `source = "./modules/network"` | Modules only this repository uses. They change when the repository changes, so they need no version of their own |
+| **The public Terraform Registry** | `source = "terraform-aws-modules/vpc/aws"` with `version = "~> 6.0"` | Well-known building blocks written by others. Read one before you trust it: you inherit its choices |
+| **A git repository** | `source = "git::https://git.example.com/quickcart/quickcart-modules.git//network?ref=v1.4.0"` | Your team's modules, shared by several repositories |
+
+In the git source, `//network` means "the `network` folder inside that repository", and `?ref=v1.4.0` means "at the tag `v1.4.0`".
+
+### Versioning: control when a change reaches you
+
+A shared module will change. Pinning decides **when** each user gets the change.
+
+| Source | How you pin it | Unpinned, you get |
+|---|---|---|
+| Registry | `version = "~> 6.0"`: any 6.x, never 7.0. Major versions may break things | The newest version on the day you run `init` |
+| Git | `?ref=` a **tag**, like `v1.4.0`. A branch name like `main` moves, so it isn't a pin | Whatever the default branch holds on the day you run `init` |
+| Local folder | Nothing to pin. It's versioned with the rest of the repository | — |
+
+To take a newer version on purpose, change the pin in a pull request, then run `terraform init -upgrade` and read the plan. The change to shared code then shows up as a change **in your repository**, where it can be reviewed.
+
+### When not to make a module
+
+Modules make code easier to reuse, and harder to read. A module that only wraps one resource, with an input for each of its settings, adds a layer and saves nothing.
+
+| Make a module when | Don't, when |
+|---|---|
+| The same group of resources is needed two or more times | It's used once, and probably always will be |
+| There's a standard to enforce, like scanning on every repository | It wraps a single resource and passes every setting straight through |
+| The pieces belong together, like a VPC and its subnets | You're guessing at future needs |
+| It has a handful of clear inputs | It needs 30 inputs, or several named `enable_something` |
+
+The last row is the most common trap: one giant module that builds everything, with dozens of inputs. It becomes impossible to change safely, because every team depends on it. Several small modules, each doing one thing and **composed in the root**, like `network.tf` above, age much better.
+
+</Part>
+
+<Part id="see">
+
+Here is the root module calling the network module, with the security group outside it. Change one input at a time, and see which resources inside the module change, and whether the change escapes through an output. Then try reading a resource from outside.
+
+<TfModuleWiring />
+
+**What to notice:** a change only travels where the code sends it. `name` and `tags` stay inside the module. `cidr_block` replaces the VPC, which changes the `vpc_id` output, and that carries the change out to the security group. Outputs are both the module's only way out and the path a change can escape along.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">two empty ECR repositories. ECR charges only for stored images, and you push none.</Cost>
+
+You'll write a small module for an ECR repository with QuickCart's standards built in, use it for two services, change the standard once, and watch both repositories follow. About 25 minutes.
+
+You need Terraform 1.10 or later and a working AWS login in your terminal. [Set up your Mac](/lessons/mac-setup/) covers both.
+
+<Steps>
+
+<Step title="Make the folders">
+
+```sh
+mkdir -p quickcart-modules/modules/ecr-repo
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `-p` | make any missing parent folders too, and don't complain if they already exist |
+| `quickcart-modules/modules/ecr-repo` | the project folder, and inside it the module's folder |
+
+```sh
+cd quickcart-modules
+```
+
+| Part | What it means |
+|---|---|
+| `cd quickcart-modules` | move into the project folder. This is the root module; every command runs here |
+
+</Step>
+
+<Step title="Write the module's inputs">
+
+Create `modules/ecr-repo/variables.tf`:
+
+```hcl title="modules/ecr-repo/variables.tf"
+variable "name" {
+  description = "The service's name, like orders. Lower case letters, numbers and hyphens"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*$", var.name))
+    error_message = "name must start with a lower-case letter and use only a-z, 0-9 and hyphens."
+  }
+}
+
+variable "environment" {
+  description = "Which environment the repository belongs to"
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "stg", "prod"], var.environment)
+    error_message = "environment must be dev, stg or prod."
+  }
+}
+
+variable "keep_images" {
+  description = "How many images to keep. Older ones are deleted automatically"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.keep_images >= 1
+    error_message = "keep_images must be at least 1."
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `name` → `type`, no default | The caller must say which service this is | — | — |
+| `name` → validation | `regex` checks the name uses only lower-case letters, numbers and hyphens, which is what ECR accepts. `can()` turns a failed match into `false` | A bad name is only rejected by AWS, during apply | If your naming rules change |
+| `environment` → validation | `contains` accepts only `dev`, `stg` or `prod` | A typo like `prd` would quietly create a new, oddly named repository | When you add an environment |
+| `keep_images` → `default = 20` | Keep the newest 20 images unless told otherwise | Every caller would have to decide | If 20 is the wrong standard for you |
+| `keep_images` → validation | At least 1, so the policy can't delete every image | A `0` would be rejected later by AWS with a less helpful error | Never |
+
+</Step>
+
+<Step title="Write the module's resources and outputs">
+
+Create `modules/ecr-repo/main.tf`. This is where QuickCart's standards live:
+
+```hcl title="modules/ecr-repo/main.tf"
+resource "aws_ecr_repository" "this" {
+  name                 = "quickcart-${var.environment}-${var.name}"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Project     = "quickcart"
+    Environment = var.environment
+    Service     = var.name
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "this" {
+  repository = aws_ecr_repository.this.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep only the newest images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = var.keep_images
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `resource "aws_ecr_repository" "this"` | The repository. Inside a module that builds one of something, `this` is the usual name | — | — |
+| `name` | Built from the inputs: `quickcart-dev-orders`. The caller can't break the naming pattern | Required | Never after creation: a new name replaces the repository |
+| `image_tag_mutability = "IMMUTABLE"` | A tag like `v1` can never be moved to a different image | Defaults to `MUTABLE` | Rarely. [Storing images: ECR](/lessons/ecr/) explains why |
+| `force_delete = true` | `terraform destroy` deletes the repository even if it holds images | Destroy fails while any image is inside | Set it to `false`, or make it an input, for production |
+| `image_scanning_configuration` → `scan_on_push` | Every pushed image is checked for known vulnerabilities | Defaults to `false`: no scanning | Never, for QuickCart |
+| `tags` | Labels, including which service owns it | No labels | Add the tags your team requires |
+| `aws_ecr_lifecycle_policy` → `repository` | Which repository the policy applies to | Required | Never |
+| `policy = jsonencode(…)` | The rules, written as Terraform values and turned into the JSON that ECR expects | Required | — |
+| `rulePriority`, `description` | Rules run in priority order, lowest first. The description is shown in the console | Required / blank | When you add more rules |
+| `selection` → `tagStatus = "any"` | The rule looks at all images, tagged or not | Required | To treat untagged images differently |
+| `countType = "imageCountMoreThan"`, `countNumber` | Match images beyond the newest `keep_images` | Required | — |
+| `action` → `type = "expire"` | Delete the matched images | Required | — |
+
+Create `modules/ecr-repo/outputs.tf`:
+
+```hcl title="modules/ecr-repo/outputs.tf"
+output "repository_url" {
+  description = "The address to push images to"
+  value       = aws_ecr_repository.this.repository_url
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `output "repository_url"` | Lets the caller read the repository's address as `module.<name>.repository_url` | The address can't be read from outside the module | — |
+| `description` | Explains what the value is | Callers guess | — |
+| `value` | The address AWS gives the repository, like `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-orders` | Required | — |
+
+</Step>
+
+<Step title="Use the module twice">
+
+Back in the project folder, create `main.tf`. This is the root module:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+module "orders_repo" {
+  source = "./modules/ecr-repo"
+
+  name        = "orders"
+  environment = "dev"
+}
+
+module "payments_repo" {
+  source = "./modules/ecr-repo"
+
+  name        = "payments"
+  environment = "dev"
+  keep_images = 10
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version`, `required_providers` | Terraform 1.10 or later, and any 6.x AWS provider. [Your first resource](/lessons/first-resource/) explains both | Terraform takes whatever it finds, which may change under you | When you upgrade on purpose |
+| `provider "aws"` → `region` | Where both repositories are built. The module doesn't choose; the root does | Terraform uses your login's default region | To build elsewhere |
+| `module "orders_repo"` / `"payments_repo"` | Two uses of the same module. Each has its own name, and its own resources in the state | — | One block per service |
+| `source = "./modules/ecr-repo"` | The module's folder | Required | — |
+| `name`, `environment` | The two required inputs | Terraform stops: `Missing required argument` | — |
+| `keep_images = 10` | Payments keeps fewer images; orders takes the default 20 | The default is used | Per service |
+
+Create `outputs.tf`:
+
+```hcl title="outputs.tf"
+output "orders_repository_url" {
+  description = "Where to push the orders service's images"
+  value       = module.orders_repo.repository_url
+}
+
+output "payments_repository_url" {
+  description = "Where to push the payments service's images"
+  value       = module.payments_repo.repository_url
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `value = module.orders_repo.repository_url` | Reads the module's output and shows it after apply | Nothing is printed; the value still exists in the state | — |
+| `description` | Explains the output | — | — |
+
+</Step>
+
+<Step title="Initialise, plan and apply">
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | find the modules the code calls, download the AWS provider, and prepare the folder |
+
+```output
+Initializing the backend...
+
+Initializing modules...
+- orders_repo in modules/ecr-repo
+- payments_repo in modules/ecr-repo
+
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching "~> 6.0"...
+- Installing hashicorp/aws v6.66.0...
+- Installed hashicorp/aws v6.66.0 (signed by HashiCorp)
+
+Terraform has been successfully initialized!
+```
+
+Your provider version may be newer, and the two module lines may come in either order. There's a new line here you haven't seen before: `Initializing modules`.
+
+<Mistake title="adding a module without running init">
+
+Later, you add that third module block, and run `plan` straight away:
+
+```output title="Terraform stops with"
+Error: Module not installed
+
+  on main.tf line 38:
+  38: module "users_repo" {
+
+This module is not yet installed. Run "terraform init" to install all modules
+required by this configuration.
+```
+
+**Why:** Terraform only learns about modules during `init`. A module added afterwards is unknown until `init` runs again.
+
+**The fix:** run `terraform init` whenever you add a module block, or change a module's `source` or `version`.
+
+</Mistake>
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan the changes, show them, and make them once you type `yes` |
+
+Read the plan before you type `yes`. Every address now starts with the module's name:
+
+```output title="Part of the plan"
+  # module.orders_repo.aws_ecr_lifecycle_policy.this will be created
+  # module.orders_repo.aws_ecr_repository.this will be created
+  # module.payments_repo.aws_ecr_lifecycle_policy.this will be created
+  # module.payments_repo.aws_ecr_repository.this will be created
+
+Plan: 4 to add, 0 to change, 0 to destroy.
+```
+
+Type `yes`.
+
+```output
+module.orders_repo.aws_ecr_repository.this: Creating...
+module.payments_repo.aws_ecr_repository.this: Creating...
+module.orders_repo.aws_ecr_repository.this: Creation complete after 1s [id=quickcart-dev-orders]
+module.payments_repo.aws_ecr_repository.this: Creation complete after 1s [id=quickcart-dev-payments]
+module.orders_repo.aws_ecr_lifecycle_policy.this: Creating...
+module.payments_repo.aws_ecr_lifecycle_policy.this: Creating...
+module.orders_repo.aws_ecr_lifecycle_policy.this: Creation complete after 0s [id=quickcart-dev-orders]
+module.payments_repo.aws_ecr_lifecycle_policy.this: Creation complete after 0s [id=quickcart-dev-payments]
+
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+orders_repository_url = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-orders"
+payments_repository_url = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-payments"
+```
+
+Your account ID appears in place of `111122223333`, and the lines may come in a different order. Two small blocks built four resources, each with scanning, immutable tags and a clean-up policy.
+
+<ConsolePath path="ECR > Private registry > Repositories" />
+
+<See>
+
+`quickcart-dev-orders` and `quickcart-dev-payments`, both with **Tag immutability** set to **Immutable**. Open one, and **Lifecycle Policy** in the left menu shows the rule.
+
+</See>
+
+</Step>
+
+<Step title="Change the standard once">
+
+A new rule arrives: every repository must carry a `ManagedBy` tag, so people know not to edit it by hand. You change the **module**, not each repository. Update the `tags` in `modules/ecr-repo/main.tf`; the whole file now reads:
+
+```hcl title="modules/ecr-repo/main.tf"
+resource "aws_ecr_repository" "this" {
+  name                 = "quickcart-${var.environment}-${var.name}"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Project     = "quickcart"
+    Environment = var.environment
+    Service     = var.name
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "this" {
+  repository = aws_ecr_repository.this.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep only the newest images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = var.keep_images
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `ManagedBy = "terraform"` | The only new line: a tag every repository built by this module will carry | — | — |
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | show what would change, without changing anything |
+
+```output title="Part of the plan"
+  # module.orders_repo.aws_ecr_repository.this will be updated in-place
+  ~ resource "aws_ecr_repository" "this" {
+        id                   = "quickcart-dev-orders"
+        name                 = "quickcart-dev-orders"
+      ~ tags                 = {
+            "Environment" = "dev"
+          + "ManagedBy"   = "terraform"
+            "Project"     = "quickcart"
+            "Service"     = "orders"
+        }
+
+  # module.payments_repo.aws_ecr_repository.this will be updated in-place
+
+Plan: 0 to add, 2 to change, 0 to destroy.
+```
+
+**One edit, two repositories.** This is the story's missing fix: had the payments repository come from the module, the security review's change would have reached it too. The full plan also shows `tags_all` changing, which is the tags plus any the provider adds.
+
+Apply it, and type `yes`:
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | make the tag change on both repositories |
+
+```output
+Apply complete! Resources: 0 added, 2 changed, 0 destroyed.
+```
+
+</Step>
+
+<Step title="Watch the module refuse a bad input">
+
+In `main.tf`, change the payments module's `name` from `"payments"` to `"Payments"`, with a capital P, then plan:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | check the inputs against the module's validation rules, then plan |
+
+```output title="Terraform stops with"
+Error: Invalid value for variable
+
+  on main.tf line 26, in module "payments_repo":
+  26:   name        = "Payments"
+    ├────────────────
+    │ var.name is "Payments"
+
+name must start with a lower-case letter and use only a-z, 0-9 and hyphens.
+
+This was checked by the validation rule at
+modules/ecr-repo/variables.tf:5,3-13.
+```
+
+Nothing was built or changed. The module's author wrote that rule once, and every caller gets the check. **Change the name back to `"payments"`** before you go on.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything this root module built, including everything inside its modules, and do it once you type `yes` |
+
+```output
+Plan: 0 to add, 0 to change, 4 to destroy.
+
+Changes to Outputs:
+  - orders_repository_url   = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-orders" -> null
+  - payments_repository_url = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-payments" -> null
+```
+
+Type `yes`.
+
+```output
+Destroy complete! Resources: 4 destroyed.
+```
+
+<ConsolePath path="ECR > Private registry > Repositories" />
+
+<See>
+
+Neither repository is listed.
+
+</See>
+
+Keep the `quickcart-modules` folder if you like; it costs nothing on your laptop.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Thing | What to remember |
+|---|---|
+| Root module | The folder you run `terraform` in. Has the provider and the state |
+| Child module | A folder called with `module "name" { source = … }`. No provider, no state of its own |
+| `variables.tf` / `main.tf` / `outputs.tf` | Inputs / resources / outputs. A habit, not a rule |
+| Inputs with no default | Must be set by every caller. Use for things that must be decided, like `environment` |
+| `module.NAME.OUTPUT` | The only way to read a value from a module |
+| `source = "./modules/x"` | A local folder: versioned with the repository |
+| `source = "org/name/aws"` + `version = "~> 6.0"` | The public registry, pinned to a major version |
+| `source = "git::https://…//x?ref=v1.4.0"` | Git, pinned to a tag. Never a branch |
+| `terraform init` | Again after adding a module or changing its source or version |
+| `terraform init -upgrade` | Take newer versions allowed by your constraints |
+| Compose, don't bloat | Small modules wired together in the root beat one module with 40 inputs |
+
+</Cheat>
+
+</Part>

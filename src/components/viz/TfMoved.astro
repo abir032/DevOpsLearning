@@ -1,0 +1,89 @@
+---
+/*
+ * Operating Terraform: refactor with and without a moved block.
+ * Teaches: Terraform tracks resources by address, so changing an address
+ * means destroy and create, unless a moved block says it's the same thing.
+ */
+import { CHANGE_LABEL, movedPlan, movedSay, movedStage, type MovedState } from "../../scripts/tf-moved-viz";
+const first: MovedState = { change: "rename", moved: false, applied: false };
+const say = movedSay(first);
+---
+<div class="viz" data-track="code" data-viz="tf-moved">
+  <div class="viz-controls">
+    <span class="lbl" id="mv-c-lbl">The change</span>
+    <div class="seg" role="group" aria-labelledby="mv-c-lbl">
+      {Object.entries(CHANGE_LABEL).map(([k, label], i) => (
+        <button type="button" data-change={k} aria-pressed={String(i === 0)}>{label}</button>
+      ))}
+    </div>
+    <span class="lbl" id="mv-m-lbl">moved block</span>
+    <div class="seg" role="group" aria-labelledby="mv-m-lbl">
+      <button type="button" data-moved="no" aria-pressed="true">Without</button>
+      <button type="button" data-moved="yes" aria-pressed="false">With</button>
+    </div>
+    <button class="btn line" type="button" data-a="apply">Apply the plan</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <div class="mv-grid" set:html={movedStage(first)} />
+  <pre class="plan-out" aria-label="terraform plan output" set:html={movedPlan(first)} />
+  <div class={"viz-say" + (say.tone ? " " + say.tone : "")} aria-live="polite" set:html={say.html} />
+</div>
+
+<style is:global>
+  [data-viz="tf-moved"] .mv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px 16px; }
+  [data-viz="tf-moved"] .mv-col:first-child { grid-column: 1 / -1; }
+  [data-viz="tf-moved"] .mv-col { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+  [data-viz="tf-moved"] .mv-col h3 { margin: 0 0 2px; font-size: 15px; font-weight: 800; }
+  [data-viz="tf-moved"] .mv-col small { display: block; color: var(--ink-3); font-size: 12.5px; margin-bottom: 10px; }
+  [data-viz="tf-moved"] .chip span:first-of-type { flex: 1 1 12em; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; min-width: 0; }
+  [data-viz="tf-moved"] .chip s { color: var(--ink-3); }
+  [data-viz="tf-moved"] .chip .orphan { font-family: var(--font); }
+  [data-viz="tf-moved"] .chip .orphan.mv-ok { color: var(--ok); }
+  [data-viz="tf-moved"] .mv-file { margin-top: 10px; border: 1px dashed var(--rule-2); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  [data-viz="tf-moved"] .mv-file b { display: block; font-family: var(--mono); font-size: 12.5px; margin-bottom: 4px; }
+  [data-viz="tf-moved"] .mv-file pre { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ok); }
+  [data-viz="tf-moved"] .mv-file p { margin: 0; color: var(--ink-2); }
+  [data-viz="tf-moved"] .mv-file.mv-none { border-color: var(--bad); }
+  [data-viz="tf-moved"] .plan-out { overflow-wrap: anywhere; }
+  @media (max-width: 560px) {
+    [data-viz="tf-moved"] .mv-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { movedPlan, movedSay, movedStage, type Change, type MovedState } from "../../scripts/tf-moved-viz";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-moved"]').forEach((root) => {
+    if (!once(root)) return;
+    const grid = root.querySelector<HTMLElement>(".mv-grid")!;
+    const plan = root.querySelector<HTMLElement>(".plan-out")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const applyBtn = root.querySelector<HTMLButtonElement>('[data-a="apply"]')!;
+    const changeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-change]")];
+    const movedBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-moved]")];
+    const s: MovedState = { change: "rename", moved: false, applied: false };
+
+    function render() {
+      grid.innerHTML = movedStage(s);
+      plan.innerHTML = movedPlan(s);
+      const t = movedSay(s);
+      say.className = "viz-say" + (t.tone ? " " + t.tone : "");
+      say.innerHTML = t.html;
+      applyBtn.disabled = s.applied;
+      press(changeBtns, (b) => b.dataset.change === s.change);
+      press(movedBtns, (b) => (b.dataset.moved === "yes") === s.moved);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.change) { s.change = b.dataset.change as Change; s.applied = false; }
+      else if (b.dataset.moved) { s.moved = b.dataset.moved === "yes"; s.applied = false; }
+      else if (b.dataset.a === "apply") s.applied = true;
+      else if (b.dataset.a === "reset") { s.change = "rename"; s.moved = false; s.applied = false; }
+      render();
+    });
+  }));
+</script>

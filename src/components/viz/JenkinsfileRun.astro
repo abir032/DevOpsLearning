@@ -1,0 +1,119 @@
+---
+/*
+ * The Jenkinsfile: step through one run.
+ * Teaches: when decides which stages run for a branch, a pull request and
+ * main; a failed stage skips the rest; post always runs.
+ */
+import { BUILDS, boardHtml, codeHtml, sayHtml, steps } from "../../scripts/jf-run-viz";
+const first = steps("branch", true);
+---
+<div class="viz" data-track="auto" data-viz="jf-run">
+  <div class="viz-controls">
+    <span class="lbl" id="jr-b">This build is for</span>
+    <div class="seg" role="group" aria-labelledby="jr-b">
+      {Object.entries(BUILDS).map(([k, b], i) => (
+        <button type="button" data-build={k} aria-pressed={String(i === 0)}>{b.label}</button>
+      ))}
+    </div>
+    <span class="lbl" id="jr-t">Tests</span>
+    <div class="seg" role="group" aria-labelledby="jr-t">
+      <button type="button" data-tests="pass" aria-pressed="true">Pass</button>
+      <button type="button" data-tests="fail" aria-pressed="false">Fail</button>
+    </div>
+    <button class="btn line" type="button" data-a="play">Run</button>
+    <button class="btn" type="button" data-a="next">Next step</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the code and the stages</p>
+  <div class="viz-stage">
+    <div class="jf-grid">
+      <pre class="jf-code" aria-label="The Jenkinsfile" tabindex="0" set:html={codeHtml(-1)} />
+      <div class="jf-board" set:html={boardHtml(first[0], "branch")} />
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite" set:html={sayHtml(first[0], 0, first.length - 1)} />
+</div>
+
+<style is:global>
+  [data-viz="jf-run"] .jf-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; min-width: 640px; padding: 6px 2px 8px; }
+  [data-viz="jf-run"] .jf-code { margin: 0; background: var(--code-bg); color: var(--code-ink); border-radius: 10px; padding: 10px 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; overflow-x: auto; }
+  [data-viz="jf-run"] .jf-l { display: block; padding: 0 12px; border-left: 3px solid transparent; white-space: pre; }
+  [data-viz="jf-run"] .jf-l.on { background: color-mix(in srgb, var(--auto) 30%, transparent); border-left-color: var(--auto); }
+  [data-viz="jf-run"] .jf-env { margin: 0 0 8px; font-size: 13px; }
+  [data-viz="jf-run"] .jf-h { margin: 8px 0 6px; font-size: 14px; }
+  [data-viz="jf-run"] .jf-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  [data-viz="jf-run"] .jf-st { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 6px 10px; border-radius: 8px; border: 1.5px solid var(--rule-2); background: var(--surface); font-size: 13.5px; }
+  [data-viz="jf-run"] .jf-st span { color: var(--ink-2); text-align: right; }
+  [data-viz="jf-run"] .jf-st.run, [data-viz="jf-run"] .jf-st.pause { border-color: var(--auto); background: color-mix(in srgb, var(--auto) 10%, var(--surface)); }
+  [data-viz="jf-run"] .jf-st.ok { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="jf-run"] .jf-st.ok span { color: var(--ok); font-weight: 700; }
+  [data-viz="jf-run"] .jf-st.fail { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="jf-run"] .jf-st.fail span { color: var(--bad); font-weight: 700; }
+  [data-viz="jf-run"] .jf-st.skip { border-style: dashed; }
+  [data-viz="jf-run"] .jf-st.skip b { color: var(--ink-2); font-weight: 600; }
+</style>
+
+<script>
+  import { boardHtml, codeHtml, sayHtml, steps, type Build } from "../../scripts/jf-run-viz";
+  import { press, reduced } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="jf-run"]').forEach((root) => {
+      if (!once(root)) return;
+      const code = root.querySelector<HTMLElement>(".jf-code")!;
+      const board = root.querySelector<HTMLElement>(".jf-board")!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const play = root.querySelector<HTMLButtonElement>('[data-a="play"]')!;
+      const next = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+      const buildBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-build]")];
+      const testBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-tests]")];
+      let build: Build = "branch";
+      let pass = true;
+      let list = steps(build, pass);
+      let i = 0;
+      let timer: ReturnType<typeof setInterval> | null = null;
+
+      function render() {
+        const s = list[i];
+        code.innerHTML = codeHtml(s.line);
+        board.innerHTML = boardHtml(s, build);
+        say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+        say.innerHTML = sayHtml(s, i, list.length - 1);
+        const end = i >= list.length - 1;
+        next.disabled = end;
+        play.disabled = end;
+        const on = code.querySelector<HTMLElement>(".on");
+        if (on) code.scrollTop = Math.max(0, on.offsetTop - code.clientHeight / 2);
+      }
+      function stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+        play.textContent = "Run";
+      }
+      function step() {
+        if (i < list.length - 1) { i++; render(); }
+        if (i >= list.length - 1) stop();
+      }
+      function restart() { stop(); list = steps(build, pass); i = 0; render(); }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.build) { build = b.dataset.build as Build; press(buildBtns, (x) => x === b); restart(); }
+        else if (b.dataset.tests) { pass = b.dataset.tests === "pass"; press(testBtns, (x) => x === b); restart(); }
+        else if (b.dataset.a === "next") { stop(); step(); }
+        else if (b.dataset.a === "reset") restart();
+        else if (b.dataset.a === "play") {
+          if (timer) { stop(); return; }
+          play.textContent = "Pause";
+          step();
+          timer = setInterval(step, reduced() ? 2600 : 1900);
+        }
+      });
+      stops.push(stop);
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

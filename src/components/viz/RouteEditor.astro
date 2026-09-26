@@ -1,0 +1,287 @@
+---
+/*
+ * Routing: a route table editor.
+ * Teaches: the routes in a subnet's table decide whether it is public,
+ * private or isolated, and which way each kind of traffic goes.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="route-editor">
+  <div class="viz-controls">
+    <span class="lbl" id="re-add-lbl">Add a route</span>
+    <div class="re-adds" role="group" aria-labelledby="re-add-lbl">
+      <button class="btn" type="button" data-add="igw">0.0.0.0/0 → internet gateway</button>
+      <button class="btn" type="button" data-add="nat">0.0.0.0/0 → NAT gateway</button>
+      <button class="btn" type="button" data-add="vpce">S3 → gateway endpoint</button>
+    </div>
+  </div>
+  <div class="viz-controls re-send">
+    <span class="lbl" id="re-send-lbl">Send traffic</span>
+    <div class="re-adds" role="group" aria-labelledby="re-send-lbl">
+      <button class="btn line" type="button" data-send="in">A visitor connects in</button>
+      <button class="btn line" type="button" data-send="out">Server downloads an update</button>
+      <button class="btn line" type="button" data-send="s3">Server reads from S3</button>
+    </div>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole network</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 330" role="img" aria-labelledby="re-title">
+      <title id="re-title">The internet on the left. An internet gateway leads into QuickCart's VPC. Inside, a public subnet holds a NAT gateway, and the subnet you are editing holds an API server. On the right, outside the VPC, is S3, reached through a gateway endpoint on the VPC's edge.</title>
+      <text class="vz-label" x="22" y="40">The internet</text>
+      <rect data-n="net" class="vz-node" x="20" y="120" width="120" height="64" rx="10" />
+      <text class="vz-t" x="80" y="148" text-anchor="middle">Internet</text>
+      <text class="vz-s" x="80" y="165" text-anchor="middle">visitors, updates</text>
+
+      <path class="vz-wire" d="M140 152 L226 152" />
+      <path class="vz-wire" d="M254 152 L300 92" />
+      <path class="vz-wire" d="M254 152 L330 236" />
+      <path class="vz-wire" d="M372 115 L372 211" />
+      <path class="vz-wire" d="M438 236 L598 236" />
+      <path class="vz-wire" d="M626 236 L660 236" />
+
+      <rect class="vz-vpc" x="240" y="18" width="372" height="298" rx="14" />
+      <text class="vz-label" x="258" y="40">QuickCart VPC (10.0.0.0/16)</text>
+
+      <rect class="vz-sub pub" x="270" y="52" width="250" height="96" rx="10" />
+      <text class="vz-s" x="282" y="70" font-weight="700">Public subnet</text>
+      <text class="vz-r" x="282" y="138">0.0.0.0/0 → internet gateway</text>
+      <rect data-n="nat" class="vz-node" x="306" y="76" width="132" height="40" rx="8" />
+      <text class="vz-t" x="372" y="100" text-anchor="middle">NAT gateway</text>
+
+      <rect data-n="sub" class="vz-sub" x="270" y="170" width="250" height="134" rx="10" />
+      <text class="vz-s" x="282" y="188" font-weight="700">The subnet you're editing</text>
+      <rect data-n="badge" class="re-badge" x="282" y="276" width="110" height="20" rx="10" />
+      <text data-n="badgeT" class="re-badge-t" x="337" y="290" text-anchor="middle">Isolated</text>
+      <rect data-n="api" class="vz-node" x="306" y="211" width="132" height="50" rx="8" />
+      <text class="vz-t" x="372" y="233" text-anchor="middle">API server</text>
+      <text class="vz-s" x="372" y="249" text-anchor="middle">10.0.11.24</text>
+
+      <rect class="vz-igw" x="226" y="128" width="28" height="48" rx="5" />
+      <path class="vz-igw-bars" d="M233 138v28M240 138v28M247 138v28" />
+      <text class="vz-s" x="240" y="196" text-anchor="middle" font-weight="700">internet</text>
+      <text class="vz-s" x="240" y="210" text-anchor="middle" font-weight="700">gateway</text>
+
+      <rect data-n="vpce" class="re-vpce" x="598" y="222" width="28" height="28" rx="5" />
+      <text class="vz-s" x="612" y="272" text-anchor="middle" font-weight="700">endpoint</text>
+
+      <text class="vz-label" x="660" y="40">AWS services</text>
+      <rect data-n="s3" class="vz-node" x="660" y="206" width="104" height="60" rx="10" />
+      <text class="vz-t" x="712" y="232" text-anchor="middle">S3</text>
+      <text class="vz-s" x="712" y="249" text-anchor="middle">menu photos</text>
+
+      <g data-n="x" opacity="0"><line class="vz-x" x1="0" y1="0" x2="18" y2="18" /><line class="vz-x" x1="18" y1="0" x2="0" y2="18" /></g>
+      <circle data-n="dot" class="vz-dot" r="8" cx="140" cy="152" opacity="0" />
+    </svg>
+  </div>
+  <div class="re-table">
+    <table>
+      <caption>Route table for the subnet you're editing</caption>
+      <thead><tr><th scope="col">Destination</th><th scope="col">Target</th><th scope="col"><span class="sr">Action</span></th></tr></thead>
+      <tbody data-n="rows"></tbody>
+    </table>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Isolated</span>The table has only the <code>local</code> route. The server can talk to the rest of the VPC and nothing else. Add a route, then send some traffic.</div>
+</div>
+
+<style is:global>
+  [data-viz="route-editor"] .viz-controls.re-send { border-top: 0; }
+  [data-viz="route-editor"] .re-adds { display: flex; flex-wrap: wrap; gap: 8px; }
+  [data-viz="route-editor"] .re-adds .btn { font-size: 14px; padding: 7px 12px; }
+  [data-viz="route-editor"] .re-badge { fill: var(--sunk); stroke: var(--ink-3); stroke-width: 1.2; }
+  [data-viz="route-editor"] .re-badge-t { font-family: var(--font); font-size: 12px; font-weight: 800; fill: var(--ink-2); }
+  [data-viz="route-editor"] .re-badge.public { fill: var(--cloud); stroke: var(--cloud); }
+  [data-viz="route-editor"] .re-badge-t.public { fill: var(--on-cloud); }
+  [data-viz="route-editor"] .re-badge.private { fill: var(--ok-bg); stroke: var(--ok); }
+  [data-viz="route-editor"] .re-badge-t.private { fill: var(--ok); }
+  [data-viz="route-editor"] .re-vpce { fill: var(--surface); stroke: var(--rule-2); stroke-width: 2; stroke-dasharray: 4 3; }
+  [data-viz="route-editor"] .re-vpce.on { stroke: var(--ok); stroke-dasharray: none; fill: var(--ok-bg); }
+  [data-viz="route-editor"] .re-table { padding: 4px 16px 12px; overflow-x: auto; }
+  [data-viz="route-editor"] .re-table table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 0; }
+  [data-viz="route-editor"] .re-table caption { text-align: left; font-weight: 700; font-size: 14px; color: var(--ink-2); padding: 4px 0 6px; }
+  [data-viz="route-editor"] .re-table th { text-align: left; font-size: 13px; color: var(--ink-2); border-bottom: 1px solid var(--rule-2); padding: 4px 8px; }
+  [data-viz="route-editor"] .re-table td { border-bottom: 1px solid var(--rule); padding: 6px 8px; font-family: var(--mono); font-size: 13px; }
+  [data-viz="route-editor"] .re-table td:last-child { text-align: right; font-family: var(--font); }
+  [data-viz="route-editor"] .re-table .btn { padding: 3px 10px; font-size: 13px; }
+  [data-viz="route-editor"] .re-table tr.new td { background: var(--ok-bg); }
+</style>
+
+<script>
+  import { beat, moveDot, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Kind = "igw" | "nat" | "vpce";
+  const ROUTE: Record<Kind, { dest: string; target: string; name: string }> = {
+    igw: { dest: "0.0.0.0/0", target: "igw (internet gateway)", name: "0.0.0.0/0 → internet gateway" },
+    nat: { dest: "0.0.0.0/0", target: "nat (NAT gateway)", name: "0.0.0.0/0 → NAT gateway" },
+    vpce: { dest: "pl (S3 prefix list)", target: "vpce (gateway endpoint)", name: "S3 → gateway endpoint" },
+  };
+  type Pt = [number, number];
+  const API: Pt = [372, 236], NET: Pt = [140, 152], IGW: Pt = [240, 152], NAT: Pt = [372, 96], VPCE: Pt = [612, 236], S3: Pt = [660, 236];
+
+  onPage(() => {
+    const cleanups: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="route-editor"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const rows = q<HTMLTableSectionElement>("rows");
+      const dot = q<SVGCircleElement>("dot");
+      const x = q<SVGGElement>("x");
+      const badge = q<SVGRectElement>("badge");
+      const badgeT = q<SVGTextElement>("badgeT");
+      const vpceBox = q<SVGRectElement>("vpce");
+      const nodes = ["net", "nat", "api", "s3"].map((n) => q<SVGRectElement>(n));
+      const [net, nat, api, s3] = nodes;
+      let routes: Kind[] = [];
+      let fresh: Kind | null = null;
+      let run = 0;
+
+      const kind = () => (routes.includes("igw") ? "public" : routes.includes("nat") ? "private" : "isolated");
+      const label = () => ({ public: "Public", private: "Private", isolated: "Isolated" })[kind()];
+
+      function draw() {
+        const k = kind();
+        badge.setAttribute("class", "re-badge " + k);
+        badgeT.setAttribute("class", "re-badge-t " + k);
+        badgeT.textContent = label();
+        vpceBox.setAttribute("class", "re-vpce" + (routes.includes("vpce") ? " on" : ""));
+        rows.innerHTML =
+          `<tr><td>10.0.0.0/16</td><td>local</td><td><button type="button" class="btn" data-del="local" aria-label="Remove the local route">Remove</button></td></tr>` +
+          routes.map((r) => `<tr class="${r === fresh ? "new" : ""}"><td>${ROUTE[r].dest}</td><td>${ROUTE[r].target}</td><td><button type="button" class="btn" data-del="${r}" aria-label="Remove ${ROUTE[r].name}">Remove</button></td></tr>`).join("");
+      }
+      function clear() {
+        nodes.forEach((n) => n.classList.remove("lit", "hit", "okk"));
+        dot.setAttribute("opacity", "0");
+        dot.setAttribute("class", "vz-dot");
+        x.setAttribute("opacity", "0");
+      }
+      function busy(on: boolean) {
+        root.querySelectorAll<HTMLButtonElement>("[data-send],[data-add],[data-del]").forEach((b) => (b.disabled = on));
+      }
+      function cross(p: Pt) {
+        x.setAttribute("transform", `translate(${p[0] - 9} ${p[1] - 9})`);
+        x.setAttribute("opacity", "1");
+      }
+      function describe() {
+        const k = kind();
+        return k === "public"
+          ? "The table sends <code>0.0.0.0/0</code> to the <b>internet gateway</b>. This subnet is now <b>public</b>."
+          : k === "private"
+            ? "The table sends <code>0.0.0.0/0</code> to the <b>NAT gateway</b>. This subnet is <b>private</b>: it can reach out, but nothing can reach in."
+            : "There is no <code>0.0.0.0/0</code> route. This subnet is <b>isolated</b>: it can only reach things inside the VPC" + (routes.includes("vpce") ? ", plus S3 through the endpoint." : ".");
+      }
+
+      function addRoute(r: Kind) {
+        run++; clear(); busy(false);
+        if (routes.includes(r)) {
+          tell(say, "Already there", `The table already has <b>${ROUTE[r].name}</b>.`);
+          return;
+        }
+        if (r !== "vpce" && routes.some((o) => o !== "vpce")) {
+          const other = routes.find((o) => o !== "vpce")!;
+          tell(say, "Route already exists", `A table can hold only one route for each destination, and <code>0.0.0.0/0</code> already goes to the <b>${other === "igw" ? "internet gateway" : "NAT gateway"}</b>. AWS refuses the second one. Remove the first, then add this.`, "bad");
+          return;
+        }
+        routes.push(r);
+        fresh = r;
+        draw();
+        tell(say, label(), describe() + (r === "vpce" ? " S3's addresses are more specific than <code>0.0.0.0/0</code>, so S3 traffic takes this route whatever else is in the table." : ""), kind() === "public" ? "" : "good");
+      }
+      function delRoute(r: string) {
+        run++; clear(); busy(false);
+        if (r === "local") {
+          tell(say, "Can't remove local", "The <code>local</code> route is in every route table and can't be removed. It is how everything inside the VPC reaches everything else.", "bad");
+          return;
+        }
+        routes = routes.filter((o) => o !== r);
+        fresh = null;
+        draw();
+        tell(say, label(), "Removed <b>" + ROUTE[r as Kind].name + "</b>. " + describe());
+        root.querySelector<HTMLButtonElement>(`[data-add="${r}"]`)?.focus();
+      }
+
+      async function send(what: string) {
+        const me = ++run; clear(); busy(true);
+        const live = () => me === run;
+        const done = () => busy(false);
+        if (what === "in") {
+          net.classList.add("lit");
+          dot.setAttribute("class", "vz-dot bot");
+          tell(say, "Step 1 of 2", "Someone on the internet tries to connect to the API server directly.");
+          await moveDot(dot, [NET, IGW]); if (!live()) return;
+          await beat(400);
+          if (kind() === "public") {
+            await moveDot(dot, [IGW, [330, 236], API]); if (!live()) return;
+            api.classList.add("hit");
+            tell(say, "Step 2 of 2: it got in", "<b>It reached the server.</b> The table sends <code>0.0.0.0/0</code> to the internet gateway, so the server is on the internet. Only its security group stands in the way. Right for a load balancer; wrong for an API server.", "bad");
+          } else {
+            await moveDot(dot, [IGW, [300, 210]]); if (!live()) return;
+            cross([300, 210]);
+            tell(say, "Step 2 of 2: no way in", `<b>Blocked.</b> The subnet's table has no route to the internet gateway, so the internet can't reach anything in it. ${kind() === "private" ? "The NAT gateway only lets replies back in, never new connections." : ""}`, "good");
+          }
+          return done();
+        }
+        if (what === "out") {
+          api.classList.add("lit");
+          tell(say, "Step 1 of 3", "The server asks the internet for a security update. Its route table decides which way that goes.");
+          await beat(500); if (!live()) return;
+          if (kind() === "public") {
+            await moveDot(dot, [API, [330, 236], IGW, NET]); if (!live()) return;
+            net.classList.add("okk");
+            tell(say, "Step 3 of 3: it worked", "<b>Downloaded</b>, straight out through the internet gateway. It works — but the same route lets the internet in. That's the price of a public subnet.");
+          } else if (kind() === "private") {
+            await moveDot(dot, [API, NAT]); if (!live()) return;
+            nat.classList.add("lit");
+            tell(say, "Step 2 of 3", "The route sends it to the <b>NAT gateway</b> in the public subnet. The NAT gateway swaps the server's private address for its own public one, and sends it on.");
+            await beat(700);
+            await moveDot(dot, [NAT, [300, 92], IGW, NET]); if (!live()) return;
+            dot.setAttribute("class", "vz-dot back");
+            await moveDot(dot, [NET, IGW, [300, 92], NAT, API], 320); if (!live()) return;
+            api.classList.replace("lit", "okk");
+            tell(say, "Step 3 of 3: it worked", "<b>The update came back</b> the same way. The server reached out; nothing reached in. That's a private subnet.", "good");
+          } else {
+            await moveDot(dot, [API, [300, 210]]); if (!live()) return;
+            cross([300, 210]);
+            api.classList.replace("lit", "hit");
+            tell(say, "Step 3 of 3: timed out", "<b>No route.</b> Nothing in the table matches an internet address, so the packet goes nowhere. The download just hangs until it times out — no clear error. Isolated subnets suit databases, not servers that need updates.", "bad");
+          }
+          return done();
+        }
+        /* S3 */
+        api.classList.add("lit");
+        tell(say, "Step 1 of 2", "The server fetches a menu photo from S3. S3 lives outside the VPC.");
+        await beat(500); if (!live()) return;
+        if (routes.includes("vpce")) {
+          await moveDot(dot, [API, VPCE, S3]); if (!live()) return;
+          s3.classList.add("okk");
+          tell(say, "Step 2 of 2: private path", "<b>Straight to S3 through the gateway endpoint.</b> The S3 route is more specific than <code>0.0.0.0/0</code>, so it wins. The traffic never leaves AWS's network, and the gateway endpoint is free.", "good");
+        } else if (kind() === "private") {
+          await moveDot(dot, [API, NAT, [300, 92], IGW, NET]); if (!live()) return;
+          s3.classList.add("okk");
+          tell(say, "Step 2 of 2: the long way", "<b>It worked, via the NAT gateway</b> and S3's public address. Every gigabyte through a NAT gateway is charged. Add the S3 gateway endpoint and send it again.");
+        } else if (kind() === "public") {
+          await moveDot(dot, [API, [330, 236], IGW, NET]); if (!live()) return;
+          s3.classList.add("okk");
+          tell(say, "Step 2 of 2: over the internet", "<b>It worked</b>, out through the internet gateway to S3's public address. The gateway endpoint would keep it inside AWS instead.");
+        } else {
+          await moveDot(dot, [API, [540, 236]]); if (!live()) return;
+          cross([540, 236]);
+          api.classList.replace("lit", "hit");
+          tell(say, "Step 2 of 2: no route", "<b>No route to S3.</b> The subnet is isolated and has no endpoint. Add <b>S3 → gateway endpoint</b>: the server can reach S3 while staying isolated from the internet.", "bad");
+        }
+        done();
+      }
+
+      const onClick = (e: Event) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.add) addRoute(b.dataset.add as Kind);
+        else if (b.dataset.del) delRoute(b.dataset.del);
+        else if (b.dataset.send) send(b.dataset.send);
+      };
+      root.addEventListener("click", onClick);
+      draw();
+      cleanups.push(() => { run++; root.removeEventListener("click", onClick); });
+    });
+    return () => cleanups.forEach((c) => c());
+  });
+</script>

@@ -1,0 +1,969 @@
+---
+time: 60 minutes
+level: Advanced
+before: [terraform-state, terraform-loops]
+cost: free
+quiz:
+  - q: At 2am Noor fixed an outage by changing a security group in the console. The next morning's plan shows a `~` change that would undo her fix. What should happen next?
+    answer: 2
+    options:
+      - t: Apply the plan, because the code is always right
+        why: The code is the source of truth, but here the code is wrong. Applying would bring the outage straight back.
+      - t: Add ignore_changes for the security group rules, so Terraform stops complaining
+        why: That hides the problem. Terraform would stop managing those rules, and nobody would notice the next hand-made change either.
+      - t: Write the fix into the code, so the next plan shows no changes
+        why: The console change was right, so it belongs in the code. Once the code matches AWS, the plan is clean and the fix is reviewed, recorded and safe from the next apply.
+      - t: Run terraform apply -refresh-only and move on
+        why: That records the new value in the state, but the code still says the old value. The very next normal plan tries to undo the fix again.
+  - q: Leo renames `aws_db_instance.main` to `aws_db_instance.orders` in the code. Nothing else changes. The plan says `1 to add, 0 to change, 1 to destroy`. What does he do?
+    answer: 0
+    options:
+      - t: Add a moved block from the old address to the new one, then plan again
+        why: Terraform tracks resources by address. The moved block tells it the two addresses are the same database, so the plan becomes 0 to add, 0 to destroy.
+      - t: Apply it, because the database has the same settings
+        why: Same settings, but a brand-new, empty database. The old one, with every order in it, is destroyed.
+      - t: Run terraform apply -target=aws_db_instance.orders
+        why: That still creates a second database. It just skips the destroy for now, leaving the old one outside the code.
+      - t: Change the database's identifier as well
+        why: The identifier is the name in AWS. Changing it would force a replacement even with a moved block.
+  - q: Why do most teams prefer an import block to the terraform import command?
+    answer: 3
+    options:
+      - t: The import block works on more resource types
+        why: Both use the same import support in the provider. A resource that can't be imported one way can't be imported the other way either.
+      - t: The terraform import command was removed in Terraform 1.5
+        why: It still exists and still works. Import blocks were added alongside it.
+      - t: The import block doesn't need the resource's ID
+        why: It needs exactly the same ID, in its id argument.
+      - t: The import block shows up in terraform plan, so it can be reviewed in a pull request before the state changes
+        why: "The command changes the state the moment you run it, with no plan. The block is code: it's reviewed, planned and applied like any other change."
+  - q: You've just imported a repository made by hand. The plan shows `~ image_tag_mutability = "MUTABLE" -> "IMMUTABLE"`. What does that mean?
+    answer: 1
+    options:
+      - t: The import failed and must be run again
+        why: The import worked. The plan is comparing the imported repository with your code.
+      - t: Your code and the real repository disagree. Decide which one is right before you apply
+        why: Import only adopts the resource. Terraform then makes it match your code. If immutable tags are what you want, apply. If not, change the code.
+      - t: Terraform will create a second repository
+        why: A `~` means change in place. A second repository would be a `+`.
+      - t: The repository will be destroyed and recreated
+        why: That would be `-/+` with "forces replacement". Tag mutability changes in place.
+  - q: A teammate uses -target on almost every apply, because a full plan takes 20 minutes. What does that tell you?
+    answer: 2
+    options:
+      - t: Nothing. -target is a normal way to speed things up
+        why: Terraform itself warns that -target is not for routine use. Everything outside the target goes unplanned and unchecked.
+      - t: The team should upgrade Terraform
+        why: A newer version won't fix a configuration that is too big to plan.
+      - t: The configuration is too big. It should be split into smaller parts with their own state
+        why: Routine -target means drift builds up unseen in everything that isn't targeted. Splitting the state, for example network and services, makes each plan small enough to run in full.
+      - t: The state lock isn't working
+        why: The lock stops two applies at once. It has nothing to do with how long a plan takes.
+  - q: What does terraform init -upgrade do?
+    answer: 0
+    options:
+      - t: Installs the newest provider versions your version constraints allow, and updates .terraform.lock.hcl
+        why: Without -upgrade, init installs exactly what the lock file says. With it, Terraform looks for newer versions within your constraint, like ~> 6.0, and records the new choice.
+      - t: Upgrades Terraform itself to the newest version
+        why: Terraform can't upgrade itself. You do that with your package manager, such as Homebrew.
+      - t: Moves the provider to the next major version, like 6 to 7
+        why: It never goes past your version constraint. Moving to 7 means changing the constraint yourself.
+      - t: Upgrades the resources in AWS to their latest settings
+        why: init never touches AWS. It only prepares the folder.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, three weeks after an outage">
+
+At 2am, the orders API stopped answering. Noor was on call. An evening change had put the wrong port on a security group rule, in the code and in AWS. She fixed the rule in the console and went back to bed. The outage was over.
+
+Nobody wrote the fix into the Terraform code.
+
+Three weeks later, Leo added a tag to an unrelated resource and ran `terraform apply`. The plan had one more line than he expected, a `~` on that security group. He assumed it was noise. The apply put the wrong port back, and the outage came back with it, at lunchtime.
+
+Nobody had changed the code, so nobody could see what had broken it.
+
+</Story>
+
+AWS and the code had quietly disagreed for three weeks. That is **drift**, and dealing with it is part of running Terraform day to day, after the first build.
+
+<Case title="A very common mistake">
+
+An engineer tidies up the code: a resource gets a clearer name, or moves into a module. It's the same database, with the same settings. The plan says `1 to add, 0 to change, 1 to destroy`. It's read as "just the rename" and approved.
+
+Terraform doesn't know it's the same database. It tracks everything by its **address** in the code. The old address has gone, so it destroys the database. The new address is new, so it creates an empty one. A tidy-up becomes data loss.
+
+</Case>
+
+This lesson covers the tools for living with Terraform: spotting drift, adopting things made by hand, renaming without destroying, and getting out of trouble.
+
+</Part>
+
+<Part id="idea">
+
+Building with Terraform is the easy part. After that, the job is to keep three things agreeing: the code, the state and AWS. People click in the console. Code gets reorganised. Applies get interrupted. Providers release new versions.
+
+| Situation | What goes wrong | The tool |
+|---|---|---|
+| Someone changes AWS by hand | The next apply quietly undoes it | Drift detection: `terraform plan`, `-refresh-only` |
+| Something was built by hand, before Terraform | Terraform doesn't know it exists | `import` blocks |
+| You rename a resource or move it into a module | Terraform plans to destroy and recreate it | `moved` blocks |
+| Something should no longer be managed by this code | Deleting it from the code destroys it | `removed` blocks, or `terraform state rm` |
+| An apply went wrong | Half-built, stuck, or confused | A calm plan, and the recovery table below |
+| A provider releases a new version | Behaviour changes under you | The lock file and `terraform init -upgrade` |
+
+<Key>Every plan must be read. Anything in it that you didn't intend is a question to answer before you apply, never noise.</Key>
+
+### Drift: when AWS and the code disagree
+
+Every `terraform plan` starts by **refreshing**: it reads the real settings of everything in the state from AWS. Then it compares them with the code. If someone changed a setting by hand, the plan offers to change it back. The code wins.
+
+So when a plan shows a change you didn't make, there are two honest answers:
+
+| The hand-made change was… | What you do | Result |
+|---|---|---|
+| **Wrong**, or a leftover experiment | Apply the plan | AWS goes back to what the code says |
+| **Right**, like Noor's fix | Change the code to match, in a pull request | The next plan is clean, and the fix is safe for good |
+
+The dishonest answer is to apply without reading, which is how Leo brought the outage back.
+
+A **refresh-only plan**, made with `terraform plan -refresh-only`, is a different kind of plan. It shows **only** what changed outside Terraform, and it never plans to undo anything. It's useful when you're investigating. If you apply it, Terraform records the new values in the state and still changes nothing in AWS. It does **not** change your code, so on its own it fixes nothing. The next normal plan still wants to undo the change.
+
+#### Catching drift on a schedule
+
+A pipeline can run a plan every night and alert someone if anything differs. It uses `-detailed-exitcode`, which makes the plan's exit code mean something:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | No changes. Code, state and AWS agree |
+| `1` | Something went wrong: the plan failed |
+| `2` | The plan succeeded and there are changes: drift, or code nobody has applied |
+
+The [pipeline project](/projects/05-the-pipeline/) runs exactly this.
+
+<YouKnow title="You already know this: a hotfix that never reached main">
+
+You fix a bug directly on the release branch at night, and forget to merge it back. The next release is built from main, and the bug comes back.
+
+A console fix is that hotfix. The code is main. Until the fix is merged into the code, the next apply ships the bug again.
+
+</YouKnow>
+
+### Adopting things made by hand: import
+
+Lots of things are made before anyone writes Terraform: a repository clicked together in a hurry, a bucket from the early days. If you just write a resource block for one, Terraform plans to **create** it, and AWS refuses because it already exists.
+
+An **import block** tells Terraform: this resource in the code is that thing which already exists.
+
+```hcl title="import.tf"
+import {
+  to = aws_ecr_repository.service["payments"]
+  id = "quickcart-payments"
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `import` | Adopt an existing object into the state during the next apply. Needs Terraform 1.5 or later | — | — |
+| `to` | The address in your code it becomes. A resource block for that address must exist | Required. Terraform doesn't know where to put it | Once per thing you adopt |
+| `id` | How AWS identifies the object. It's different for each resource type: a repository's name, a VPC's `vpc-` ID, a bucket's name | Required | Look it up in the **Import** section at the bottom of that resource's page in the AWS provider documentation |
+
+Import blocks show up in the plan as `will be imported`, so they're reviewed like any other change. The import only happens when you apply. Afterwards, delete the block. Leaving it in is harmless, but it's clutter.
+
+**If the plan shows changes as well as the import, the code doesn't match reality yet.** Import doesn't change the code. It only adopts the object, and after that Terraform makes it match the code. So either the code is right and you apply, or you edit the code until the only thing left is the import.
+
+For a lot of resources at once, `terraform plan -generate-config-out=generated.tf` writes a first draft of the resource blocks for any import block that has none. Treat that file as a draft: tidy it and move the blocks into your own files.
+
+#### The older way: the terraform import command
+
+```sh
+terraform import 'aws_ecr_repository.service["payments"]' quickcart-payments
+```
+
+| Part | What it means |
+|---|---|
+| `terraform import` | adopt an existing object into the state, immediately |
+| `'aws_ecr_repository.service["payments"]'` | the address in your code. The single quotes stop your shell treating the brackets and double quotes as special |
+| `quickcart-payments` | the object's ID in AWS |
+
+```output
+aws_ecr_repository.service["payments"]: Importing from ID "quickcart-payments"...
+aws_ecr_repository.service["payments"]: Import prepared!
+  Prepared aws_ecr_repository for import
+aws_ecr_repository.service["payments"]: Refreshing state... [id=quickcart-payments]
+
+Import successful!
+
+The resources that were imported are shown above. These resources are now in
+your Terraform state and will henceforth be managed by Terraform.
+```
+
+It changes the state straight away, with no plan and nothing to review. It still works, and you'll see it in older guides. Prefer the block.
+
+### Renaming without destroying: moved
+
+Terraform identifies each resource by its **resource address**: the type and the name you gave it in the code, like `aws_ecr_repository.orders`. Change the address, and as far as Terraform is concerned, one thing was deleted from the code and another was added.
+
+A **moved block** says that the old address and the new one are the same thing:
+
+```hcl title="moved.tf"
+moved {
+  from = aws_ecr_repository.orders
+  to   = aws_ecr_repository.service["orders"]
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `moved` | During the next apply, rename the record in the state instead of destroying and creating. Needs Terraform 1.1 or later | Terraform plans a destroy and a create | Every time an address changes: a rename, a move into `for_each` or `count`, or a move into a module |
+| `from` | The old address, as it's recorded in the state | Required | — |
+| `to` | The new address in your code | Required | — |
+
+Examples of `from` and `to` pairs:
+
+| Refactor | `from` | `to` |
+|---|---|---|
+| Rename | `aws_ecr_repository.orders` | `aws_ecr_repository.orders_images` |
+| Into a `for_each` | `aws_ecr_repository.orders` | `aws_ecr_repository.service["orders"]` |
+| Into a module | `aws_ecr_repository.orders` | `module.orders_repo.aws_ecr_repository.this` |
+| Rename a whole module call | `module.repo` | `module.orders_repo` |
+
+The plan then says `has moved to`, and nothing in AWS changes. Keep the moved block for a while, until every copy of the state has been applied with it: every environment, and anyone's branch. For a module that other teams use, keep it for good. It costs nothing.
+
+**`terraform state mv`** does the same rename directly in the state, from the command line. Like `terraform import`, it changes the state at once with no plan and no review. Use a moved block instead.
+
+### Letting go without destroying: removed
+
+Sometimes something should stay in AWS but leave this code. For example, another team takes it over. If you just delete the resource block, the next plan **destroys** it.
+
+A **removed block** makes Terraform forget it instead:
+
+```hcl title="removed.tf"
+removed {
+  from = aws_ecr_repository.reports
+
+  lifecycle {
+    destroy = false
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `removed` | Plan to drop a resource from the state. Needs Terraform 1.7 or later | Deleting the resource block plans a destroy | When a resource leaves this code |
+| `from` | The address to forget. It must be a whole resource or module, like `aws_ecr_repository.reports`, never one instance like `service["payments"]`. The resource block itself must be gone from the code | Required | — |
+| `lifecycle` → `destroy` | `false` means forget it, but leave it running in AWS | Defaults to `true`, which destroys it | Set `true` only if you really want it deleted, and want the plan to say so clearly |
+
+The plan says so in plain words:
+
+```output
+ # aws_ecr_repository.reports will no longer be managed by Terraform, but will not be destroyed
+ # (destroy = false is set in the configuration)
+```
+
+To forget **one instance** of a `for_each` or `count`, there's no block. Use the command, which changes the state straight away:
+
+```sh
+terraform state rm 'aws_ecr_repository.service["payments"]'
+```
+
+| Part | What it means |
+|---|---|
+| `terraform state rm` | remove a record from the state. The object in AWS is not touched |
+| `'aws_ecr_repository.service["payments"]'` | the address to forget, in single quotes so your shell leaves the brackets alone |
+
+```output
+Removed aws_ecr_repository.service["payments"]
+Successfully removed 1 resource instance(s).
+```
+
+Add `-dry-run` first to see what it would remove without removing it. Then take the item out of the code, or the next plan will offer to create it again.
+
+<Mistake title="state rm on something nobody takes over">
+
+The resource keeps running and costing money, but no code manages it any more. Months later nobody knows what it is or whether it's safe to delete.
+
+**Why:** `state rm` makes Terraform forget. It doesn't hand the resource to anyone.
+
+**The fix:** only forget something when you know who manages it next. That team imports it into their code the same day.
+
+</Mistake>
+
+### Targeted plans, and why to avoid them
+
+`-target` limits a plan or apply to one resource and whatever it depends on:
+
+```sh
+terraform plan -target='aws_ecr_repository.service["orders"]'
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | work out what would change |
+| `-target=` | but only for this address, and what it depends on |
+| `'aws_ecr_repository.service["orders"]'` | the address, in single quotes for your shell |
+
+Terraform warns you every time:
+
+```output
+Warning: Resource targeting is in effect
+
+You are creating a plan with the -target option, which means that the result
+of this plan may not represent all of the changes requested by the current
+configuration.
+
+The -target option is not for routine use, and is provided only for
+exceptional situations such as recovering from errors or mistakes, or when
+Terraform specifically suggests to use it as part of an error message.
+```
+
+Take the warning literally. Everything outside the target goes unplanned, so drift and unapplied changes pile up out of sight. If a team reaches for `-target` every week, the configuration is too big. Split it into smaller parts with their own state, so each full plan is quick.
+
+### Recovering from mistakes
+
+Before any repair, save a copy of the state:
+
+```sh
+terraform state pull > state-backup.json
+```
+
+| Part | What it means |
+|---|---|
+| `terraform state pull` | print the current state, wherever it's stored |
+| `>` | your shell's redirect: write what the command prints into a file instead of the screen |
+| `state-backup.json` | the file to write. Keep it out of git, because state can hold secrets |
+
+Then find your situation:
+
+| What happened | What you see | What to do |
+|---|---|---|
+| An apply was interrupted: Ctrl+C, a closed laptop, expired credentials | Some things were built, some weren't | Run `terraform plan`. Terraform writes state as it goes, so the plan usually shows only what's left. Apply it |
+| The interrupted apply left its lock behind | `Error acquiring the state lock` | Check nobody is really applying, then `terraform force-unlock` with the lock's ID. See [Terraform state](/lessons/terraform-state/) |
+| Someone deleted a resource in the console | The plan shows `+ will be created` for something that should exist | Decide whether it should exist. If yes, apply. If no, remove it from the code |
+| A resource block was deleted from the code by mistake | The plan shows `- will be destroyed` | Don't apply. Put the code back |
+| The state was damaged or overwritten | The plan wants to create things that already exist | Restore an earlier version from the state bucket's versioning. See [Terraform state](/lessons/terraform-state/) |
+| An apply destroyed something that held data | It's gone | Terraform can't undo a destroy. Restore from a backup or snapshot. Then add `prevent_destroy`, see [Loops and lifecycle](/lessons/terraform-loops/) |
+| After a provider upgrade, the plan shows changes nobody made | Unexpected `~` lines | Read the provider's changelog. If in doubt, go back to the previous `.terraform.lock.hcl` from git and run `terraform init` |
+
+The pattern in every row: **plan first, read it, and never apply a plan you can't explain.**
+
+### Upgrading providers
+
+Two things decide which AWS provider you run:
+
+| Where | What it says | Who changes it |
+|---|---|---|
+| `version = "~> 6.0"` in `required_providers` | The range you allow: any 6.x, never 7.0 | You, on purpose, for a major upgrade |
+| `.terraform.lock.hcl` | The exact version chosen, like 6.66.0, with checksums | `terraform init -upgrade`, and you commit the result |
+
+A plain `terraform init` installs exactly the version in the lock file, so everyone on the team runs the same one. `terraform init -upgrade` looks for the newest version your range allows and updates the lock file.
+
+| Kind of upgrade | How to do it |
+|---|---|
+| Minor, like 6.60 to 6.66 | `terraform init -upgrade`, then `terraform plan`. Expect `No changes`. Commit the lock file in its own pull request |
+| Major, like 6 to 7 | Read the provider's upgrade guide first. Change the range to `~> 7.0`, run `init -upgrade`, and fix whatever the plan and the guide point out. Do dev first, then stg, then production |
+| Terraform itself | Upgrade everyone and the pipeline together, and raise `required_version` so an old copy refuses to run |
+
+<Note title="The lock file lists your laptop's platform">
+
+The lock file records checksums for the platforms that have run `init`. If your pipeline runs on Linux and the team uses Macs, run `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64` once, so both are listed and the pipeline's `init` doesn't fail its checksum check.
+
+</Note>
+
+</Part>
+
+<Part id="see">
+
+Maya reorganises the code: the orders repository moves into a `for_each`, or into a module. Nothing about the repository itself changes. Plan it without a moved block and then with one, and apply each to see what happens to the repository.
+
+<TfMoved />
+
+**What to notice:** the only difference between the two plans is four lines of code that never touch AWS. Without them, Terraform can only see an address that disappeared and a new one that appeared, so a harmless rename turns into a destroy.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">two empty ECR repositories. ECR only charges for stored images, and these hold none.</Cost>
+
+You'll build a repository with Terraform, drift it by hand, fix the drift, refactor the code with a moved block, adopt a repository made in the console, and upgrade the provider. About 40 minutes.
+
+You need Terraform 1.10 or later and a working AWS login in your terminal. [Set up your Mac](/lessons/mac-setup/) covers both.
+
+<Steps>
+
+<Step title="Build the starting point">
+
+Make a new folder and move into it:
+
+```sh
+mkdir quickcart-ops
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-ops` | its name |
+
+```sh
+cd quickcart-ops
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory. Every later command runs in here |
+| `quickcart-ops` | the folder you just made |
+
+Create `main.tf`:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "quickcart-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version` | Refuse to run on a Terraform older than 1.10 | An older Terraform might half-understand the files | When you rely on a newer feature |
+| `required_providers` → `aws` | Use the `hashicorp/aws` provider, any 6.x version | Terraform picks the newest version, even a new major one | For a deliberate major upgrade |
+| `provider "aws"` → `region` | Build in us-east-1 | Terraform uses the region from your AWS login settings | To build somewhere else |
+| `aws_ecr_repository` `"orders"` | A private store for container images. Its address in the code is `aws_ecr_repository.orders` | — | — |
+| `name` | The repository's name in AWS | Required | Never. Changing it replaces the repository |
+| `image_tag_mutability` | `IMMUTABLE`: a tag like `v1` can never be moved to a different image | Defaults to `MUTABLE` | Rarely. See [Storing images: ECR](/lessons/ecr/) |
+| `force_delete` | Let `terraform destroy` delete the repository even if it holds images | Destroy fails while any image is inside | Set it to `false` for real repositories |
+| `tags` | Labels for finding and costing things | No labels | Add owner and environment in real projects |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | download the AWS provider and prepare the folder |
+
+```output
+Terraform has been successfully initialized!
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan, show the plan, and carry it out once you type `yes` |
+
+Type `yes` when asked.
+
+```output
+aws_ecr_repository.orders: Creating...
+aws_ecr_repository.orders: Creation complete after 1s [id=quickcart-orders]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+</Step>
+
+<Step title="Drift it by hand, and catch it">
+
+Play Noor at 2am. Change the repository in the console, not in the code:
+
+<ConsolePath path="ECR > Private registry > Repositories > tick quickcart-orders > Actions > Edit" />
+
+| Field | Enter |
+|---|---|
+| Image tag mutability | **Mutable** |
+
+Choose **Save**. Now ask Terraform what it thinks:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | read the real repository from AWS, compare it with the code, and show the difference |
+
+```output
+Terraform will perform the following actions:
+
+  # aws_ecr_repository.orders will be updated in-place
+  ~ resource "aws_ecr_repository" "orders" {
+        id                   = "quickcart-orders"
+      ~ image_tag_mutability = "MUTABLE" -> "IMMUTABLE"
+        name                 = "quickcart-orders"
+        tags                 = {
+            "Project" = "quickcart"
+        }
+        # (6 unchanged attributes hidden)
+
+        # (2 unchanged blocks hidden)
+    }
+
+Plan: 0 to add, 1 to change, 0 to destroy.
+```
+
+Read it: the value in AWS is `MUTABLE`, and the code wants `IMMUTABLE`. Nobody changed the code, so this line is drift.
+
+Now look at the same drift the other way round:
+
+```sh
+terraform plan -refresh-only
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | make a plan |
+| `-refresh-only` | only show what changed outside Terraform. Plan nothing to undo it |
+
+```output
+Note: Objects have changed outside of Terraform
+
+Terraform detected the following changes made outside of Terraform since the
+last "terraform apply" which may have affected this plan:
+
+  # aws_ecr_repository.orders has changed
+  ~ resource "aws_ecr_repository" "orders" {
+        id                   = "quickcart-orders"
+      ~ image_tag_mutability = "IMMUTABLE" -> "MUTABLE"
+        name                 = "quickcart-orders"
+        tags                 = {
+            "Project" = "quickcart"
+        }
+        # (6 unchanged attributes hidden)
+
+        # (2 unchanged blocks hidden)
+    }
+
+
+This is a refresh-only plan, so Terraform will not take any actions to undo
+these. If you were expecting these changes then you can apply this plan to
+record the updated values in the Terraform state without changing any remote
+objects.
+```
+
+The arrow now points the other way: from what the state remembers to what AWS has.
+
+This time the hand-made change was wrong, since immutable tags are what QuickCart wants. So put it back:
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | carry out the plan: set the repository back to `IMMUTABLE` |
+
+```output
+Apply complete! Resources: 0 added, 1 changed, 0 destroyed.
+```
+
+Finally, the check a nightly pipeline runs:
+
+```sh
+terraform plan -detailed-exitcode
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | make a plan |
+| `-detailed-exitcode` | finish with exit code 0 for no changes, 1 for an error, 2 for changes |
+
+```sh
+echo $?
+```
+
+| Part | What it means |
+|---|---|
+| `echo` | print something |
+| `$?` | your shell's record of the last command's exit code |
+
+```output
+0
+```
+
+`0`: no drift. If you run the pair again after another console change, you'll see `2`.
+
+</Step>
+
+<Step title="Refactor into for_each, safely">
+
+QuickCart is about to have more than one service, so Maya wants one resource block that makes a repository per service. Replace `main.tf` with this version. Only the resource block changes:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "service" {
+  for_each = toset(["orders"])
+
+  name                 = "quickcart-${each.key}"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `"service"` | The new name inside Terraform. The address becomes `aws_ecr_repository.service["orders"]` | — | — |
+| `for_each` | One repository per item in the set. `toset` turns the list into a set, which `for_each` needs. For now the set holds only `orders` | One repository only | Add a service name to add a repository. You'll add `payments` in the next step |
+| `name` | `quickcart-` followed by the item, so the orders repository keeps the name `quickcart-orders` | Required | — |
+| the other settings | Unchanged from step 1 | — | — |
+
+Plan:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | compare the reorganised code with the state |
+
+```output title="The summary lines say"
+  # aws_ecr_repository.orders will be destroyed
+  # (because aws_ecr_repository.orders is not in configuration)
+  # aws_ecr_repository.service["orders"] will be created
+Plan: 1 to add, 0 to change, 1 to destroy.
+```
+
+That's the Case from the top of this lesson. Same repository, same name, but a new address. Applying would delete `quickcart-orders` and every image in it. **Don't apply.**
+
+Create `moved.tf` next to `main.tf`:
+
+```hcl title="moved.tf"
+moved {
+  from = aws_ecr_repository.orders
+  to   = aws_ecr_repository.service["orders"]
+}
+```
+
+Each setting is explained in [the idea](#idea), above.
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | plan again, now that Terraform knows the two addresses are the same |
+
+```output
+Terraform will perform the following actions:
+
+  # aws_ecr_repository.orders has moved to aws_ecr_repository.service["orders"]
+    resource "aws_ecr_repository" "service" {
+        id                   = "quickcart-orders"
+        name                 = "quickcart-orders"
+        tags                 = {
+            "Project" = "quickcart"
+        }
+        # (7 unchanged attributes hidden)
+
+        # (2 unchanged blocks hidden)
+    }
+
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | record the new address in the state. Nothing in AWS changes |
+
+```output
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+</Step>
+
+<Step title="Adopt a repository made in the console">
+
+Someone made the payments repository by hand before QuickCart used Terraform. Make it now, the same way:
+
+<ConsolePath path="ECR > Private registry > Repositories > Create repository" />
+
+| Field | Enter |
+|---|---|
+| Repository name | `quickcart-payments` |
+| Image tag mutability | **Mutable**, the default. Leave it |
+| Encryption settings | **AES-256**, the default. Leave it |
+
+Choose **Create**.
+
+Now add `payments` to the set in `main.tf`. The whole file now reads:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "service" {
+  for_each = toset(["orders", "payments"])
+
+  name                 = "quickcart-${each.key}"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+```
+
+Then create `import.tf` next to it:
+
+```hcl title="import.tf"
+import {
+  to = aws_ecr_repository.service["payments"]
+  id = "quickcart-payments"
+}
+```
+
+Each setting is explained in [the idea](#idea), above. For an ECR repository, the `id` is its name.
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | plan the import, and compare the imported repository with the code |
+
+```output
+  # aws_ecr_repository.service["payments"] will be updated in-place
+  # (imported from "quickcart-payments")
+  ~ resource "aws_ecr_repository" "service" {
+        arn                  = "arn:aws:ecr:us-east-1:111122223333:repository/quickcart-payments"
+      + force_delete         = true
+        id                   = "quickcart-payments"
+      ~ image_tag_mutability = "MUTABLE" -> "IMMUTABLE"
+        name                 = "quickcart-payments"
+        region               = "us-east-1"
+        registry_id          = "111122223333"
+        repository_url       = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-payments"
+      ~ tags                 = {
+          + "Project" = "quickcart"
+        }
+      ~ tags_all             = {
+          + "Project" = "quickcart"
+        }
+
+        encryption_configuration {
+            encryption_type = "AES256"
+            kms_key         = null
+        }
+
+        image_scanning_configuration {
+            scan_on_push = false
+        }
+    }
+
+Plan: 1 to import, 0 to add, 1 to change, 0 to destroy.
+```
+
+Your account number will be your own, and there may be a few more lines. Read the `~` lines: the repository made by hand is mutable and has no tags. The code wants immutable tags and the `Project` tag. That's QuickCart's standard, so the code is right here. Apply:
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | import the repository into the state, then bring it in line with the code |
+
+```output
+aws_ecr_repository.service["payments"]: Importing... [id=quickcart-payments]
+aws_ecr_repository.service["payments"]: Import complete [id=quickcart-payments]
+aws_ecr_repository.service["payments"]: Modifying... [id=quickcart-payments]
+aws_ecr_repository.service["payments"]: Modifications complete after 0s [id=quickcart-payments]
+
+Apply complete! Resources: 1 imported, 0 added, 1 changed, 0 destroyed.
+```
+
+Delete `import.tf`: its job is done. Run `terraform plan` once more and you should see `No changes. Your infrastructure matches the configuration.`
+
+<Mistake title="a typo in the import ID">
+
+```output title="The plan stops with"
+Error: Cannot import non-existent remote object
+
+While attempting to import an existing object to
+"aws_ecr_repository.service[\"payments\"]", the provider detected that no
+object exists with the given id. Only pre-existing objects can be imported;
+check that the id is correct and that it is associated with the provider's
+configured region or endpoint, or use "terraform apply" to create a new
+remote object for this resource.
+```
+
+**Why:** there's no repository with that exact name in that region. Usually it's a typo, like `quickcart-payment`, or the repository was made in a different region from the provider's.
+
+**The fix:** copy the name exactly from the console, and check the region at the top right of the console matches `us-east-1`.
+
+</Mistake>
+
+<Mistake title="writing the resource block without an import">
+
+```output title="The apply fails with a message like"
+Error: creating ECR Repository (quickcart-payments): operation error ECR: CreateRepository, RepositoryAlreadyExistsException: The repository with name 'quickcart-payments' already exists in the registry with id '111122223333'
+```
+
+**Why:** without an import, Terraform thinks the repository is new and tries to create it. AWS refuses, because the name is taken.
+
+**The fix:** add the import block, plan, and apply again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Check for provider upgrades">
+
+```sh
+terraform init -upgrade
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | prepare the folder |
+| `-upgrade` | look for the newest provider allowed by `~> 6.0`, instead of the version in the lock file |
+
+If there's nothing newer, you'll see:
+
+```output
+- Finding hashicorp/aws versions matching "~> 6.0"...
+- Using previously-installed hashicorp/aws v6.66.0
+```
+
+If there is, you'll see it installed, and a note that the lock file changed:
+
+```output
+- Finding hashicorp/aws versions matching "~> 6.0"...
+- Installing hashicorp/aws v6.67.0...
+- Installed hashicorp/aws v6.67.0 (signed by HashiCorp)
+
+Terraform has made some changes to the provider dependency selections recorded
+in the .terraform.lock.hcl file. Review those changes and commit them to your
+version control system if they represent changes you intended to make.
+```
+
+Your version numbers will be different. Either way, plan straight after:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | check the new provider sees everything the same way the old one did |
+
+```output
+No changes. Your infrastructure matches the configuration.
+```
+
+A clean plan means the upgrade is safe to commit. Any `~` here that nobody asked for comes from the upgrade, and is a reason to read the provider's changelog before going further.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Both repositories are now managed by Terraform, including the one you made by hand. So one command removes both:
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything in the state, and carry it out once you type `yes` |
+
+```output
+Destroy complete! Resources: 2 destroyed.
+```
+
+Check **ECR → Private registry → Repositories**. Neither `quickcart-orders` nor `quickcart-payments` should be listed.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command or block | What it does |
+|---|---|
+| `terraform plan` | Always shows drift: any `~` you didn't write is a question |
+| `terraform plan -refresh-only` | Show only what changed outside Terraform. Undo nothing |
+| `terraform plan -detailed-exitcode` | Exit 0 = no changes, 1 = error, 2 = changes. For nightly drift checks |
+| `import { to = ADDRESS, id = "ID" }` | Adopt something made by hand, through a reviewed plan |
+| `terraform plan -generate-config-out=generated.tf` | Draft resource blocks for your import blocks |
+| `moved { from = OLD, to = NEW }` | Rename or move a resource without destroying it |
+| `removed { from = ADDRESS }` with `destroy = false` | Stop managing a whole resource, and leave it in AWS |
+| `terraform state rm 'ADDRESS'` | Forget one instance. Changes state at once, so add `-dry-run` first |
+| `terraform state pull > state-backup.json` | Save a copy before any repair |
+| `-target=ADDRESS` | Emergencies only. Routine use means the state is too big |
+| `terraform init -upgrade` | Newest provider within your range. Plan, then commit `.terraform.lock.hcl` |
+
+</Cheat>
+
+</Part>

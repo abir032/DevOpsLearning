@@ -1,0 +1,136 @@
+---
+/*
+ * Feature flags: a percentage rollout and a kill switch.
+ * Teaches: a flag changes who sees a feature without a deploy, the same users
+ * stay in as the percentage grows, and the kill switch turns it off at once.
+ */
+/* 40 customers, each with a fixed bucket from 0 to 99, like a hash of their ID */
+const BUCKETS = Array.from({ length: 40 }, (_, i) => (i * 61 + 17) % 100);
+---
+<div class="viz" data-track="ship" data-viz="flags" data-buckets={JSON.stringify(BUCKETS)}>
+  <div class="viz-controls">
+    <span class="lbl" id="ff-lbl">new-checkout rollout</span>
+    <div class="seg" role="group" aria-labelledby="ff-lbl">
+      <button type="button" data-pct="0" aria-pressed="true">0%</button>
+      <button type="button" data-pct="10" aria-pressed="false">10%</button>
+      <button type="button" data-pct="50" aria-pressed="false">50%</button>
+      <button type="button" data-pct="100" aria-pressed="false">100%</button>
+    </div>
+    <span class="lbl" id="ff-bug">The new checkout</span>
+    <div class="seg" role="group" aria-labelledby="ff-bug">
+      <button type="button" data-bug="no" aria-pressed="true">Works</button>
+      <button type="button" data-bug="yes" aria-pressed="false">Has a bug</button>
+    </div>
+    <button class="btn line" type="button" data-act="kill" aria-pressed="false">Kill switch</button>
+  </div>
+  <div class="ff">
+    <div class="ff-stats">
+      <div><b data-n="seeing">0</b><span>of 40 customers see the new checkout</span></div>
+      <div><b data-n="errors">0</b><span>customers getting errors</span></div>
+      <div><b data-n="changes">0</b><span>flag changes</span></div>
+      <div><b>0</b><span>deploys needed</span></div>
+    </div>
+    <ul class="ff-users" aria-label="Customers" data-n="users">
+      {BUCKETS.map((b, i) => <li title={`Customer ${i + 1}, bucket ${b}`}><span>{i + 1}</span></li>)}
+    </ul>
+    <p class="ff-key"><span><i class="k-old"></i>Old checkout</span><span><i class="k-new"></i>New checkout</span><span><i class="k-err"></i>New checkout, getting errors</span></p>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Deployed, switched off</span>The new checkout's code is already on the servers, but the flag is at <b>0%</b>, so nobody sees it. Raise the rollout.</div>
+</div>
+
+<style is:global>
+  [data-viz="flags"] .ff { padding: 14px 16px 6px; }
+  [data-viz="flags"] .ff-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+  [data-viz="flags"] .ff-stats div { border: 1px solid var(--rule); border-radius: 9px; padding: 8px 10px; background: var(--bg); }
+  [data-viz="flags"] .ff-stats b { display: block; font-size: 26px; font-weight: 900; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  [data-viz="flags"] .ff-stats span { font-size: 12.5px; color: var(--ink-2); }
+  [data-viz="flags"] .ff-users { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(20, minmax(0, 1fr)); gap: 5px; }
+  [data-viz="flags"] .ff-users li { aspect-ratio: 1; border-radius: 50%; display: grid; place-items: center; background: var(--sunk); border: 2px solid var(--ink-3); color: var(--ink-2); font-size: 11px; font-weight: 800; transition: background .25s, border-color .25s; min-width: 0; }
+  [data-viz="flags"] .ff-users li.on { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+  [data-viz="flags"] .ff-users li.err { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+  [data-viz="flags"] .ff-key { font-size: 13px; color: var(--ink-2); margin: 10px 0 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
+  [data-viz="flags"] .ff-key span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  [data-viz="flags"] .ff-key i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 2px solid var(--ink-3); background: var(--sunk); }
+  [data-viz="flags"] .ff-key .k-new { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="flags"] .ff-key .k-err { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="flags"] [data-act="kill"][aria-pressed="true"] { background: var(--bad); border-color: var(--bad); color: var(--surface); }
+  @media (prefers-reduced-motion: reduce) { [data-viz="flags"] .ff-users li { transition: none; } }
+  @media (max-width: 700px) {
+    [data-viz="flags"] .ff-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    [data-viz="flags"] .ff-users { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+  }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="flags"]').forEach((root) => {
+    if (!once(root)) return;
+    const buckets: number[] = JSON.parse(root.dataset.buckets!);
+    const q = (n: string) => root.querySelector<HTMLElement>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const users = [...q("users").querySelectorAll("li")];
+    const pctBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-pct]")];
+    const bugBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-bug]")];
+    const kill = root.querySelector<HTMLButtonElement>('[data-act="kill"]')!;
+    let pct = 0;
+    let bug = false;
+    let killed = false;
+    let changes = 0;
+
+    /* returns [seeing, errors] */
+    function render(): [number, number] {
+      press(pctBtns, (b) => Number(b.dataset.pct) === pct);
+      press(bugBtns, (b) => (b.dataset.bug === "yes") === bug);
+      kill.setAttribute("aria-pressed", String(killed));
+      kill.textContent = killed ? "Kill switch is on" : "Kill switch";
+      let seeing = 0;
+      users.forEach((li, i) => {
+        const on = !killed && buckets[i] < pct;
+        if (on) seeing++;
+        li.className = on ? (bug ? "err" : "on") : "";
+      });
+      const errors = bug ? seeing : 0;
+      q("seeing").textContent = String(seeing);
+      q("errors").textContent = String(errors);
+      q("changes").textContent = String(changes);
+      return [seeing, errors];
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.pct) {
+        const before = pct;
+        pct = Number(b.dataset.pct);
+        if (pct !== before) changes++;
+        const [seeing, errors] = render();
+        if (killed) {
+          tell(say, `Rollout set to ${pct}%`, "The kill switch is still on, so nobody sees the new checkout, whatever the percentage. Turn the kill switch off to let the rollout apply.");
+        } else if (bug && errors) {
+          tell(say, `${pct}% rollout`, `<b>${errors} customers</b> are getting errors from the new checkout. Everyone else is fine on the old one. Use the <b>kill switch</b>.`, "bad");
+        } else {
+          tell(say, `${pct}% rollout`, pct === 0
+            ? "Nobody sees the new checkout. The code is still deployed; it's just switched off."
+            : `<b>${seeing} of 40</b> customers see the new checkout. ${pct > before && before > 0 ? "Everyone who had it before still has it: each customer's bucket stays the same, so a rollout only ever adds people." : "Each customer always lands in the same bucket, so they get the same answer every time they open the app."}`,
+            pct === 100 ? "good" : "");
+        }
+      } else if (b.dataset.bug) {
+        bug = b.dataset.bug === "yes";
+        const [, errors] = render();
+        tell(say, bug ? "A bug appears" : "Bug fixed", bug
+          ? (errors ? `Only the <b>${errors} customers</b> in the rollout are hit. The other ${40 - errors} never see the new code.` : "Nobody is hit, because nobody is in the rollout. Raise it to see who would be.")
+          : "The new checkout works again.", bug && errors ? "bad" : "");
+      } else if (b.dataset.act === "kill") {
+        const hadErrors = !killed && bug && buckets.some((x) => x < pct);
+        killed = !killed;
+        changes++;
+        const [seeing] = render();
+        tell(say, killed ? "Kill switch on" : "Kill switch off", killed
+          ? "The flag is <b>off for everyone</b>, on the very next request. No build, no deploy, no app store review." + (hadErrors ? " The errors stop." : "")
+          : `The flag is back on, at ${pct}%. ${seeing} customers see the new checkout again.`, killed ? "good" : "");
+      }
+    });
+  }));
+</script>

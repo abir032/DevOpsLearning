@@ -1,0 +1,355 @@
+---
+time: 25 minutes
+level: Beginner
+before: [what-the-cloud-is]
+cost: free
+quiz:
+  - q: QuickCart's two servers both run in us-east-1a. That zone loses power. What do customers see?
+    answer: 2
+    options:
+      - t: Nothing. AWS moves the servers to another zone automatically
+        why: AWS doesn't move your servers for you. A server lives in one zone and goes down with it, unless you've set up something to replace it elsewhere.
+      - t: Half their orders fail, because one server is still up
+        why: Both servers are in the same zone, so both go down together. There is no "other half".
+      - t: Every order fails until the zone comes back
+        why: With everything in one zone, losing that zone means losing everything. Two servers didn't help, because they shared one building's power and network.
+      - t: Orders are slower but still work
+        why: Slower would need some server somewhere to still be answering. Here none is.
+  - q: Which of these lives in exactly one availability zone?
+    answer: 0
+    options:
+      - t: A subnet
+        why: You pick the zone when you create a subnet, and it can never change. That's why a network that spans two zones needs at least two subnets.
+      - t: A VPC
+        why: A VPC covers every zone in its region. Its subnets are what tie things to single zones.
+      - t: An IAM role
+        why: IAM is global. A role works in every region, never mind every zone.
+      - t: An S3 bucket
+        why: A bucket belongs to a region, and S3 keeps copies of your files across several zones for you.
+  - q: You and a colleague in another AWS account both put a server in us-east-1a. Are they in the same building?
+    answer: 1
+    options:
+      - t: Yes, the name always means the same place
+        why: That's what people assume. In us-east-1 and other older regions, the names are shuffled per account.
+      - t: Not necessarily. Compare the zone IDs, such as use1-az2, to be sure
+        why: Zone names can point at different physical zones in different accounts. Zone IDs are the same for everyone, so they're what you compare.
+      - t: No, two accounts can never share a zone
+        why: They can, and often do. There are only six zones in us-east-1 and millions of accounts.
+      - t: Only if both accounts are in the same organisation
+        why: Organisations don't change how zone names map. Only the zone ID tells you.
+  - q: QuickCart runs in two zones. One fails. What else must be true for customers to notice nothing?
+    answer: 3
+    options:
+      - t: The database must be in a public subnet
+        why: Public or private has nothing to do with zones. The database should stay private either way.
+      - t: The failed zone must come back within a minute
+        why: If you need the zone back quickly, you're still depending on it. Two zones means you don't wait for it at all.
+      - t: Both zones must have the same name in every account
+        why: Names don't affect whether you stay up.
+      - t: The other zone must have enough servers to take all the traffic on its own
+        why: Right. Two zones only helps if the survivor can carry the full load. So you keep room to spare, or let auto scaling add servers quickly.
+  - q: Does running in two zones protect QuickCart if the whole us-east-1 region has a problem?
+    answer: 1
+    options:
+      - t: Yes, two zones is always enough
+        why: Zones protect you from one building failing. A problem across the region can reach all of its zones at once.
+      - t: No. That needs a copy in a second region, which is much more work
+        why: Right. Most teams start with two zones in one region. A second region comes later, when the business needs it. The Terraform module covers building one.
+      - t: Yes, if you use three zones instead of two
+        why: More zones in the same region still share the region's problems.
+      - t: No, and nothing can protect against it
+        why: Running a copy in another region protects you. It's just more work and more cost.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first outage">
+
+QuickCart now runs on AWS. Leo set up two servers behind a load balancer, so that if one crashed, the other would keep taking orders. It felt safe.
+
+One Friday evening, every order failed at once. Both servers had stopped answering. Neither had crashed. The building they were in had lost power.
+
+Leo had picked the same place for both servers, because it was the default choice on the form. **Two servers in one building is still one building.**
+
+</Story>
+
+<Case title="This really happens">
+
+In June 2012, violent storms cut power to part of AWS's Northern Virginia data centres. Several well-known apps that were running there went offline for hours.
+
+In February 2017, a mistyped command during routine maintenance took down S3 across the whole us-east-1 region for several hours. So many websites depended on it that large parts of the internet seemed broken that afternoon. AWS published a public summary afterwards.
+
+The first is the reason to run in two **zones**. The second is the reason some companies also run in two **regions**.
+
+</Case>
+
+So QuickCart needs to know two things: where AWS's computers physically are, and how to spread across them so that one building failing is a non-event.
+
+</Part>
+
+<Part id="idea">
+
+AWS isn't one giant computer in one place. It's many buildings, in many parts of the world, grouped in two levels: **regions** and **availability zones**.
+
+### A region is a part of the world
+
+A **region** is a separate area where AWS runs a complete copy of its services, such as Northern Virginia, Ireland or Tokyo. Each has a code:
+
+| Region code | Where it is |
+|---|---|
+| `us-east-1` | Northern Virginia, USA |
+| `eu-west-1` | Ireland |
+| `eu-central-1` | Frankfurt, Germany |
+| `ap-south-1` | Mumbai, India |
+| `ap-southeast-2` | Sydney, Australia |
+
+There are more than 30 regions, and AWS adds more every year. Regions are kept deliberately separate from each other, so a problem in one rarely spreads to another. Most things you create belong to one region and are invisible from the others.
+
+You choose a region for four reasons:
+
+| Reason | What it means for QuickCart |
+|---|---|
+| **Distance to customers** | A server in Virginia answers a customer in New York faster than one in Sydney |
+| **The law** | Some countries require certain data, such as customers' personal details, to stay inside them |
+| **Price** | The same server costs different amounts in different regions |
+| **Which services exist there** | New AWS services often arrive in `us-east-1` first |
+
+This course uses `us-east-1` everywhere. It's one of the cheapest regions, and it has every service.
+
+### An availability zone is a building, or a few
+
+Inside each region are several **availability zones**, usually called **zones** or **AZs**. A zone is one or more data centres with their own power, cooling and network. AWS keeps zones in the same region miles apart, so a fire, flood or power cut hits only one. They're also close enough (within about 100 km of each other) to be joined by fast private links. A server in one zone can talk to a server in another in a millisecond or two.
+
+`us-east-1` has six zones, named `us-east-1a` to `us-east-1f`.
+
+<Key>Anything that lives in one zone fails with that zone, so run everything that matters in at least two.</Key>
+
+### What lives where
+
+Every AWS resource is one of three kinds. You need to know which kind a resource is before you can spread it safely:
+
+| Scope | What it means | Examples |
+|---|---|---|
+| **Global** | The same everywhere; no region at all | IAM users and roles, Route 53 domain names |
+| **Regional** | Belongs to one region; AWS spreads it across zones for you | VPC, S3 bucket, load balancer (across the zones you pick) |
+| **Zonal** | Lives in exactly one zone; you spread it yourself | Subnet, EC2 server, a server's disk (EBS volume), NAT gateway |
+
+The zonal ones are where people get caught. A server is zonal, so two servers in one zone share its fate. Spreading them is your job.
+
+<Mistake title="attaching a disk from another zone">
+
+A disk (an EBS volume) is zonal. If you try to attach one to a server in a different zone, AWS refuses with a message like:
+
+```output title="The console shows"
+The volume 'vol-0abc1234' is not in the same availability zone as instance 'i-0def5678'
+```
+
+**Why:** the disk physically sits in one zone's building. The server is in another.
+
+**The fix:** create the disk in the server's zone. To move data between zones, take a snapshot, which is regional, and create a new disk from it in the other zone.
+
+</Mistake>
+
+### Spreading QuickCart across two zones
+
+For QuickCart, "two zones" means a matching set of everything zonal in each:
+
+| Piece | Zone a | Zone b |
+|---|---|---|
+| Subnets | `quickcart-public-a`, `quickcart-app-a` | `quickcart-public-b`, `quickcart-app-b` |
+| API servers | one or more | one or more |
+| Database | the main copy | a standby copy, ready to take over |
+| Load balancer | one load balancer, working in both zones at once | |
+
+When zone a fails, the load balancer notices that the servers there stopped answering its health checks and sends everything to zone b. The [load balancers lesson](/lessons/load-balancers/) shows how. The database switches to its standby, which the [RDS lesson](/lessons/rds/) covers.
+
+Two things make this work, and both cost something:
+
+| Requirement | Why | The cost |
+|---|---|---|
+| Each zone can carry all the traffic alone | Otherwise the surviving zone is overwhelmed and falls over too | Spare servers, or auto scaling that adds them quickly |
+| Data is copied between zones | So the standby database has every order | AWS charges for data moving between zones, about $0.01 per GB each way in us-east-1 (prices change) |
+
+### Zone names and zone IDs
+
+Here's a detail that confuses people. In `us-east-1` and other older regions, AWS **shuffles the zone names for each account**. Your `us-east-1a` might be a different building from someone else's `us-east-1a`. AWS did this so that everybody picking "a" didn't pile into the same building.
+
+Each zone also has a **zone ID**, like `use1-az2`, that means the same building for everyone:
+
+| | Example | Same building in every account? | Use it for |
+|---|---|---|---|
+| Zone name | `us-east-1a` | Not necessarily | Everyday work in your own account |
+| Zone ID | `use1-az2` | Yes | Lining up zones across accounts, such as when two teams share a network |
+
+You'll mostly use names. Reach for IDs whenever two AWS accounts need to agree on a zone.
+
+### Zones versus regions
+
+Two zones protects you against one building failing. That's by far the most common kind of trouble. It doesn't protect against a problem across a whole region, like the 2017 S3 outage. For that you'd run a second copy of QuickCart in another region. That's much more work, so most teams do it only when the business needs it. [Environments and regions](/lessons/environments-and-regions/) shows how Terraform makes it practical.
+
+</Part>
+
+<Part id="see">
+
+Below, on the left, are some of AWS's regions, with `us-east-1` circled. On the right is what's inside `us-east-1`: three of its zones, QuickCart's two servers, and the load balancer in front. **Send some orders. Then fail us-east-1a and send them again.** Then switch to **Two zones** and repeat. Try failing the other zones too, and two zones at once.
+
+<RegionGlobe />
+
+**What to notice:** in both setups QuickCart had two servers. The only difference was where they ran. Failing a zone that has nothing of yours in it changes nothing. Failing the zone that has everything takes QuickCart down.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">you only look around. Nothing in this lab creates anything.</Cost>
+
+You'll find the region selector, list the zones in `us-east-1` with their zone IDs, and see which things are global, regional and zonal. About 10 minutes. You need to be signed in to the AWS console.
+
+<Steps>
+
+<Step title="Find the region selector">
+
+Look at the top-right corner of the console, next to your account name. The region selector shows the name of the region you're working in, such as **N. Virginia**.
+
+Open it.
+
+<See>
+
+A list of regions, each with its name and code, such as **US East (N. Virginia) us-east-1** and **Europe (Ireland) eu-west-1**. Some near the bottom may be marked as not enabled. Newer regions are switched off until you opt in.
+
+</See>
+
+Choose **US East (N. Virginia) us-east-1**. Everything in this course happens there.
+
+</Step>
+
+<Step title="List the zones and their IDs">
+
+<ConsolePath path="EC2 > Dashboard" />
+
+Find the **Zones** table. It's in the dashboard's service health section.
+
+<See>
+
+Six rows, **us-east-1a** to **us-east-1f**, each with a **Zone ID** from `use1-az1` to `use1-az6`. Which name goes with which ID is specific to your account. Write down which ID your `us-east-1a` has. A colleague's may be different.
+
+</See>
+
+If the console layout has moved, look for any table with **Zone name** and **Zone ID** columns. In the EC2 console, **Settings > Zones** shows the same list.
+
+</Step>
+
+<Step title="See one subnet per zone">
+
+Every account comes with a **default VPC** in each region, and it has one subnet in each zone. That makes it an easy way to see zones in action.
+
+<ConsolePath path="VPC > Subnets" />
+
+<See>
+
+Six subnets belonging to the default VPC, one per zone. The **Availability Zone** column shows `us-east-1a` to `us-east-1f`.
+
+</See>
+
+If there's no **Availability Zone ID** column, choose the gear icon above the table, switch **Availability Zone ID** on, and choose **Confirm**. Each subnet now shows its zone ID as well. It matches the table from the last step.
+
+<Mistake title="everything seems to have disappeared">
+
+You open a page and your resources aren't there:
+
+```output title="The console shows something like"
+No subnets found in this Region
+```
+
+**Why:** the region selector has changed to another region. Almost everything is regional, so each region shows only its own resources. This is the most common "where did it go?" moment in AWS.
+
+**The fix:** check the region selector first. Switch back to **N. Virginia** and your resources reappear.
+
+</Mistake>
+
+</Step>
+
+<Step title="See that regions are separate">
+
+Open the region selector and choose **Europe (Ireland) eu-west-1**. Stay on **VPC > Subnets**.
+
+<See>
+
+A different set of default subnets, in zones named `eu-west-1a`, `eu-west-1b` and `eu-west-1c`, with IDs starting `euw1-`. Nothing from `us-east-1` appears here.
+
+</See>
+
+Switch the region back to **US East (N. Virginia) us-east-1**.
+
+</Step>
+
+<Step title="See what's global">
+
+<ConsolePath path="IAM > Dashboard" />
+
+Look at the region selector.
+
+<See>
+
+It says **Global** and you can't change it. Users and roles aren't in any region. A role works the same in `us-east-1`, `eu-west-1` and everywhere else.
+
+</See>
+
+</Step>
+
+<Step title="Find where AWS reports problems">
+
+Type `Health` into the search bar at the top of the console and open **AWS Health Dashboard**. Choose **Service health**. The wording of this menu changes from time to time.
+
+<See>
+
+A list of open and recent issues by service and region. When something odd is happening in one zone or region, AWS reports it here. Check it early during an incident, before assuming your own code is to blame.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+This lab didn't create anything, so there's nothing to delete.
+
+Check that the region selector shows **N. Virginia (us-east-1)** again, so the next lesson starts in the right place.
+
+<See>
+
+The region selector reads **N. Virginia**.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Region | A separate part of the world with its own copy of AWS, such as `us-east-1` |
+| Availability zone | One or more buildings in a region, with their own power and network |
+| Choosing a region | Distance to customers, the law, price, and which services it has |
+| Global | IAM, Route 53: no region |
+| Regional | VPC, S3 bucket, load balancer: spread across zones for you |
+| Zonal | Subnet, EC2 server, EBS disk, NAT gateway: you spread them yourself |
+| Two zones | Protects against one building failing. Each zone must carry the full load alone |
+| Two regions | Protects against a whole region failing. Much more work |
+| Zone name vs ID | `us-east-1a` can differ between accounts; `use1-az2` never does |
+| Resources vanished? | Check the region selector first |
+
+</Cheat>
+
+</Part>

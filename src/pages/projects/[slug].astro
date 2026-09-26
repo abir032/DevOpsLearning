@@ -1,0 +1,77 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import { MODULES, PROJECTS, PROJECTS_MODULE, href, projectHref, moduleHref } from "../../data/curriculum";
+import { lessonComponents } from "../../components/lesson";
+
+export function getStaticPaths() {
+  return PROJECTS.map((p) => ({ params: { slug: p.slug } }));
+}
+const { slug } = Astro.params;
+const p = PROJECTS.find((x) => x.slug === slug)!;
+const i = PROJECTS.indexOf(p);
+const prev = PROJECTS[i - 1];
+const next = PROJECTS[i + 1];
+const uses = p.uses.map((s) => MODULES.find((m) => m.slug === s)!);
+const entry = (await getCollection("projects")).find((e) => e.id === slug);
+const rendered = entry ? await render(entry) : null;
+const Content = rendered?.Content;
+const headings = rendered?.headings.filter((h) => h.depth === 2) ?? [];
+---
+<Base title={`Project ${p.n}: ${p.title}`} description={p.sum} current={{ module: PROJECTS_MODULE.slug, stop: p.slug }} track="proj">
+  <div class="page">
+    <div class:list={[{ "page-grid": !!Content }]}>
+      <article class="read" data-pagefind-body data-pagefind-meta="track:proj">
+        <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+          <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span>
+          <a href={href("/projects/")}>Projects</a><span class="sep" aria-hidden="true">/</span>
+          <span aria-current="page">Project {p.n}</span>
+        </nav>
+        <header class="lesson-head">
+          <h1>Project {p.n}: {p.title}</h1>
+          <p class="summary">{p.sum}</p>
+          {entry && (
+            <dl class="lesson-meta" data-pagefind-ignore>
+              <div><dt>Time</dt><dd>{entry.data.time}</dd></div>
+              <div><dt>Uses</dt><dd>{uses.map((m, n) => <>{n > 0 && ", "}<a href={moduleHref(m)}>{`${m.id} – ${m.title}`}</a></>)}</dd></div>
+            </dl>
+          )}
+        </header>
+        <div class="prose">
+          <div class="tbl"><table>
+            <tbody>
+              <tr><td>What you build</td><td>{p.builds}</td></tr>
+              <tr><td>What it proves</td><td>{p.proves}</td></tr>
+              {!entry && <tr><td>Modules it uses</td><td>{uses.map((m, n) => <>{n > 0 && ", "}<a href={moduleHref(m)}>{`${m.id} – ${m.title}`}</a></>)}</td></tr>}
+            </tbody>
+          </table></div>
+          {Content && <Content components={lessonComponents} />}
+        </div>
+        {Content ? (
+          <div class="done-bar" data-pagefind-ignore>
+            <p>Built it, and cleaned up? Mark it done.</p>
+            <button class="btn line" type="button" data-done-toggle={slug} aria-pressed="false">Mark as done</button>
+          </div>
+        ) : (
+          <div class="soon-box">
+            <h2>This project guide is being written</h2>
+            <p>It will be a step-by-step build in the same style as the lessons, with a cost badge, a diagram of what you'll have at the end, checkpoints with expected output, a troubleshooting section built from real mistakes, and a full clean-up.</p>
+          </div>
+        )}
+        <nav class="pager" aria-label="Previous and next project" data-pagefind-ignore>
+          {prev ? <a href={projectHref(prev.slug)}><small>Previous</small><b>Project {prev.n}: {prev.title}</b></a> : <span></span>}
+          {next && <a class="next" href={projectHref(next.slug)}><small>Next</small><b>Project {next.n}: {next.title}</b></a>}
+        </nav>
+      </article>
+      {Content && headings.length > 0 && (
+        <div class="toc-col" data-pagefind-ignore>
+          <nav class="toc" aria-label="On this page">
+            <div class="h">On this page</div>
+            <ol>{headings.map((h) => <li data-for={h.slug}><a href={`#${h.slug}`}>{h.text}</a></li>)}</ol>
+            <button class="btn line" type="button" data-done-toggle={slug} aria-pressed="false">Mark as done</button>
+          </nav>
+        </div>
+      )}
+    </div>
+  </div>
+</Base>

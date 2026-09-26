@@ -1,0 +1,90 @@
+---
+/*
+ * Environments and regions: one module, three folders.
+ * Teaches: dev, stg and a second region run identical code. Only the
+ * variables and the state key differ, and anything typed in for one region
+ * (like a zone name) breaks the moment the region changes.
+ */
+import { LABEL, matrixHtml, codeHtml, runHtml, envSay } from "../../scripts/tf-env-matrix";
+const say = envSay("dev", "lookup");
+---
+<div class="viz" data-track="code" data-viz="tf-env-matrix">
+  <div class="viz-controls">
+    <span class="lbl" id="em-env">Environment</span>
+    <div class="seg" role="group" aria-labelledby="em-env">
+      {(["dev", "stg", "eu"] as const).map((k, i) => <button type="button" data-env={k} aria-pressed={String(i === 0)}>{LABEL[k]}</button>)}
+    </div>
+    <span class="lbl" id="em-zones">Zone names in the module</span>
+    <div class="seg" role="group" aria-labelledby="em-zones">
+      <button type="button" data-zones="lookup" aria-pressed="true">Looked up</button>
+      <button type="button" data-zones="fixed" aria-pressed="false">Typed in</button>
+    </div>
+  </div>
+  <div class="em">
+    <div class="em-scroll" tabindex="0" role="region" aria-label="Settings per environment" set:html={matrixHtml("dev")} />
+    <div class="em-grid">
+      <pre class="plan-out em-code" tabindex="0" aria-label="The code every folder shares" set:html={codeHtml("lookup")} />
+      <pre class="plan-out em-run" tabindex="0" aria-label="terraform apply output" set:html={runHtml("dev", "lookup")} />
+    </div>
+  </div>
+  <div class={"viz-say" + (say.tone ? " " + say.tone : "")} aria-live="polite" set:html={say.html} />
+</div>
+
+<script>
+  import { matrixHtml, codeHtml, runHtml, envSay, type EnvKey, type Zones } from "../../scripts/tf-env-matrix";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-env-matrix"]').forEach((root) => {
+    if (!once(root)) return;
+    const table = root.querySelector<HTMLElement>(".em-scroll")!;
+    const code = root.querySelector<HTMLElement>(".em-code")!;
+    const run = root.querySelector<HTMLElement>(".em-run")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const envBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-env]")];
+    const zoneBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-zones]")];
+    let env: EnvKey = "dev";
+    let zones: Zones = "lookup";
+
+    function render() {
+      table.innerHTML = matrixHtml(env);
+      code.innerHTML = codeHtml(zones);
+      run.innerHTML = runHtml(env, zones);
+      const s = envSay(env, zones);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = s.html;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.env) { env = b.dataset.env as EnvKey; press(envBtns, (x) => x === b); }
+      else if (b.dataset.zones) { zones = b.dataset.zones as Zones; press(zoneBtns, (x) => x === b); }
+      else return;
+      render();
+    });
+  }));
+</script>
+
+<style is:global>
+  [data-viz="tf-env-matrix"] { container-type: inline-size; }
+  [data-viz="tf-env-matrix"] .em { padding: 14px 16px 0; }
+  [data-viz="tf-env-matrix"] .em-scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--bg); }
+  [data-viz="tf-env-matrix"] .em-table { width: 100%; border-collapse: collapse; margin: 0; font-size: 13.5px; }
+  [data-viz="tf-env-matrix"] .em-table caption { text-align: left; font-weight: 800; font-size: 14px; padding: 10px 12px 4px; }
+  [data-viz="tf-env-matrix"] .em-table th, [data-viz="tf-env-matrix"] .em-table td { padding: 7px 10px; border-top: 1px solid var(--rule); text-align: left; vertical-align: top; }
+  [data-viz="tf-env-matrix"] .em-table thead th { font-size: 13px; color: var(--ink-2); }
+  [data-viz="tf-env-matrix"] .em-table th[scope="row"] small { display: block; font-weight: 400; font-size: 12px; color: var(--ink-3); }
+  [data-viz="tf-env-matrix"] .em-table code { font-family: var(--mono); font-size: 12.5px; background: none; padding: 0; overflow-wrap: anywhere; }
+  [data-viz="tf-env-matrix"] .em-table .on { background: var(--surface); box-shadow: inset 2px 0 0 var(--code), inset -2px 0 0 var(--code); }
+  [data-viz="tf-env-matrix"] .em-table thead .on { color: var(--code-t); box-shadow: inset 2px 0 0 var(--code), inset -2px 0 0 var(--code), inset 0 2px 0 var(--code); }
+  [data-viz="tf-env-matrix"] .em-table .diff { background: var(--warn-bg); }
+  [data-viz="tf-env-matrix"] .em-table .diff code { color: var(--warn); font-weight: 700; }
+  [data-viz="tf-env-matrix"] .em-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+  [data-viz="tf-env-matrix"] .em-grid .plan-out { margin: 0 0 14px; overflow-x: auto; white-space: pre; font-size: 12.5px; }
+  [data-viz="tf-env-matrix"] .em-hl { color: #6FD39B; }
+  [data-viz="tf-env-matrix"] .em-bad { color: #F28B82; }
+  @container (max-width: 640px) {
+    [data-viz="tf-env-matrix"] .em-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  }
+</style>

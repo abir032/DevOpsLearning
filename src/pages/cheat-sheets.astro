@@ -1,0 +1,59 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../layouts/Base.astro";
+import { ORDER, href, lessonHref } from "../data/curriculum";
+import { lessonComponents } from "../components/lesson";
+import CheatOnlyPart from "../components/lesson/CheatOnlyPart.astro";
+
+const entries = await getCollection("lessons");
+const byId = new Map(entries.map((e) => [e.id, e]));
+const cards = await Promise.all(
+  ORDER.filter((l) => byId.has(l.slug)).map(async (l) => ({ l, Content: (await render(byId.get(l.slug)!)).Content })),
+);
+const soon = ORDER.length - cards.length;
+const components = { ...lessonComponents, Part: CheatOnlyPart };
+---
+<Base title="Cheat sheets" description="Every lesson's essentials on one card each. Print one or all of them." current={{ page: "cheat-sheets" }}>
+  <div class="page">
+    <div class="read" data-pagefind-body>
+      <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+        <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">Cheat sheets</span>
+      </nav>
+      <header class="mod-hero" data-track="start">
+        <h1>Cheat sheets</h1>
+        <p>Each lesson ends with its essentials on one card. They're all here, in course order. Print one card with its button, or print this page for all of them.</p>
+      </header>
+      <div class="cheat-list">
+        {cards.map(({ l, Content }) => (
+          <section data-track={l.module.track} aria-labelledby={`cs-${l.slug}`}>
+            <h2 class="section-title" id={`cs-${l.slug}`}><a href={lessonHref(l.slug)} style="text-decoration:none">{l.title}</a></h2>
+            <p class="section-sub" style="margin-bottom:12px">{`${l.module.id} – ${l.module.title}`}</p>
+            <div class="prose"><Content components={components} /></div>
+          </section>
+        ))}
+      </div>
+      {soon > 0 && <p class="section-sub" style="margin-top:28px">{soon} more cards will appear here as their lessons are written.</p>}
+    </div>
+  </div>
+</Base>
+<style>
+  /* On this page the print button prints just that card. */
+  :global(body.print-one) section:not(.printing) { display: none; }
+</style>
+<script>
+  document.addEventListener("click", (e) => {
+    /* This listener outlives the page under the client-side router. */
+    if (!document.querySelector(".cheat-list")) return;
+    const b = (e.target as HTMLElement).closest(".cheat-h .print");
+    if (!b) return;
+    e.stopImmediatePropagation();
+    const sec = b.closest("section")!;
+    sec.classList.add("printing");
+    document.body.classList.add("print-one");
+    window.print();
+  }, true);
+  window.addEventListener("afterprint", () => {
+    document.body.classList.remove("print-one");
+    document.querySelectorAll(".printing").forEach((s) => s.classList.remove("printing"));
+  });
+</script>

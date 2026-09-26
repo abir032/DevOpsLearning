@@ -1,0 +1,466 @@
+---
+time: 35 minutes
+level: Intermediate
+before: [security-groups, load-balancers, logs-and-metrics]
+cost: free
+quiz:
+  - q: A request to the API hangs for 30 seconds, then fails with "Timeout was reached". Where do you look first?
+    answer: 2
+    options:
+      - t: The app's code, for a slow loop
+        why: If the app were slow, the connection would have opened and then waited for an answer. "Failed to connect" with a timeout means the connection never opened at all.
+      - t: The database's slow query log
+        why: The request never got as far as the app, so it never reached the database.
+      - t: Security groups, route tables and network ACLs along the path
+        why: A timeout means nothing answered — not even a refusal. Something on the way dropped the packets, and firewalls and routes are what drop packets.
+      - t: The client's app version
+        why: The client did its job. It sent the request, and nothing came back.
+  - q: curl says "Couldn't connect to server" instantly, and curl -v shows "Connection refused". What does that tell you?
+    answer: 0
+    options:
+      - t: The machine was reached, but nothing is listening on that port
+        why: A refusal is an answer. The network delivered the request; the machine said nothing is here. Check the process is running and on the right port.
+      - t: A security group is blocking the port
+        why: Security groups drop traffic silently, so a block looks like a timeout, not a refusal.
+      - t: The app has a bug in the checkout code
+        why: The request never reached the app's code. There was no app listening to run it.
+      - t: The DNS name is wrong
+        why: A wrong name fails earlier, with "Could not resolve host".
+  - q: The load balancer returns 503 to every request. What is the most likely cause?
+    answer: 3
+    options:
+      - t: The client sent a bad request
+        why: That would be a 4xx. 5xx means the problem is on the server side.
+      - t: The load balancer's security group blocks port 443
+        why: Then the request would never reach the load balancer, and the client would time out instead of getting any response.
+      - t: The database is slow
+        why: A slow database makes the app slow or return 500s. 503 from the load balancer is about targets.
+      - t: The target group has no healthy targets
+        why: The load balancer is up and answering, but has nobody healthy to send the request to. Look at Target group → Targets and the health reason for each.
+  - q: New servers boot, fail their health checks and get replaced in a loop. You can't open a shell on them. What do you read?
+    answer: 1
+    options:
+      - t: Nothing — terminate the auto scaling group and start again
+        why: The same launch template would produce the same failure.
+      - t: The instance's system log, from Actions → Monitor and troubleshoot → Get system log
+        why: The system log is the server's boot output, fetched by AWS without any network access to the server. It shows what the boot script did and where it hung.
+      - t: CloudTrail event history
+        why: CloudTrail shows who changed what in AWS. It doesn't show what happened inside the server as it booted.
+      - t: The load balancer's access logs
+        why: They show requests that reached the load balancer. The problem is that the server never became healthy enough to get any.
+  - q: The site was fine an hour ago. Now half the requests fail. Which question should you ask early?
+    answer: 2
+    options:
+      - t: Which programming language the service is written in
+        why: That doesn't help you find what's different now.
+      - t: Whether the servers need more memory
+        why: Maybe, but guessing a fix before knowing the cause wastes time.
+      - t: What changed in the last hour — deploys, and write events in CloudTrail
+        why: Most incidents follow a change. The deploy history and CloudTrail filtered to Read only = false show every change with a time and a name.
+      - t: Who is on call next week
+        why: It's this week's problem.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, 3am">
+
+Kofi was on call when checkout started failing. He opened the orders service's code, because that's what he knew best. He read the checkout function twice. He added more logging and deployed it. He restarted the servers. Forty minutes passed.
+
+Then Ana joined the call and asked one question: "What does the app actually get back?" The answer was a timeout — not an error from the code, just silence. That pointed straight at the network. Five minutes later they found it: a security group rule for the database had been removed that evening.
+
+The code had never been the problem. The symptom had said so from the start.
+
+</Story>
+
+<Case>
+
+On 4 October 2021, Facebook, Instagram and WhatsApp disappeared for about six hours. Facebook's own write-up explained that a command run during routine maintenance of its backbone network cut the connections between its data centres. Its DNS servers then stopped advertising themselves to the internet, so requests for its sites had nowhere to go.
+
+From the outside, everything simply timed out. Nothing in the apps' code was wrong. And because Facebook's internal tools ran on the same network, engineers struggled to reach the systems they needed to fix it.
+
+</Case>
+
+When something breaks, the first job isn't to fix it. It's to find out **which layer** is broken — and the symptom usually tells you, if you read it exactly.
+
+</Part>
+
+<Part id="idea">
+
+A request passes through several layers: DNS, the network, the load balancer, the server, the app, and the app's dependencies. Each layer fails in its own way. So the exact thing the client sees tells you where to start.
+
+<YouKnow title="You already know this: handling network errors in an app">
+
+Your app already treats these differently. A timeout shows "check your connection". A 401 sends the user to log in again. A 500 shows "something went wrong on our side". The same distinctions tell you where to look on the server.
+
+</YouKnow>
+
+<Key>Timed out means the network. Refused means nothing is listening. 5xx means the server side. 4xx means the request.</Key>
+
+### The four symptoms
+
+| Symptom | What happened | Look first at |
+|---|---|---|
+| **Timed out**, while connecting | Nothing answered — not even "no". Something dropped the packets | Security groups, route tables, network ACLs, the address itself |
+| **Connection refused** | The machine was reached and said "nothing is listening here" | Is the app running? On the right port? Listening on the right address? |
+| **5xx** | The server side received the request and failed | Load balancer target health, app logs, the app's dependencies |
+| **4xx** | The server says the request was wrong | The path, the login, the input. Restarting servers won't fix it |
+
+This is what each looks like from `curl`, the command-line tool for making requests:
+
+```output title="Timed out: nothing answered"
+curl: (28) Failed to connect to 10.0.11.24 port 8080 after 75004 ms: Timeout was reached
+```
+
+```output title="Refused: reached, but nothing listening"
+curl: (7) Failed to connect to 10.0.11.24 port 8080 after 2 ms: Couldn't connect to server
+```
+
+Newer versions of curl say "Couldn't connect to server" for a refusal; add `-v` to see the words `Connection refused`. Notice the times, too: a timeout takes seconds or minutes; a refusal comes back almost instantly.
+
+There's one more kind of timeout. If the connection opens but the app never answers, curl says:
+
+```output title="Connected, but no answer"
+curl: (28) Operation timed out after 5006 milliseconds with 0 bytes received
+```
+
+Here the network worked. The app, or something the app is waiting on, is stuck. That's a job for the logs, not the security groups.
+
+### What the load balancer's 5xx codes mean
+
+When the load balancer answers with a 5xx, the number tells you what went wrong between it and your servers:
+
+| Code | Means | Look at |
+|---|---|---|
+| **502** Bad Gateway | A server answered, but badly: it closed the connection or sent something that isn't valid HTTP | App crashes and restarts; the target group expecting HTTP when the app speaks HTTPS, or the other way round |
+| **503** Service Unavailable | There's no healthy server to send the request to | Target group → Targets |
+| **504** Gateway Timeout | A server didn't answer in time | The app's security group; a slow app or a slow dependency |
+| **500** Internal Server Error | Usually from your app itself, passed through | The app's logs |
+
+### The places to look, and how to get there
+
+**Target health.** The load balancer checks every server and says why it's unhappy with each one.
+
+<ConsolePath path="EC2 > Load Balancing > Target Groups > your target group > Targets" />
+
+| Health reason | Means |
+|---|---|
+| `Target.Timeout` | The health check got no answer. Almost always a security group: the app's group must allow the load balancer's group on the app's port |
+| `Target.ResponseCodeMismatch` | The app answered, with the wrong status code: often the wrong health check path, returning 404 |
+| `Target.FailedHealthChecks` | The checks are failing: the app may be down, or refusing connections |
+| `Elb.InitialHealthChecking` | Still being checked for the first time. Wait |
+| `Target.NotInUse` | The target's zone isn't enabled on the load balancer |
+
+**Recent changes.** Most incidents follow a change. Check the last deploys, then ask CloudTrail for every change in the last hour.
+
+<ConsolePath path="CloudTrail > Event history" />
+
+Filter with **Read only** set to `false`. [Who changed what](/lessons/cloudtrail/) shows how.
+
+**Logs.** In Logs Insights, the first query shows the shape of the problem: when it started, when it stopped, how bad it is.
+
+```sql title="Logs Insights query"
+filter level = "ERROR"
+| stats count() as errors by bin(1m), error_type
+```
+
+| Part | What it means |
+|---|---|
+| `filter level = "ERROR"` | only the error lines |
+| `\| stats count() as errors` | count them |
+| `by bin(1m), error_type` | per minute, and per kind of error |
+
+**Metrics.** On the load balancer's **Monitoring** tab: are 5xx rising? Is response time up? Is it all servers or one? [Logs and metrics](/lessons/logs-and-metrics/) explains which statistic to read.
+
+**A server that won't boot.** If it never becomes healthy, you often can't open a shell on it either, because whatever broke the app broke that too. AWS can fetch the server's boot output for you, without any network access to it:
+
+<ConsolePath path="EC2 > Instances > the instance > Actions > Monitor and troubleshoot > Get system log" />
+
+It shows what the boot script printed and where it stopped. **Get instance screenshot**, in the same menu, shows the server's screen.
+
+### Network ACLs: the other firewall
+
+Security groups are the firewall you'll use most, but each subnet also has a **network ACL**. The default one allows everything, so most people never touch it. If someone has changed it, it can cause timeouts that the security groups can't explain.
+
+| | Security group | Network ACL |
+|---|---|---|
+| Applies to | One resource, such as a server or a load balancer | A whole subnet |
+| Remembers connections | Yes: if a request is allowed in, its reply is allowed out | No: the reply needs its own rule, both ways |
+| Can say "deny" | No, only "allow" | Yes |
+| Default | Nothing in; everything out | Everything in and out |
+
+### The checklist
+
+Work down it in order. Most problems are found by step 4.
+
+| # | Ask | Where |
+|---|---|---|
+| 1 | What exactly does the client see? Timeout, refused, which status code? | `curl -v`, the app's error, the load balancer's metrics |
+| 2 | Everyone, or some? One server, one zone, one route? | Logs grouped by `instance_id`; target health per server |
+| 3 | What changed recently? | Deploy history; CloudTrail with Read only = false |
+| 4 | Is the load balancer happy with the servers? | Target group → Targets, and each health reason |
+| 5 | What do the app's logs say? | Logs Insights: errors per minute, then by `error_type` |
+| 6 | Are the dependencies healthy? | Database metrics and connections; other services' alarms |
+| 7 | Is the network path open, end to end? | Security groups, route tables, network ACLs, in the order the request travels |
+
+<Mistake title="the app only listens on 127.0.0.1">
+
+The app works when you test it on the server itself, but the load balancer can't reach it, and from another server:
+
+```output title="curl from another server prints"
+curl: (7) Failed to connect to 10.0.11.24 port 8080 after 1 ms: Couldn't connect to server
+```
+
+**Why:** `127.0.0.1` means "this machine only". An app listening there accepts connections from the same server and refuses everything else. It's the default for many development servers.
+
+**The fix:** make the app listen on `0.0.0.0`, which means every address the server has. For example, `gunicorn -b 0.0.0.0:8080 app:app` instead of `-b 127.0.0.1:8080`.
+
+</Mistake>
+
+</Part>
+
+<Part id="see">
+
+Pick the symptom, answer the follow-up question, and see where it leads. Try every path: they're the most common ways a web service breaks.
+
+<TriageTree />
+
+**What to notice:** the first choice — timeout, refused, 5xx or 4xx — already rules out most of the system. You never start by reading code. You start by reading the symptom exactly.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything runs on your own Mac.</Cost>
+
+You'll make each symptom happen on purpose, on your own machine, so you know them on sight. This lab reproduces the symptoms locally with a tiny web server; the same messages appear, with the same meanings, when the server is in AWS. About 15 minutes.
+
+You need `python3` and `curl`, which come with macOS. You'll use **two terminal windows**.
+
+<Steps>
+
+<Step title="Make an empty folder and start a web server">
+
+In **window 1**:
+
+```sh
+mkdir quickcart-triage
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-triage` | its name |
+
+```sh
+cd quickcart-triage
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | move into a directory |
+| `quickcart-triage` | the empty folder you just made, so the server has nothing to share |
+
+```sh
+python3 -m http.server 8080 --bind 127.0.0.1
+```
+
+| Part | What it means |
+|---|---|
+| `python3 -m http.server` | run Python's built-in web server, which serves the files in this folder |
+| `8080` | listen on port 8080 |
+| `--bind 127.0.0.1` | only accept connections from this Mac |
+
+```output
+Serving HTTP on 127.0.0.1 port 8080 (http://127.0.0.1:8080/) ...
+```
+
+Leave it running. It prints a line for each request it receives.
+
+</Step>
+
+<Step title="A healthy request">
+
+In **window 2**:
+
+```sh
+curl -i http://127.0.0.1:8080/
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request |
+| `-i` | also show the response's status line and headers |
+| `http://127.0.0.1:8080/` | this Mac, port 8080, the top page |
+
+```output title="The first lines"
+HTTP/1.0 200 OK
+Server: SimpleHTTP/0.6 Python/3.12.0
+```
+
+Your Python version may differ. Below that is a short HTML page. **200**: everything worked.
+
+</Step>
+
+<Step title="A 4xx: the request was wrong">
+
+```sh
+curl -i http://127.0.0.1:8080/checkout
+```
+
+| Part | What it means |
+|---|---|
+| `curl -i` | make a request and show the status line |
+| `http://127.0.0.1:8080/checkout` | a path that doesn't exist on this server |
+
+```output title="The first line"
+HTTP/1.0 404 File not found
+```
+
+The server is fine. It answered quickly and said the request asked for something that isn't there. Restarting it would change nothing. In window 1, the server's own log says the same: `code 404, message File not found`.
+
+</Step>
+
+<Step title="A 5xx: the server side failed">
+
+```sh
+curl -i -X POST http://127.0.0.1:8080/
+```
+
+| Part | What it means |
+|---|---|
+| `curl -i` | make a request and show the status line |
+| `-X POST` | use the POST method, like submitting a form. This little server can't handle it |
+| `http://127.0.0.1:8080/` | the top page |
+
+```output title="The first line"
+HTTP/1.0 501 Unsupported method ('POST')
+```
+
+A 5xx: the request reached the server, and the server couldn't do it. For a real app, this is when you read its logs, which is exactly what window 1 now shows: `code 501, message Unsupported method ('POST')`.
+
+</Step>
+
+<Step title="Refused: nothing is listening">
+
+In **window 1**, stop the server with **Control+C**. Then in **window 2**:
+
+```sh
+curl -v http://127.0.0.1:8080/
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request |
+| `-v` | verbose: show each step of the connection, including why it failed |
+| `http://127.0.0.1:8080/` | the same address as before |
+
+```output title="Among the lines it prints"
+* connect to 127.0.0.1 port 8080 from 127.0.0.1 port 59283 failed: Connection refused
+* Failed to connect to 127.0.0.1 port 8080 after 0 ms: Couldn't connect to server
+curl: (7) Failed to connect to 127.0.0.1 port 8080 after 0 ms: Couldn't connect to server
+```
+
+Your port numbers will differ. **0 ms**: the Mac answered at once that nothing is on port 8080. The network is fine. The process is gone.
+
+</Step>
+
+<Step title="Timed out: nothing answers at all">
+
+```sh
+curl --connect-timeout 5 http://10.255.255.1:8080/
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request |
+| `--connect-timeout 5` | give up if the connection hasn't opened after 5 seconds, instead of waiting a minute or more |
+| `http://10.255.255.1:8080/` | a private address that nothing on a normal home or office network uses, so nothing will answer |
+
+```output
+curl: (28) Failed to connect to 10.255.255.1 port 8080 after 5006 ms: Timeout was reached
+```
+
+**5006 ms**: curl waited the whole five seconds and heard nothing — not even a refusal. This is what a security group dropping traffic looks like from outside. On some networks you may see `No route to host` instead; that's also the network.
+
+</Step>
+
+<Step title="Match each symptom to its layer">
+
+Without looking back, fill in the right-hand column on paper, then check against [the idea](#idea):
+
+| What you saw | Layer to check first |
+|---|---|
+| `404 File not found`, instantly | |
+| `501`, instantly, and the server logged it | |
+| `Couldn't connect`, `Connection refused`, 0 ms | |
+| `Timeout was reached` after 5,006 ms | |
+
+<See>
+
+The request itself; the app and its logs; the process and its port; the network path: security groups, routes and network ACLs.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+The server is already stopped. Remove the empty folder from window 1:
+
+```sh
+cd ..
+```
+
+| Part | What it means |
+|---|---|
+| `cd ..` | move up one folder, out of `quickcart-triage` |
+
+```sh
+rmdir quickcart-triage
+```
+
+| Part | What it means |
+|---|---|
+| `rmdir` | remove a directory, which only works if it's empty |
+| `quickcart-triage` | the folder you made |
+
+<See>
+
+No output. Nothing is left running, and nothing was created in AWS.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Symptom or place | What it means, or where it is |
+|---|---|
+| Timed out while connecting | The network dropped it: security groups, routes, network ACLs |
+| Connection refused, instantly | Reached the machine; nothing listening on that port |
+| Connected, then timed out with 0 bytes | The app, or something it waits on, is stuck |
+| 502 / 503 / 504 from the load balancer | Bad answer / no healthy targets / target too slow |
+| 500 | The app failed. Read its logs |
+| 4xx | The request was wrong. Don't restart anything |
+| `Target.Timeout` | Health check never answered. Check the app's security group |
+| What changed? | Deploys, and CloudTrail with Read only = false |
+| Won't boot? | Actions → Monitor and troubleshoot → Get system log |
+| `127.0.0.1` vs `0.0.0.0` | This machine only vs every address |
+| `curl -v` | Shows each step of a connection, and why it failed |
+
+</Cheat>
+
+</Part>

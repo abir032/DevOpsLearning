@@ -1,0 +1,175 @@
+---
+/*
+ * DNS: the journey of one lookup.
+ * Teaches: each DNS server only knows who to ask next, and the name servers
+ * set at the registrar decide whether your Route 53 records are ever read.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="dns-journey">
+  <div class="viz-controls">
+    <span class="lbl" id="dj-lbl">Name servers set at the registrar</span>
+    <div class="seg" role="group" aria-labelledby="dj-lbl">
+      <button type="button" data-ns="r53" aria-pressed="true">Route 53's</button>
+      <button type="button" data-ns="reg" aria-pressed="false">Still the registrar's</button>
+    </div>
+    <button class="btn line" type="button" data-act="go">Open example.com</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole journey</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 380" role="img" aria-labelledby="dj-title">
+      <title id="dj-title">A DNS lookup. A customer's phone asks a DNS resolver. The resolver asks, in turn, the root servers, the .com servers, and then whichever name servers the .com servers point to: Route 53's, or the registrar's. The answer leads the phone to QuickCart's load balancer.</title>
+      <path class="vz-wire" d="M150 182 L230 182" />
+      <path class="vz-wire" d="M380 182 L520 44" /><path class="vz-wire" d="M380 182 L520 112" />
+      <path class="vz-wire" d="M380 182 L520 180" /><path class="vz-wire" d="M380 182 L520 248" />
+      <path class="vz-wire" d="M85 214 L85 328 L520 328" />
+
+      <rect data-n="phone" class="vz-node" x="20" y="150" width="130" height="64" rx="10" />
+      <text class="vz-t" x="85" y="178" text-anchor="middle">Customer's phone</text>
+      <text class="vz-s" x="85" y="196" text-anchor="middle">opens example.com</text>
+
+      <rect data-n="res" class="vz-node" x="230" y="150" width="150" height="64" rx="10" />
+      <text class="vz-t" x="305" y="178" text-anchor="middle">DNS resolver</text>
+      <text class="vz-s" x="305" y="196" text-anchor="middle">run by the network</text>
+
+      <rect data-n="root" class="vz-node" x="520" y="18" width="240" height="52" rx="9" />
+      <text class="vz-t" x="536" y="40">Root servers</text>
+      <text class="vz-s" x="536" y="57">know who runs .com</text>
+
+      <rect data-n="tld" class="vz-node" x="520" y="86" width="240" height="52" rx="9" />
+      <text class="vz-t" x="536" y="108">.com servers</text>
+      <text class="vz-s" x="536" y="125">know each domain's name servers</text>
+
+      <rect data-n="r53" class="vz-node" x="520" y="154" width="240" height="52" rx="9" />
+      <text class="vz-t" x="536" y="176">Route 53 name servers</text>
+      <text class="vz-s" x="536" y="193">your hosted zone and its records</text>
+
+      <rect data-n="reg" class="vz-node" x="520" y="222" width="240" height="52" rx="9" />
+      <text class="vz-t" x="536" y="244">Registrar's name servers</text>
+      <text class="vz-s" x="536" y="261">the registrar's defaults</text>
+
+      <rect data-n="lb" class="vz-node" x="520" y="300" width="240" height="56" rx="9" />
+      <text class="vz-t" x="536" y="323">Load balancer</text>
+      <text class="vz-s" x="536" y="341">QuickCart's front door, 203.0.113.10</text>
+
+      <text data-n="note" class="vz-r" x="240" y="245"></text>
+      <circle data-n="dot" class="vz-dot" r="8" cx="150" cy="182" opacity="0" />
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Choose <b>Open example.com</b> to follow the lookup from the phone.</div>
+</div>
+
+<style is:global>
+  [data-viz="dns-journey"] .vz-node.skip { stroke-dasharray: 5 4; }
+  [data-viz="dns-journey"] .vz-r.bad { fill: var(--bad); }
+</style>
+
+<script>
+  import { beat, moveDot, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Pt = [number, number];
+  const RES: Pt = [380, 182];
+  const AT: Record<string, Pt> = { root: [520, 44], tld: [520, 112], r53: [520, 180], reg: [520, 248] };
+
+  onPage(() => {
+    const stops: Array<() => void> = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="dns-journey"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const dot = q<SVGCircleElement>("dot");
+      const note = q<SVGTextElement>("note");
+      const nodes = ["phone", "res", "root", "tld", "r53", "reg", "lb"].map((n) => q<SVGRectElement>(n));
+      const [phone, res, rootN, tld, r53, reg, lb] = nodes;
+      const nsBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-ns]")];
+      let ns: "r53" | "reg" = "r53";
+      let run = 0;
+      stops.push(() => run++);
+
+      function clear() {
+        nodes.forEach((n) => n.classList.remove("lit", "hit", "okk", "skip"));
+        dot.setAttribute("opacity", "0");
+        dot.setAttribute("class", "vz-dot");
+        note.textContent = "";
+      }
+      function busy(on: boolean) {
+        root.querySelectorAll<HTMLButtonElement>("[data-act=go],[data-ns]").forEach((b) => (b.disabled = on));
+      }
+      /* The resolver goes out to a server and comes back with its answer. */
+      async function ask(to: string) {
+        await moveDot(dot, [RES, AT[to]]);
+        await beat(250);
+        dot.setAttribute("class", "vz-dot back");
+        await moveDot(dot, [AT[to], RES]);
+        dot.setAttribute("class", "vz-dot");
+      }
+
+      async function go() {
+        const me = ++run; busy(true); clear();
+        const live = () => me === run;
+        phone.classList.add("lit");
+        tell(say, "Step 1 of 6", "The phone asks its <b>DNS resolver</b>: what is the address of <code>example.com</code>? The resolver has no answer saved, so it goes looking.");
+        await moveDot(dot, [[150, 182], [230, 182]]); if (!live()) return;
+        res.classList.add("lit");
+        await beat(500); if (!live()) return;
+
+        rootN.classList.add("lit");
+        tell(say, "Step 2 of 6", "It asks a <b>root server</b>. Root doesn't know <code>example.com</code>. It only knows which servers run <code>.com</code>, and says: ask them.");
+        await ask("root"); if (!live()) return;
+        await beat(600); if (!live()) return;
+
+        tld.classList.add("lit");
+        tell(say, "Step 3 of 6", ns === "r53"
+          ? "The <b>.com servers</b> don't know the address either. They know which <b>name servers</b> are in charge of <code>example.com</code>, because the registrar told them. They say: ask Route 53."
+          : "The <b>.com servers</b> know which name servers are in charge of <code>example.com</code>. But the registrar still lists <b>its own</b> name servers, so that's where they send the resolver.");
+        await ask(ns); if (!live()) return;
+
+        if (ns === "r53") {
+          r53.classList.add("okk");
+          tell(say, "Step 4 of 6", "<b>Route 53</b> looks in QuickCart's hosted zone. The <b>alias record</b> for <code>example.com</code> points at the load balancer, so Route 53 answers with the load balancer's current address.");
+          note.setAttribute("class", "vz-r"); note.textContent = "example.com → 203.0.113.10";
+        } else {
+          reg.classList.add("hit"); r53.classList.add("skip");
+          tell(say, "Step 4 of 6: wrong place", "The <b>registrar's name servers</b> have never seen your Route 53 records. They answer with their own default, usually a parking page, or with nothing at all. <b>Route 53 is never asked.</b>", "bad");
+          note.setAttribute("class", "vz-r bad"); note.textContent = "example.com → parking page";
+        }
+        await beat(900); if (!live()) return;
+
+        tell(say, "Step 5 of 6", "The resolver hands the answer to the phone, and <b>saves it</b> for as long as the record's TTL says. The next customer on this network gets the answer straight away.");
+        dot.setAttribute("class", "vz-dot back");
+        await moveDot(dot, [[230, 182], [150, 182]]); if (!live()) return;
+        dot.setAttribute("class", "vz-dot");
+        await beat(500); if (!live()) return;
+
+        if (ns === "r53") {
+          await moveDot(dot, [[85, 214], [85, 328], [520, 328]]); if (!live()) return;
+          lb.classList.add("okk"); phone.classList.replace("lit", "okk");
+          tell(say, "Step 6 of 6: connected", "The phone connects to the <b>load balancer</b>. Four servers were asked, and each one only knew who to ask next. Only the last one — yours — knew the answer.", "good");
+        } else {
+          phone.classList.replace("lit", "hit");
+          tell(say, "Step 6 of 6: never arrives", "The phone shows a parking page, or \"server not found\". Your hosted zone is perfect and <b>nobody reads it</b>. The fix is at the registrar: replace its name servers with the four listed in your hosted zone's NS record.", "bad");
+        }
+        busy(false);
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.ns) {
+          ns = b.dataset.ns as typeof ns;
+          press(nsBtns, (x) => x === b);
+          clear();
+          tell(say, ns === "r53" ? "Registrar points to Route 53" : "Registrar still uses its own", ns === "r53"
+            ? "The registrar lists <b>Route 53's four name servers</b> for <code>example.com</code>. Try the lookup."
+            : "You created a hosted zone in Route 53, but never changed the name servers at the registrar. <b>Nothing else is different.</b> Try the lookup.");
+        } else if (b.dataset.act === "go") go();
+        else if (b.dataset.act === "reset") {
+          run++; busy(false); clear();
+          tell(say, "Ready", "Choose <b>Open example.com</b> to follow the lookup from the phone.");
+        }
+      });
+    });
+    return () => stops.forEach((f) => f());
+  });
+</script>

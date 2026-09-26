@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.astro/
+test-results/
+playwright-report/
+.cache/
+
+# Original course notes: contain personal data. Never publish.
+source/
+forbidden-strings.local.json

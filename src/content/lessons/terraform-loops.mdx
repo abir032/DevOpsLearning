@@ -1,0 +1,870 @@
+---
+time: 50 minutes
+level: Intermediate
+before: [terraform-variables]
+cost: free
+quiz:
+  - q: Queues are built with count from ["orders", "payments", "emails"]. Leo removes "payments". What does the plan do to the emails queue?
+    answer: 2
+    options:
+      - t: Nothing — only payments is affected
+        why: That's what for_each would do. count tracks by position, and emails' position changes.
+      - t: Renames it in place
+        why: A queue's name can't be changed in place. Changing it forces a replacement.
+      - t: Destroys the real emails queue, and replaces position 1 with a new, empty emails queue
+        why: Position 1 was payments and now says emails, so it's replaced. Position 2 no longer exists, so the real emails queue there is destroyed. Everything waiting in it is lost.
+      - t: Moves it from position 2 to position 1 without touching it
+        why: Terraform doesn't know items moved. It only compares what each position holds before and after.
+  - q: Why doesn't for_each have count's problem?
+    answer: 1
+    options:
+      - t: for_each runs faster
+        why: Speed has nothing to do with it.
+      - t: Each copy is tracked by its key, like ["emails"], so removing one key doesn't change any other copy's address
+        why: The address is the name, not a position. Removing payments removes only the copy whose key is payments.
+      - t: for_each stops you removing items
+        why: You can remove items freely. Terraform destroys just the one whose key is gone.
+      - t: for_each copies are protected by prevent_destroy automatically
+        why: Nothing is protected automatically. You add prevent_destroy yourself.
+  - q: When is count still the right choice?
+    answer: 0
+    options:
+      - t: "For an on/off switch like count = var.enabled ? 1 : 0"
+        why: The number is only ever 0 or 1, so there's no middle item to remove and nothing can shift.
+      - t: Whenever the list has more than ten items
+        why: Longer lists make count's problem worse, not better.
+      - t: For databases, because they must be numbered
+        why: Databases are exactly where count's trap does the most damage.
+      - t: Never — it's been removed from Terraform
+        why: count still exists and is right for switching one resource on or off.
+  - q: A security group's name must change, which forces replacement. It's attached to a live load balancer. What stops a gap where no security group exists?
+    answer: 3
+    options:
+      - t: prevent_destroy = true
+        why: That refuses the replacement entirely. You'd be stuck, not protected.
+      - t: ignore_changes = [name]
+        why: Terraform would stop noticing the name, so the change you wanted never happens.
+      - t: A dynamic block
+        why: Dynamic blocks generate repeated blocks inside a resource. They don't change the order of a replacement.
+      - t: create_before_destroy = true, with name_prefix instead of name
+        why: The new group is built first, the load balancer moves to it, then the old one is deleted. name_prefix lets both exist at once, since two groups in one VPC can't share a name.
+  - q: The release pipeline changes an SSM parameter's value on every release. Each Terraform apply sets it back to v1. What's the fix?
+    answer: 1
+    options:
+      - t: prevent_destroy = true
+        why: The parameter isn't being destroyed. It's being updated back to the code's value.
+      - t: ignore_changes = [value], so Terraform sets the value once and leaves it to the pipeline
+        why: Right. The cost is that Terraform no longer notices any change to that field — including a wrong one made by hand.
+      - t: Delete the parameter from the code
+        why: Then the next plan destroys it.
+      - t: Run apply less often
+        why: The fight still happens, just less often.
+  - q: A resource has prevent_destroy = true. Someone deletes the whole resource block from the code and applies. What happens?
+    answer: 2
+    options:
+      - t: Terraform refuses, because of prevent_destroy
+        why: The lifecycle block was inside the resource block, so it was deleted too. Terraform has nothing telling it to refuse.
+      - t: AWS refuses
+        why: prevent_destroy is Terraform-only. AWS doesn't know about it.
+      - t: The resource is destroyed without complaint
+        why: Right. prevent_destroy guards against destroy and replace plans, not against deleting the code. Pull-request review — and AWS-side settings like deletion protection — cover that.
+      - t: Terraform asks for a second confirmation
+        why: There's no extra prompt. The normal yes is all it takes.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, retiring a queue">
+
+QuickCart's code built three message queues from one list: `orders`, `payments` and `emails`. Payments had moved to a new system, so Leo removed `"payments"` from the middle of the list.
+
+The plan said `1 to add, 0 to change, 2 to destroy`. Two destroys seemed odd for one queue, but the list was shorter and the payments queue should go, so he approved it.
+
+That evening, customers stopped getting order confirmations. The apply had destroyed the **emails** queue — with every unsent email in it — and built a new, empty queue with the same name. The payments queue was gone too, as intended. Nothing in the code looked wrong.
+
+</Story>
+
+The code used `count`, which tracks each copy by its **position** in the list. Removing an item from the middle shifts everything after it.
+
+<Case title="A very common mistake">
+
+This is one of the best-known ways to lose data with Terraform. A team creates several databases, buckets or queues with `count` over a list. Someone removes an item that isn't the last, and the plan shows replacements for resources nobody meant to touch. If the plan is skimmed, live resources are destroyed and recreated empty. HashiCorp's own documentation recommends `for_each` whenever the copies aren't identical, for this reason.
+
+</Case>
+
+This lesson covers the two ways to make copies, how to repeat blocks inside one resource, and the `lifecycle` settings that change how Terraform replaces and destroys things.
+
+</Part>
+
+<Part id="idea">
+
+Without loops, three queues means three `resource` blocks that differ by one word. Loops let one block make several copies. There are two ways, and the difference is **how each copy is remembered in the state**.
+
+<Key>count remembers copies by position; for_each remembers them by name. Use for_each, unless you're switching one thing on or off.</Key>
+
+### count: copies by position
+
+```hcl title="queues-count.tf"
+variable "queue_names" {
+  description = "The queues to build, one per name"
+  type        = list(string)
+  default     = ["orders", "payments", "emails"]
+}
+
+resource "aws_sqs_queue" "by_position" {
+  count = length(var.queue_names)
+
+  name = "quickcart-${var.queue_names[count.index]}"
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "queue_names"` | A `list(string)`: ordered names | — | — |
+| `count` | How many copies to make. `length()` counts the list, so 3 | One copy, with no index | — |
+| `count.index` | Inside the block, which copy this is: 0, 1 or 2 | Only exists when `count` is set | — |
+| `name` | The queue's name in AWS. `var.queue_names[count.index]` picks the item at this position | AWS invents a random name | Changing it **forces replacement**: SQS can't rename a queue |
+
+The copies are stored as `aws_sqs_queue.by_position[0]`, `[1]` and `[2]`. Remove `"payments"` and the list becomes `["orders", "emails"]`:
+
+| Position | Before | After | What the plan does |
+|---|---|---|---|
+| `[0]` | orders | orders | Nothing |
+| `[1]` | payments | **emails** | Name changed → **replace**: destroy the payments queue, create a new, empty emails queue |
+| `[2]` | emails | — | Position gone → **destroy the real emails queue** |
+
+Terraform doesn't know that emails "moved up". It only compares what each position holds.
+
+### for_each: copies by name
+
+```hcl title="queues.tf"
+variable "queue_settings" {
+  description = "One entry per queue, with that queue's own settings"
+  type = map(object({
+    visibility_timeout_seconds = number
+    message_retention_seconds  = number
+  }))
+
+  default = {
+    orders = {
+      visibility_timeout_seconds = 60
+      message_retention_seconds  = 345600
+    }
+    emails = {
+      visibility_timeout_seconds = 30
+      message_retention_seconds  = 86400
+    }
+  }
+}
+
+resource "aws_sqs_queue" "queue" {
+  for_each = var.queue_settings
+
+  name                       = "quickcart-${each.key}"
+  visibility_timeout_seconds = each.value.visibility_timeout_seconds
+  message_retention_seconds  = each.value.message_retention_seconds
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "queue_settings"` | A map: each key is a queue name, each value is an object holding that queue's settings | — | Add a queue by adding an entry — no new resource block |
+| `for_each` | One copy per key of a map, or per item of a set of strings | One copy | — |
+| `each.key` | The current key: `"orders"` or `"emails"` | Only exists with `for_each` | — |
+| `each.value` | The current value — here the object, so `each.value.visibility_timeout_seconds` | Only exists with `for_each` | — |
+| `name` | The queue's name: `quickcart-orders` | AWS invents a name | Changing it forces replacement |
+| `visibility_timeout_seconds` | How long a message is hidden from other workers while one works on it | 30 seconds | Longer than your slowest job, or messages get processed twice |
+| `message_retention_seconds` | How long an unprocessed message is kept. 345600 is 4 days | 4 days | Up to 14 days (1209600) for things you can't afford to lose |
+
+The copies are stored as `aws_sqs_queue.queue["orders"]` and `aws_sqs_queue.queue["emails"]`. Remove an entry and only the copy with that key is destroyed. No other address changes, so nothing else is touched.
+
+If all you have is a list of names, turn it into a set with `toset()`: `for_each = toset(var.queue_names)`. Then `each.key` and `each.value` are both the name.
+
+<Mistake title="giving for_each a list">
+
+```output title="Terraform stops with"
+Error: Invalid for_each argument
+
+  on main.tf line 6, in resource "terraform_data" "by_name":
+   6:   for_each         = var.queues
+    ├────────────────
+    │ var.queues is a list of string
+
+The given "for_each" argument value is unsuitable: the "for_each" argument
+must be a map, or set of strings, and you have provided a value of type list
+of string.
+```
+
+**Why:** a list can hold the same name twice, and its items have positions — the thing `for_each` exists to avoid.
+
+**The fix:** wrap it: `for_each = toset(var.queues)`. Or declare the variable as `set(string)`.
+
+</Mistake>
+
+<Mistake title="for_each keys that aren't known until apply">
+
+```output title="Terraform stops with"
+Error: Invalid for_each argument
+
+  on main.tf line 4, in resource "terraform_data" "by_name":
+   4:   for_each         = toset([terraform_data.seed.id])
+    ├────────────────
+    │ terraform_data.seed.id is a string, known only after apply
+
+The "for_each" set includes values derived from resource attributes that
+cannot be determined until apply, and so Terraform cannot determine the full
+set of keys that will identify the instances of this resource.
+```
+
+**Why:** the keys become the addresses in state. Terraform must know them at plan time, but an ID only exists after the thing is created.
+
+**The fix:** use keys you write yourself, like queue names, and put the apply-time values in the map's values instead.
+
+</Mistake>
+
+### count's one safe job: on or off
+
+```hcl title="dead-letter.tf"
+variable "enable_dead_letter_queue" {
+  description = "Build a queue that catches messages which keep failing"
+  type        = bool
+  default     = false
+}
+
+resource "aws_sqs_queue" "dead_letter" {
+  count = var.enable_dead_letter_queue ? 1 : 0
+
+  name                      = "quickcart-orders-dead-letter"
+  message_retention_seconds = 1209600
+}
+
+output "dead_letter_queue_arn" {
+  description = "The dead-letter queue's ARN, or null when it is switched off"
+  value       = var.enable_dead_letter_queue ? aws_sqs_queue.dead_letter[0].arn : null
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "enable_dead_letter_queue"` | A `bool`: true or false | — | Set it per environment in a `.tfvars` file |
+| `count = var.enable_dead_letter_queue ? 1 : 0` | `condition ? a : b` means "a if true, otherwise b". One copy when on, none when off | The queue is always built | — |
+| `name` | The queue's name | AWS invents one | — |
+| `message_retention_seconds` | 1209600 is 14 days, the most SQS allows — failed messages wait for someone to look | 4 days | — |
+| `output` → `value` | Even one copy made with `count` is a list, so you refer to it as `dead_letter[0]`. When it's switched off there is no `[0]`, so the condition returns `null` instead | Referring to `[0]` while it's off fails with *Invalid index* | — |
+
+The number is only ever 0 or 1. There's no middle to remove, so the trap can't happen.
+
+### Dynamic blocks: repeating a block inside a resource
+
+`count` and `for_each` repeat whole resources. Sometimes you need to repeat a **block inside** one resource, like the `ingress` rules of a security group. That's a `dynamic` block.
+
+```hcl title="security-group.tf"
+variable "vpc_id" {
+  description = "The VPC the load balancer lives in"
+  type        = string
+}
+
+variable "alb_ingress_rules" {
+  description = "Who may connect to the load balancer, one entry per rule"
+  type = list(object({
+    port        = number
+    cidr        = string
+    description = string
+  }))
+
+  default = [
+    {
+      port        = 443
+      cidr        = "0.0.0.0/0"
+      description = "HTTPS from anywhere"
+    },
+    {
+      port        = 80
+      cidr        = "0.0.0.0/0"
+      description = "HTTP from anywhere, redirected to HTTPS"
+    },
+  ]
+}
+
+resource "aws_security_group" "alb" {
+  name_prefix = "quickcart-alb-"
+  description = "QuickCart load balancer"
+  vpc_id      = var.vpc_id
+
+  dynamic "ingress" {
+    for_each = var.alb_ingress_rules
+
+    content {
+      description = ingress.value.description
+      from_port   = ingress.value.port
+      to_port     = ingress.value.port
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value.cidr]
+    }
+  }
+
+  egress {
+    description = "All outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "vpc_id"` | Which VPC the group belongs to. Required: no default | — | — |
+| `variable "alb_ingress_rules"` | A list of rule objects: port, address range, description | — | Add a rule by adding an entry |
+| `name_prefix` | AWS adds a unique ending to this, like `quickcart-alb-20260925101500123400000001`. Needed for `create_before_destroy`, below | With `name` instead, the replacement can't be created while the old group exists | — |
+| `description` | Shown in the console. Changing it **forces replacement** | Defaults to `Managed by Terraform` | Rarely, because of the replacement |
+| `vpc_id` | The VPC, from the variable | The group lands in the default VPC | — |
+| `dynamic "ingress"` | Generate one `ingress` block per item | — | — |
+| `for_each` (inside `dynamic`) | The list to loop over | Required | — |
+| `content` | The template for each generated block. `ingress.value` is the current item — named after the block, not `each` | Required | — |
+| `description`, `from_port`, `to_port` | The rule's label and the port range. One port means from and to are the same | Required by the provider | — |
+| `protocol` | `tcp` here. `"-1"` in the `egress` block means every protocol | Required | — |
+| `cidr_blocks` | Which addresses the rule allows. `0.0.0.0/0` means anywhere | The rule allows nobody | Narrow it for anything that isn't public |
+| `egress` | Allow all outbound traffic. Written out, because Terraform **removes** AWS's default outbound rule from groups it manages | The group can't send anything out | — |
+| `lifecycle` → `create_before_destroy` | Explained below | — | — |
+
+```output title="In the plan, the dynamic block has become two ordinary ingress rules"
+      + ingress                = [
+          + {
+              + cidr_blocks      = [
+                  + "0.0.0.0/0",
+                ]
+              + description      = "HTTP from anywhere, redirected to HTTPS"
+              + from_port        = 80
+              + ipv6_cidr_blocks = []
+              + prefix_list_ids  = []
+              + protocol         = "tcp"
+              + security_groups  = []
+              + self             = false
+              + to_port          = 80
+            },
+          + {
+              + cidr_blocks      = [
+                  + "0.0.0.0/0",
+                ]
+              + description      = "HTTPS from anywhere"
+              + from_port        = 443
+              + ipv6_cidr_blocks = []
+              + prefix_list_ids  = []
+              + protocol         = "tcp"
+              + security_groups  = []
+              + self             = false
+              + to_port          = 443
+            },
+        ]
+```
+
+**Don't overuse dynamic blocks.** Two fixed rules are easier to read written out. Use one when the list really varies, for example between environments. And for security groups in particular, AWS provider 6 recommends separate `aws_vpc_security_group_ingress_rule` resources, one per rule — which you can make with an ordinary `for_each`. [Security groups](/lessons/security-groups/) covers both.
+
+### lifecycle: changing how Terraform replaces and destroys
+
+By default Terraform destroys anything the code no longer asks for, replaces by destroying first, and puts every setting back to what the code says. A `lifecycle` block inside a resource changes those rules for that one resource.
+
+| Setting | Terraform's default | What it changes to | Use it for |
+|---|---|---|---|
+| `create_before_destroy` | Destroy the old one, **then** create the new one | Create the new one first, move things over, then destroy the old one | Anything in use during a replacement: security groups, launch templates, target groups |
+| `prevent_destroy` | Anything can be destroyed | Refuse any plan that would destroy or replace this resource | Anything holding data: databases, buckets of customer files |
+| `ignore_changes` | The code always wins | Set these fields at creation, then never look at them again | Fields something else owns: an auto scaling count, a value a pipeline updates |
+| `replace_triggered_by` | Replace only when this resource's own settings force it | Also replace when a named other resource changes | Rare. For example, restarting something when its configuration is replaced |
+
+#### create_before_destroy
+
+The security group above has it. Changing its `description` forces replacement. Without the setting, Terraform tries to delete the old group first. But the load balancer is still using it, so AWS refuses with a `DependencyViolation` error, and the apply keeps retrying until it times out. With the setting, Terraform creates the new group, moves the load balancer onto it, and only then deletes the old one. The plan's symbol flips to show it:
+
+| Symbol | Order |
+|---|---|
+| `-/+` | Destroy, then create. The default |
+| `+/-` | Create, then destroy. `create_before_destroy` is on |
+
+One character apart, opposite meanings. It's worth being able to read at a glance.
+
+<Mistake title="create_before_destroy with a fixed name">
+
+```output title="The create fails with a message like"
+Error: creating Security Group (quickcart-alb): operation error EC2: CreateSecurityGroup, https response error StatusCode: 400, api error InvalidGroup.Duplicate: The security group 'quickcart-alb' already exists for VPC 'vpc-0123456789abcdef0'
+```
+
+The exact wording varies by provider version.
+
+**Why:** for a moment, both groups must exist. Two security groups in one VPC can't share a name, and the old one still has it.
+
+**The fix:** use `name_prefix` instead of `name`, so each new group gets a unique name. The same applies to anything with a unique name: launch templates, target groups, IAM roles.
+
+</Mistake>
+
+#### prevent_destroy
+
+```hcl title="receipts.tf"
+resource "aws_s3_bucket" "receipts" {
+  bucket = "quickcart-receipts-111122223333"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `bucket` | The bucket's name. Must be unique across all of AWS, so it ends with the account ID | AWS invents a name | Never — changing it replaces the bucket |
+| `prevent_destroy` | Any plan that would destroy **or replace** this bucket fails, and **nothing** in that plan runs | A `destroy`, or a change that forces replacement, deletes it and its files | Set to `false` only in the commit where you really mean to delete it |
+
+You'll see the real error in the lab. Three limits matter:
+
+| Limit | What it means |
+|---|---|
+| The value must be written as `true` or `false` | `prevent_destroy = var.protect` fails with *Variables not allowed*. You can't switch it per environment |
+| Deleting the resource block removes it too | The protection lives inside the block. Delete the block and the next apply destroys the resource without complaint. Review catches that, not Terraform |
+| It only stops Terraform | Someone in the console can still delete it. AWS-side settings like a database's `deletion_protection` stop that |
+
+#### ignore_changes
+
+```hcl title="release.tf"
+resource "aws_ssm_parameter" "current_release" {
+  name        = "/quickcart/orders/current-release"
+  description = "The image tag that is live. The release pipeline changes it"
+  type        = "String"
+  value       = "v1"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `name` | The parameter's path in Parameter Store | Required | Changing it replaces the parameter |
+| `description` | A note on what it's for | No description | — |
+| `type` | `String`: plain text. `SecureString` is for secrets | Required | — |
+| `value` | The starting value | Required (or a write-only value) | — |
+| `ignore_changes = [value]` | Terraform sets `value` when it creates the parameter, then never compares it again | Every apply resets the pipeline's latest tag back to `v1` | — |
+
+The same pattern stops Terraform scaling a service back down after auto scaling raised it: `ignore_changes = [desired_count]` on an ECS service. The cost is real: Terraform goes blind to that field. If someone sets it wrong by hand, no plan will tell you. Ignore only what something else genuinely owns. `ignore_changes = all` ignores every field, and is almost always a sign of a deeper problem.
+
+</Part>
+
+<Part id="see">
+
+Three queues built from one list, twice: with `count` on the left, `for_each` on the right. Remove the middle one and compare the two plans. Then apply them and see what's left.
+
+<TfCountForEach />
+
+**What to notice:** both sides end up with the same two queue names. Only the plan tells you that on the `count` side one of them is a new, empty queue. That's why you read every `-/+` and every destroy, and ask *why that one?*
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything here uses `terraform_data`, which is built into Terraform and creates nothing in AWS. You don't even need an AWS login.</Cost>
+
+You'll reproduce Leo's mistake safely, watch `prevent_destroy` stop a plan, and use `count` as an on/off switch. About 20 minutes.
+
+`terraform_data` is a resource that just stores a value in the state. Its `triggers_replace` setting works like a queue's name: change it, and Terraform must replace the resource. So it behaves exactly like the real queues, for free.
+
+<Steps>
+
+<Step title="Make the folder">
+
+```sh
+mkdir quickcart-loops
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-loops` | its name |
+
+```sh
+cd quickcart-loops
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory — every later command runs in here |
+| `quickcart-loops` | the folder you just made |
+
+</Step>
+
+<Step title="Build the same queues twice">
+
+Create `main.tf`:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+variable "queues" {
+  description = "The queues QuickCart needs"
+  type        = list(string)
+  default     = ["orders", "payments", "emails"]
+}
+
+resource "terraform_data" "by_position" {
+  count = length(var.queues)
+
+  triggers_replace = var.queues[count.index]
+}
+
+resource "terraform_data" "by_name" {
+  for_each = toset(var.queues)
+
+  triggers_replace = each.key
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version` | Refuse to run on Terraform older than 1.10 | Older versions would try to run it | — |
+| `variable "queues"` | The list of queue names | — | In the next step |
+| `terraform_data` `"by_position"` | Built into Terraform. Stores values in state and creates nothing anywhere | — | — |
+| `count = length(var.queues)` | One copy per position in the list | One copy | — |
+| `triggers_replace` | A value that, when it changes, forces replacement — like a queue's name | Changes never replace it | — |
+| `terraform_data` `"by_name"` → `for_each = toset(var.queues)` | One copy per name. `toset()` turns the list into a set, which `for_each` needs | — | — |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | prepare the folder. `terraform_data` is built in, so nothing is downloaded |
+
+```output
+- terraform.io/builtin/terraform is built in to Terraform
+
+Terraform has been successfully initialized!
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan, then carry it out once you type `yes` |
+
+Type `yes`.
+
+```output
+Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+```
+
+Now list what the state remembers:
+
+```sh
+terraform state list
+```
+
+| Part | What it means |
+|---|---|
+| `terraform state list` | print the address of everything in the state |
+
+```output
+terraform_data.by_name["emails"]
+terraform_data.by_name["orders"]
+terraform_data.by_name["payments"]
+terraform_data.by_position[0]
+terraform_data.by_position[1]
+terraform_data.by_position[2]
+```
+
+Positions on one side, names on the other.
+
+</Step>
+
+<Step title="Remove the middle item and read the plan">
+
+Change the list to drop `"payments"`. The whole file now reads:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+variable "queues" {
+  description = "The queues QuickCart needs"
+  type        = list(string)
+  default     = ["orders", "emails"]
+}
+
+resource "terraform_data" "by_position" {
+  count = length(var.queues)
+
+  triggers_replace = var.queues[count.index]
+}
+
+resource "terraform_data" "by_name" {
+  for_each = toset(var.queues)
+
+  triggers_replace = each.key
+}
+```
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | show what would change, without changing anything |
+
+```output
+Terraform will perform the following actions:
+
+  # terraform_data.by_name["payments"] will be destroyed
+  # (because key ["payments"] is not in for_each map)
+  - resource "terraform_data" "by_name" {
+      - id               = "cae2a2cf-f571-88ab-0acf-4aa53fe21eb6" -> null
+      - triggers_replace = "payments" -> null
+    }
+
+  # terraform_data.by_position[1] must be replaced
+-/+ resource "terraform_data" "by_position" {
+      ~ id               = "b51d3f5f-a9cc-d116-e770-4faca8106757" -> (known after apply)
+      ~ triggers_replace = "payments" -> "emails"
+    }
+
+  # terraform_data.by_position[2] will be destroyed
+  # (because index [2] is out of range for count)
+  - resource "terraform_data" "by_position" {
+      - id               = "49072b9d-30a3-8d10-6226-324b5b6f909c" -> null
+      - triggers_replace = "emails" -> null
+    }
+
+Plan: 1 to add, 0 to change, 3 to destroy.
+```
+
+Your IDs will differ. Read it as Leo should have:
+
+| Address | What the plan does | Right? |
+|---|---|---|
+| `by_name["payments"]` | Destroy payments | Yes |
+| `by_position[1]` | Replace payments with a **new** emails | No — a fresh, empty queue |
+| `by_position[2]` | Destroy the **real** emails, *because index [2] is out of range* | No — this is the data loss |
+
+Terraform even says why in the grey comment lines. Don't apply yet.
+
+</Step>
+
+<Step title="Watch prevent_destroy refuse">
+
+Protect the `for_each` copies. The whole file:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+variable "queues" {
+  description = "The queues QuickCart needs"
+  type        = list(string)
+  default     = ["orders", "emails"]
+}
+
+resource "terraform_data" "by_position" {
+  count = length(var.queues)
+
+  triggers_replace = var.queues[count.index]
+}
+
+resource "terraform_data" "by_name" {
+  for_each = toset(var.queues)
+
+  triggers_replace = each.key
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+```
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | try to plan the same change again |
+
+```output title="Terraform refuses to plan at all"
+Error: Instance cannot be destroyed
+
+  on main.tf line 17:
+  17: resource "terraform_data" "by_name" {
+
+Resource terraform_data.by_name["payments"] has lifecycle.prevent_destroy
+set, but the plan calls for this resource to be destroyed. To avoid this
+error and continue with the plan, either disable lifecycle.prevent_destroy or
+reduce the scope of the plan using the -target option.
+```
+
+Nothing in the plan runs — not even the `count` side's changes. There is no flag to force past it. To delete a protected resource you change the code, in a commit someone reviews.
+
+</Step>
+
+<Step title="Apply the removal, and add an on/off switch">
+
+Take the `lifecycle` block out again, and add a switched-off audit queue. The whole file:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+variable "queues" {
+  description = "The queues QuickCart needs"
+  type        = list(string)
+  default     = ["orders", "emails"]
+}
+
+variable "enable_audit_queue" {
+  description = "Build the audit queue. Off unless someone asks for it"
+  type        = bool
+  default     = false
+}
+
+resource "terraform_data" "by_position" {
+  count = length(var.queues)
+
+  triggers_replace = var.queues[count.index]
+}
+
+resource "terraform_data" "by_name" {
+  for_each = toset(var.queues)
+
+  triggers_replace = each.key
+}
+
+resource "terraform_data" "audit" {
+  count = var.enable_audit_queue ? 1 : 0
+
+  triggers_replace = "audit"
+}
+
+output "audit_queue_id" {
+  description = "The audit queue's ID, or null when it is switched off"
+  value       = var.enable_audit_queue ? terraform_data.audit[0].id : null
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "enable_audit_queue"` | A true/false switch, off by default | — | Per environment, in a `.tfvars` file |
+| `count = var.enable_audit_queue ? 1 : 0` | One copy when on, none when off | Always built | — |
+| `triggers_replace = "audit"` | The stand-in queue name | — | — |
+| `output "audit_queue_id"` → `value` | `audit[0]` only exists when it's on, so the condition returns `null` when it's off | Fails with *Invalid index* while off | — |
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | carry out the removal from step 3. The switch is off, so no audit queue |
+
+Type `yes`.
+
+```output
+terraform_data.by_name["payments"]: Destroying... [id=cae2a2cf-f571-88ab-0acf-4aa53fe21eb6]
+terraform_data.by_position[2]: Destroying... [id=49072b9d-30a3-8d10-6226-324b5b6f909c]
+terraform_data.by_position[1]: Destroying... [id=b51d3f5f-a9cc-d116-e770-4faca8106757]
+terraform_data.by_position[2]: Destruction complete after 0s
+terraform_data.by_name["payments"]: Destruction complete after 0s
+terraform_data.by_position[1]: Destruction complete after 0s
+terraform_data.by_position[1]: Creating...
+terraform_data.by_position[1]: Creation complete after 0s [id=b7087b2c-63d1-fd73-805f-ca6454200adf]
+
+Apply complete! Resources: 1 added, 0 changed, 3 destroyed.
+```
+
+Look at `by_position[1]`: a new ID. With real queues, that would be a new, empty emails queue.
+
+Now see what switching the audit queue on would do:
+
+```sh
+terraform plan -var enable_audit_queue=true
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | show what would change |
+| `-var enable_audit_queue=true` | turn the switch on, for this command only |
+
+```output
+  # terraform_data.audit[0] will be created
+  + resource "terraform_data" "audit" {
+      + id               = (known after apply)
+      + triggers_replace = "audit"
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + audit_queue_id = (known after apply)
+```
+
+One copy, at position `[0]`. With 0 or 1, there's nothing to shift.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove everything in the state, once you type `yes` |
+
+```output
+Destroy complete! Resources: 4 destroyed.
+```
+
+Nothing was ever created in AWS, so that's all. You can delete the folder.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Thing | What it does |
+|---|---|
+| `count = length(var.list)` | Copies by position: `x[0]`, `x[1]`. Removing a middle item shifts the rest |
+| `count = var.enabled ? 1 : 0` | On/off switch. Refer to it as `x[0]` |
+| `for_each = var.map` or `toset(var.list)` | Copies by key: `x["orders"]`. Removing one touches nothing else |
+| `each.key`, `each.value` | The current key and value inside a `for_each` |
+| `dynamic "ingress" { for_each, content }` | Repeat a block inside one resource; `ingress.value` is the item |
+| `create_before_destroy = true` | Replace by creating first. Pair with `name_prefix`. Plan shows `+/-` |
+| `prevent_destroy = true` | Refuse any plan that destroys or replaces it. Literal `true` only |
+| `ignore_changes = [field]` | Stop managing a field something else owns. You go blind to it |
+| `replace_triggered_by = [resource]` | Replace when another resource changes. Rare |
+| `-/+` in a plan | Destroy, then create. Stop and ask why |
+| "because index [2] is out of range for count" | The count trap. Switch to `for_each` |
+
+</Cheat>
+
+</Part>

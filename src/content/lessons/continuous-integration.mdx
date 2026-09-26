@@ -1,0 +1,822 @@
+---
+time: 75 minutes
+level: Intermediate
+before: [jenkinsfile, dockerfile, first-resource]
+cost: free
+quiz:
+  - q: A pull request's build fails at Lint. What happens to Unit tests, Build image and Scan image?
+    answer: 1
+    options:
+      - t: They run anyway, so you see every problem at once
+        why: In a declarative pipeline, the first failed stage skips the rest. That's deliberate.
+      - t: They're skipped. The commit stops at the first gate it fails
+        why: Right. There's no point building and scanning an image from a commit that's already known to be wrong. You get the answer in seconds.
+      - t: They run, but their results are ignored
+        why: They don't run at all.
+      - t: Jenkins merges the pull request and fixes it on main
+        why: Jenkins never merges anything. It reports a red check, and GitHub blocks the merge.
+  - q: CI is red on a pull request, but someone merges it anyway. What was missing?
+    answer: 3
+    options:
+      - t: A faster Jenkins
+        why: Speed doesn't stop a merge.
+      - t: More tests
+        why: The tests did their job; they failed. Nothing acted on the result.
+      - t: A webhook
+        why: The build ran, so Jenkins clearly heard about the pull request.
+      - t: A rule on main in GitHub that requires the Jenkins check to pass before merging
+        why: Right. Without that rule, a red check is only advice. With it, GitHub greys out the merge button until the check is green.
+  - q: Why does QuickCart's pipeline run hadolint and terraform fmt before the unit tests and the image build?
+    answer: 0
+    options:
+      - t: They take seconds, so the most common mistakes are reported fastest
+        why: Right. Order the gates cheapest first. A formatting mistake shouldn't wait two minutes for an image build to tell you about it.
+      - t: Jenkins requires lint to be the first stage
+        why: Jenkins runs stages in whatever order you write.
+      - t: Tests can't run until the code has been linted
+        why: They could. Order is about how fast you find out.
+      - t: hadolint changes the Dockerfile so it can be built
+        why: hadolint only reports problems. It never changes files.
+  - q: A test fails about one run in twenty, for no clear reason. What should the team do?
+    answer: 2
+    options:
+      - t: Wrap the test stage in retry(3) so the pipeline goes green
+        why: That hides the problem. People learn that red means nothing, and real failures get retried away too.
+      - t: Delete the test
+        why: It was checking something. Deleting it loses that check forever.
+      - t: Quarantine it, so it no longer blocks merges, and fix or rewrite it with an owner and a deadline
+        why: Right. The rest of the suite stays trustworthy, and the flaky test is still tracked until it's fixed.
+      - t: Ask people to press Rebuild when it fails
+        why: That's retry(3) done by hand, and it wastes everyone's time.
+  - q: Where does the code in a shared library's vars/quickcartLint.groovy get used?
+    answer: 1
+    options:
+      - t: Only in the shared library's own repository
+        why: The point of a shared library is that other repositories use it.
+      - t: In any Jenkinsfile that loads the library with @Library, as a step called quickcartLint()
+        why: Right. Each file in vars/ becomes a step with the file's name. Fix a bug there once, and every service gets the fix.
+      - t: It replaces the Jenkinsfile in every repository automatically
+        why: Nothing happens until a Jenkinsfile asks for the library.
+      - t: It runs on the controller, before every build
+        why: It runs as part of the pipeline that calls it, on that pipeline's agent.
+  - q: Why are Terraform plans posted on pull requests, rather than applied?
+    answer: 3
+    options:
+      - t: Pull request builds aren't allowed to call AWS
+        why: They can read, with a read-only role. Applying is the part that must wait.
+      - t: Plans are faster than applies
+        why: True, but that's not the reason.
+      - t: Terraform can't apply from Jenkins
+        why: It can. That's what continuous delivery does after the merge.
+      - t: Reviewers see exactly what the change would do to AWS before they approve it, and nothing changes until it's merged
+        why: Right. The plan turns "I think this only adds a tag" into a fact everyone can read.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a broken main">
+
+Sam changed how the delivery fee was calculated. The tests passed on his laptop. The pull request looked small, Noor approved it, and he merged it on a Wednesday afternoon.
+
+On Thursday morning, three other engineers pulled `main` and nothing worked. Sam's laptop had an old copy of a file the tests depended on; on a clean checkout, two tests failed. Every branch built on top of Wednesday's `main` was now broken too. It took until lunch to find which change had done it.
+
+Later that month, a scan by the security team found a critical vulnerability in the base image of the orders service. It had been in production for six weeks. Nobody had checked.
+
+</Story>
+
+<Case title="A very common mistake">
+
+A team sets up CI. Every pull request gets a build, and a red or green check appears in GitHub. But nobody turns on the setting that makes the check **required**. Under a deadline, someone merges on red "because that test is always flaky". Soon red checks are normal, and the pipeline is a light nobody looks at.
+
+CI only protects `main` if a failed check actually stops the merge.
+
+</Case>
+
+</Part>
+
+<Part id="idea">
+
+**Continuous integration**, or CI, means every change is checked automatically, the same way, before it joins `main`. Not on someone's laptop, but on a clean agent, from the exact commit that will be merged.
+
+<Key>Every change is checked the same way before it can join main. Each stage is a gate: fail one, and the change stops there.</Key>
+
+### What runs, and in what order
+
+QuickCart's pipeline has five gates. They are ordered **cheapest first**, so the most common mistakes are reported in seconds.
+
+| Stage | Checks | Takes about | Tool |
+|---|---|---|---|
+| **Lint** | The Dockerfile follows good practice; the Terraform is formatted | Seconds | `hadolint`, `terraform fmt -check` |
+| **Unit tests** | The code does what the tests say it should | A minute | `node --test` here; whatever your language uses |
+| **Build image** | The image builds from this commit | A couple of minutes | `docker build` |
+| **Scan image** | No known critical vulnerabilities in the image's packages | Under a minute | `trivy`, or ECR's own scanning |
+| **Terraform plan** | What this change would do to AWS. Pull requests only | Under a minute | `terraform plan`, posted as a comment |
+
+**Fail fast** means three things. Put quick checks first. Stop at the first failure; declarative pipelines do this for you. And when someone pushes again to the same pull request, abort the build that's still running for the old commit, because its answer no longer matters. `disableConcurrentBuilds(abortPrevious: true)` does that last one.
+
+### One job per branch: multibranch pipelines
+
+A **multibranch pipeline** is a Jenkins job that looks at a repository and makes a job for every branch and every pull request that has a Jenkinsfile. Each one builds with the Jenkinsfile from its own branch. New branch, new job; branch deleted, job removed.
+
+| Jenkins sees | It builds | `BRANCH_NAME` |
+|---|---|---|
+| The `main` branch | Every commit on `main` | `main` |
+| A pull request, number 42 | The pull request **merged with the current `main`**, so you test what `main` would become | `PR-42` |
+| A branch with an open pull request | Nothing extra. By default, the pull request job covers it | — |
+
+The **GitHub Branch Source** plugin, part of the suggested plugins, does this for GitHub. It also reports each build's result back to GitHub as a **status check** on the commit. For a pull request, the check is called `continuous-integration/jenkins/pr-merge`.
+
+### How Jenkins hears about a push: webhooks
+
+Jenkins can ask GitHub every few minutes whether anything changed. That's called **polling**, and it's slow and wasteful. A **webhook** is the other way round: the moment someone pushes, GitHub sends a message to Jenkins.
+
+For QuickCart's Jenkins on EC2, that means GitHub must be able to reach Jenkins. So the controller gets a load balancer with HTTPS in front of it, whose security group only accepts connections from GitHub's webhook address ranges, which GitHub publishes. Then, in the repository on GitHub:
+
+> **Settings** → **Webhooks** → **Add webhook**
+
+| Field | Enter |
+|---|---|
+| Payload URL | `https://jenkins.example.com/github-webhook/` |
+| Content type | `application/json` |
+| Secret | a long random value, also entered in Jenkins' **GitHub** settings in **Manage Jenkins** → **System** |
+| Which events | **Let me select individual events**: **Pushes** and **Pull requests** |
+
+The `/github-webhook/` path is where the GitHub plugin in Jenkins listens. The secret lets Jenkins check that each message really came from GitHub.
+
+In this lesson's lab, Jenkins runs on your Mac, which GitHub can't reach. So you'll use a periodic scan instead: Jenkins checks GitHub every minute. It works the same, just a minute slower.
+
+### The gate must be required
+
+A red check does nothing by itself. In GitHub, a **ruleset** on `main` makes it binding:
+
+| Rule | What it does |
+|---|---|
+| Require a pull request before merging | Nobody pushes straight to `main` |
+| Require status checks to pass | The merge button stays grey until the Jenkins check is green |
+
+### Terraform plan on every pull request
+
+For infrastructure changes, the most useful thing CI can do is run `terraform plan` and post the result on the pull request. Reviewers then read what will actually change in AWS, not what the author thinks will change. In a real setup, the plan stage uses a **read-only** AWS role and the shared S3 state from [Terraform state](/lessons/terraform-state/). Nothing is applied until after the merge.
+
+### Caching: faster without being wrong
+
+| Cache | How | Saves |
+|---|---|---|
+| Docker layers | A long-lived agent keeps layers between builds. On short-lived agents, pull the last image and pass `--cache-from` | Rebuilding unchanged layers. [Writing a Dockerfile](/lessons/dockerfile/) shows why order matters |
+| Dependencies | Keep the package manager's download folder, like `~/.npm`, on the agent between builds | Downloading every library on every build |
+| Terraform providers | Set `TF_PLUGIN_CACHE_DIR` to a folder on the agent | Downloading the AWS provider, which is large, on every `init` |
+| Trivy's database | It's kept in `~/.cache/trivy` and refreshed when it's old | Downloading the vulnerability list every time |
+
+Cache things that are **downloaded**, never things that are **checked**. A cached test result is a test that didn't run.
+
+### Shared libraries: write it once
+
+With ten services, ten Jenkinsfiles grow the same lint stage, each slightly different. A **shared library** is a git repository of pipeline code that every Jenkinsfile can load. Every Groovy file in its `vars/` folder becomes a step with the file's name.
+
+```groovy title="vars/quickcartLint.groovy"
+def call(Map config = [:]) {
+    String dockerfile = config.get('dockerfile', 'Dockerfile')
+    String terraformDir = config.get('terraformDir', 'infra')
+    sh "hadolint '${dockerfile}'"
+    sh "terraform fmt -check -recursive '${terraformDir}'"
+}
+```
+
+| Line | What it means |
+|---|---|
+| `def call(Map config = [:])` | What runs when a Jenkinsfile writes `quickcartLint()`. It takes named settings, and none are required |
+| `config.get('dockerfile', 'Dockerfile')` | Use the `dockerfile` setting if one was given, otherwise `Dockerfile` |
+| `sh "hadolint '${dockerfile}'"` | Double quotes, because Groovy should fill in the file name. It's not a secret, so that's safe |
+
+Register the library once, in **Manage Jenkins** → **System** → **Global Trusted Pipeline Libraries**: a name, `quickcart-pipeline-lib`, a default version, and the repository. Then any Jenkinsfile can use it:
+
+```groovy title="Jenkinsfile"
+@Library('quickcart-pipeline-lib@v1') _
+pipeline {
+    agent any
+    stages {
+        stage('Lint') {
+            steps {
+                quickcartLint(terraformDir: 'terraform')
+            }
+        }
+    }
+}
+```
+
+| Line | What it means |
+|---|---|
+| `@Library('quickcart-pipeline-lib@v1') _` | Load the library, at the git tag `v1`. The `_` is required Groovy punctuation when nothing else follows on that line |
+| `quickcartLint(terraformDir: 'terraform')` | Call the step, with this repository's Terraform folder |
+
+Pin a version, like the tag `v1`, so a change to the library can't break every service's build at once. Libraries registered here are **trusted**: their code runs with full access to Jenkins, so changes to the library repository need the same review as changes to Jenkins itself.
+
+### Flaky tests
+
+A **flaky** test sometimes passes and sometimes fails, with no change to the code. Usually it depends on timing, on the order tests run in, or on something outside the test such as the network. Google has written publicly about how much time flaky tests cost it, even with its tooling. Flaky tests are dangerous because they teach people that red doesn't mean anything.
+
+| Response | Effect |
+|---|---|
+| `retry(3)` around the tests | Hides it, and hides real failures with it. Don't |
+| Press **Rebuild** until green | The same, by hand |
+| **Quarantine**: move it to a separate, non-blocking stage, with an owner and a deadline | The main suite stays trustworthy, and the flaky test is still tracked |
+| Fix the cause: wait for a condition instead of sleeping, give each test its own data | The real answer |
+
+Keep `retry` for things that genuinely fail at random and are safe to repeat, like downloading a file. Never for a test.
+
+</Part>
+
+<Part id="see">
+
+Below is the pipeline a QuickCart pull request goes through. Push a commit that has no problems. Then choose **A failing test** and push again, and try the others.
+
+<CiGates />
+
+**What to notice:** a commit stops at the first gate it fails, and nothing after that gate runs. The cheaper the gate, the sooner you know. A Dockerfile mistake is reported 20 seconds after the push; a vulnerability, only after the image is built.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">Jenkins and every tool run on your Mac, and a public GitHub repository is free. No AWS.</Cost>
+
+You'll put QuickCart's orders service in a GitHub repository, point a multibranch pipeline at it, open a pull request that gets a Terraform plan posted on it, then break a test and watch the merge get blocked. About 60 minutes.
+
+You need the Jenkins on your Mac from [The Jenkinsfile](/lessons/jenkinsfile/), a GitHub account, and Docker Desktop running.
+
+<Steps>
+
+<Step title="Install the tools the pipeline uses">
+
+The pipeline runs on your Mac, so the tools it calls must be installed there:
+
+```sh
+brew install node hadolint trivy terraform gh
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | install with Homebrew |
+| `node` | runs the orders service and its tests |
+| `hadolint` | checks Dockerfiles for common mistakes |
+| `trivy` | scans images for known vulnerabilities |
+| `terraform` | for the plan |
+| `gh` | GitHub's command-line tool, used to post the plan on the pull request |
+
+Jenkins only finds tools that are on the `PATH` of the terminal it was started from. So stop Jenkins with **Ctrl+C** in its terminal, and start it again in a **new** terminal window:
+
+```sh
+jenkins-lts --httpListenAddress=127.0.0.1 --httpPort=8080
+```
+
+| Part | What it means |
+|---|---|
+| `jenkins-lts` | start Jenkins, which now inherits a `PATH` that includes the new tools |
+| `--httpListenAddress=127.0.0.1` | only this Mac can reach it |
+| `--httpPort=8080` | the port for the web page |
+
+<Mistake title="command not found inside a build">
+
+```output title="The console output includes"
+hadolint: command not found
+ERROR: script returned exit code 127
+```
+
+**Why:** Jenkins was started before the tool was installed, or started with `brew services`, which gives it a much shorter `PATH` that doesn't include Homebrew's tools.
+
+**The fix:** start Jenkins from a terminal with the command above. On a real agent, tools are installed when the agent's image is built, or the stage uses `agent { docker { image '…' } }`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the repository and a token">
+
+On GitHub, choose **New repository**:
+
+| Field | Enter |
+|---|---|
+| Repository name | `quickcart-orders` |
+| Visibility | **Public**. Required-check rules are free on public repositories |
+| Add a README file | ticked |
+
+Choose **Create repository**. Copy its HTTPS address from the **Code** button; the next steps call it `REPO_URL`.
+
+Jenkins needs a token to read the repository, post comments and report checks. On GitHub, go to your profile picture → **Settings** → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**:
+
+| Field | Enter |
+|---|---|
+| Token name | `jenkins-quickcart` |
+| Expiration | 30 days |
+| Repository access | **Only select repositories**: `quickcart-orders` |
+| Permissions → Contents | **Read-only** |
+| Permissions → Pull requests | **Read and write** |
+| Permissions → Commit statuses | **Read and write** |
+
+Choose **Generate token** and copy it. GitHub shows it only once.
+
+</Step>
+
+<Step title="Add the code">
+
+Clone the repository into your home folder and move into it:
+
+```sh ph="REPO_URL"
+git clone REPO_URL
+```
+
+| Part | What it means |
+|---|---|
+| `git clone` | copy a repository from GitHub to your Mac |
+| `REPO_URL` | the HTTPS address you copied |
+
+```sh
+cd quickcart-orders
+```
+
+| Part | What it means |
+|---|---|
+| `cd quickcart-orders` | move into the copy |
+
+Create these files, in these folders. First the code, a tiny function that adds up an order:
+
+```javascript title="src/total.mjs"
+export function orderTotal(items, deliveryFeeCents) {
+  const subtotal = items.reduce((sum, item) => sum + item.priceCents * item.quantity, 0);
+  return subtotal + deliveryFeeCents;
+}
+```
+
+Its tests, using the test runner built into Node:
+
+```javascript title="test/total.test.mjs"
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { orderTotal } from "../src/total.mjs";
+
+const items = [
+  { priceCents: 450, quantity: 2 },
+  { priceCents: 100, quantity: 1 },
+];
+
+test("orderTotal adds up the items", () => {
+  assert.equal(orderTotal(items, 0), 1000);
+});
+
+test("orderTotal adds the delivery fee", () => {
+  assert.equal(orderTotal(items, 250), 1250);
+});
+```
+
+A small web server around it, which the next lesson deploys:
+
+```javascript title="server.mjs"
+import { createServer } from "node:http";
+import { orderTotal } from "./src/total.mjs";
+
+const version = process.env.APP_VERSION || "dev";
+
+const server = createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  if (req.url === "/health") {
+    res.end(JSON.stringify({ status: "ok", version }));
+    return;
+  }
+  const example = orderTotal([{ priceCents: 450, quantity: 2 }], 250);
+  res.end(JSON.stringify({ service: "orders", version, exampleTotalCents: example }));
+});
+
+server.listen(8080, () => {
+  console.log(`orders ${version} listening on port 8080`);
+});
+```
+
+Its Dockerfile:
+
+```dockerfile title="Dockerfile"
+FROM node:24-alpine
+WORKDIR /app
+COPY src ./src
+COPY server.mjs ./
+ENV NODE_ENV=production
+USER 1000
+EXPOSE 8080
+CMD ["node", "server.mjs"]
+```
+
+`USER 1000` runs the server as the image's built-in `node` user, by number rather than name, so any system can resolve it. [Writing a Dockerfile](/lessons/dockerfile/) explains every other line.
+
+And a small piece of Terraform, in a folder called `infra`. It uses `terraform_data`, a resource built into Terraform that stores values and creates nothing in AWS, so the plan runs without an AWS login:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+variable "environment" {
+  description = "Which environment this plan is for"
+  type        = string
+  default     = "dev"
+}
+
+resource "terraform_data" "orders_service" {
+  input = {
+    environment   = var.environment
+    desired_count = 2
+    cpu           = 256
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version` | Refuse Terraform older than 1.10 | Any version is accepted | When you rely on newer features |
+| `variable "environment"` → `description` | A note for whoever sets it | No note | — |
+| `type = string` | Only text is accepted | Any type is accepted | — |
+| `default = "dev"` | The value if nobody sets one | Terraform asks for it, and the pipeline has nobody to answer | — |
+| `terraform_data` → `input` | Values stored in state, standing in for a real ECS service's settings | Nothing is stored | This is what the pull request will change |
+
+Before you push, run the same checks the pipeline will run:
+
+```sh
+node --test
+```
+
+| Part | What it means |
+|---|---|
+| `node --test` | find files named like `*.test.mjs` and run the tests in them |
+
+```output
+✔ orderTotal adds up the items (0.79ms)
+✔ orderTotal adds the delivery fee (0.14ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+```
+
+Your times will differ.
+
+</Step>
+
+<Step title="Add the Jenkinsfile and push">
+
+In the root of the repository:
+
+```groovy title="Jenkinsfile"
+pipeline {
+    agent any
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        timestamps()
+        disableConcurrentBuilds(abortPrevious: true)
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    environment {
+        TF_PLUGIN_CACHE_DIR = "${env.HOME}/.terraform.d/plugin-cache"
+    }
+
+    stages {
+        stage('Lint') {
+            steps {
+                sh 'hadolint Dockerfile'
+                sh 'terraform fmt -check -recursive infra'
+            }
+        }
+
+        stage('Unit tests') {
+            steps {
+                sh 'node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results.xml'
+            }
+            post {
+                always {
+                    junit 'test-results.xml'
+                }
+            }
+        }
+
+        stage('Build image') {
+            steps {
+                sh 'docker build -t "quickcart-orders:$GIT_COMMIT" .'
+            }
+        }
+
+        stage('Scan image') {
+            steps {
+                sh 'trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress "quickcart-orders:$GIT_COMMIT"'
+            }
+        }
+
+        stage('Terraform plan') {
+            when {
+                changeRequest()
+            }
+            steps {
+                dir('infra') {
+                    sh 'mkdir -p "$TF_PLUGIN_CACHE_DIR"'
+                    sh 'terraform init -input=false -no-color'
+                    sh 'terraform plan -input=false -no-color -out=tfplan'
+                    sh 'terraform show -no-color tfplan > plan.txt'
+                }
+                withCredentials([usernamePassword(credentialsId: 'github-token', usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+                    sh 'gh pr comment "$CHANGE_ID" --body-file infra/plan.txt'
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            echo "Build failed: ${env.BUILD_URL}"
+        }
+        cleanup {
+            deleteDir()
+        }
+    }
+}
+```
+
+| Line | What it means |
+|---|---|
+| `disableConcurrentBuilds(abortPrevious: true)` | A new push to the same branch aborts the build still running for the old commit |
+| `TF_PLUGIN_CACHE_DIR = "${env.HOME}/…"` | Keep downloaded Terraform providers in one folder that every build reuses. Groovy fills in your home folder |
+| `hadolint Dockerfile` | Lint the Dockerfile. Any finding fails the stage |
+| `terraform fmt -check -recursive infra` | Fail if any `.tf` file in `infra` isn't formatted. `-check` reports without changing files |
+| `node --test --test-reporter=spec --test-reporter-destination=stdout` | Run the tests, printing readable results in the log |
+| `--test-reporter=junit --test-reporter-destination=test-results.xml` | Also write the results as JUnit XML, the format Jenkins understands |
+| `junit 'test-results.xml'` in `post` → `always` | Read the results even when tests failed, so the build page lists which ones |
+| `docker build -t "quickcart-orders:$GIT_COMMIT" .` | Build the image, tagged with the commit being built. `GIT_COMMIT` is set by Jenkins' checkout |
+| `trivy image` | Scan the image's operating system packages and libraries against a list of known vulnerabilities |
+| `--exit-code 1 --severity CRITICAL` | Fail the stage only for **critical** findings. Start strict and narrow; widen it to HIGH once you're clean |
+| `--ignore-unfixed` | Skip vulnerabilities that have no fix yet, since there's nothing you could upgrade to |
+| `--no-progress` | No progress bar, which only clutters a build log |
+| `when { changeRequest() }` | The plan runs only for pull requests |
+| `dir('infra') { }` | Run the steps inside from the `infra` folder |
+| `terraform plan … -out=tfplan` | Work out the plan and save it to a file |
+| `terraform show -no-color tfplan > plan.txt` | Turn the saved plan into readable text. `>` writes that text into `plan.txt` instead of the log |
+| `usernamePassword(credentialsId: 'github-token', …)` | Fetch the GitHub token you'll store in Jenkins, into `GH_TOKEN`, which `gh` reads |
+| `gh pr comment "$CHANGE_ID" --body-file infra/plan.txt` | Comment on the pull request whose number is in `CHANGE_ID`, with the plan as the text |
+
+Commit and push it all to `main`:
+
+```sh
+git add .
+```
+
+| Part | What it means |
+|---|---|
+| `git add .` | include every new file in the next commit |
+
+```sh
+git commit -m "Orders service with a CI pipeline"
+```
+
+| Part | What it means |
+|---|---|
+| `git commit -m "…"` | record the files, with this message |
+
+```sh
+git push
+```
+
+| Part | What it means |
+|---|---|
+| `git push` | send the commit to GitHub |
+
+</Step>
+
+<Step title="Create the multibranch pipeline">
+
+In Jenkins, choose **New Item**:
+
+| Field | Enter |
+|---|---|
+| Enter an item name | `quickcart-orders` |
+| Type | **Multibranch Pipeline** |
+
+Choose **OK**. Under **Branch Sources**, choose **Add source** → **GitHub**. Next to **Credentials**, choose **Add** → **Jenkins**:
+
+| Field | Enter |
+|---|---|
+| Kind | **Username with password** |
+| Username | your GitHub username |
+| Password | the token you generated |
+| ID | `github-token` |
+| Description | `GitHub token for quickcart-orders` |
+
+Choose **Add**, then pick the new credential in the **Credentials** list and fill in the rest:
+
+| Field | Enter |
+|---|---|
+| Repository HTTPS URL | your `REPO_URL` |
+| Behaviours | Leave **Discover branches** and **Discover pull requests from origin**. **Delete** **Discover pull requests from forks** |
+| Build Configuration → Mode | **by Jenkinsfile**, Script Path `Jenkinsfile` |
+| Scan Multibranch Pipeline Triggers | Tick **Periodically if not otherwise run**, Interval **1 minute** |
+
+Choose **Save**.
+
+<Note title="Why forks are removed">
+
+The repository is public, so anyone can open a pull request from a fork. With fork discovery on, a stranger's code would run on your Mac, with your tools and your login. Real CI systems either run fork builds on isolated agents with no secrets, or wait for a maintainer to approve them.
+
+</Note>
+
+<See>
+
+The **Scan Repository Log** finds the `main` branch and its Jenkinsfile, and schedules a build. After a minute or two, the job shows a `main` job with build #1. Its stages all pass except **Terraform plan**, which is skipped, because `main` isn't a pull request. The first run is slow while Trivy downloads its vulnerability database.
+
+</See>
+
+<Mistake title="Trivy fails on the base image">
+
+```output title="The console output includes"
+Total: 1 (CRITICAL: 1)
+ERROR: script returned exit code 1
+```
+
+**Why:** a critical vulnerability with a fix was found in `node:24-alpine`. The gate is doing its job: the image you'd ship has a known problem.
+
+**The fix:** pull a newer `node:24-alpine` with `docker pull node:24-alpine` and build again. If the problem is in the newest image too, wait for the fix, or accept the risk explicitly by listing the finding in a `.trivyignore` file with a comment saying why and until when.
+
+</Mistake>
+
+</Step>
+
+<Step title="Open a pull request and get a plan">
+
+Make a branch:
+
+```sh
+git switch -c more-orders-capacity
+```
+
+| Part | What it means |
+|---|---|
+| `git switch -c` | create a branch and move to it |
+| `more-orders-capacity` | its name |
+
+In `infra/main.tf`, change `desired_count = 2` to `desired_count = 3`. Commit and push the branch:
+
+```sh
+git commit -am "Run three orders tasks"
+```
+
+| Part | What it means |
+|---|---|
+| `git commit` | record a change |
+| `-a` | include every file git already knows that you've changed |
+| `-m "…"` | the message |
+
+```sh
+git push -u origin more-orders-capacity
+```
+
+| Part | What it means |
+|---|---|
+| `git push` | send it to GitHub |
+| `-u origin more-orders-capacity` | create the branch on GitHub too, and remember the link |
+
+On GitHub, choose **Compare & pull request**, then **Create pull request**.
+
+<See>
+
+Within a minute or two, Jenkins shows a **Pull Requests** tab with `PR-1`. On GitHub, the pull request gets a comment from your account containing the plan, and a check called `continuous-integration/jenkins/pr-merge` that turns green.
+
+</See>
+
+```output title="The plan comment includes"
+  # terraform_data.orders_service will be created
+  + resource "terraform_data" "orders_service" {
+      + id     = (known after apply)
+      + input  = {
+          + cpu           = 256
+          + desired_count = 3
+          + environment   = "dev"
+        }
+      + output = (known after apply)
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+```
+
+It says **create** because this lab's Terraform has no shared state, so every plan starts from nothing. With the S3 state from [Terraform state](/lessons/terraform-state/), the same change would show `~ update in-place` and only the `desired_count` line.
+
+</Step>
+
+<Step title="Make the check required">
+
+On GitHub, in the repository, go to **Settings** → **Rules** → **Rulesets** → **New ruleset** → **New branch ruleset**:
+
+| Field | Enter |
+|---|---|
+| Ruleset Name | `protect-main` |
+| Enforcement status | **Active** |
+| Target branches | **Add target** → **Include default branch** |
+| Require a pull request before merging | ticked |
+| Require status checks to pass | ticked. **Add checks** → `continuous-integration/jenkins/pr-merge` |
+
+Choose **Create**.
+
+</Step>
+
+<Step title="Break a test">
+
+On the same branch, in `src/total.mjs`, change the last line of the function to forget the fee:
+
+```javascript title="src/total.mjs"
+export function orderTotal(items, deliveryFeeCents) {
+  const subtotal = items.reduce((sum, item) => sum + item.priceCents * item.quantity, 0);
+  return subtotal;
+}
+```
+
+```sh
+git commit -am "Simplify the total"
+```
+
+| Part | What it means |
+|---|---|
+| `git commit -am "…"` | record the change to a file git already knows, with this message |
+
+```sh
+git push
+```
+
+| Part | What it means |
+|---|---|
+| `git push` | send it. The branch already knows where to go |
+
+```output title="Build #2 of PR-1 includes"
+✖ orderTotal adds the delivery fee
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+  1000 !== 1250
+
+Stage "Build image" skipped due to earlier failure(s)
+Stage "Scan image" skipped due to earlier failure(s)
+Stage "Terraform plan" skipped due to earlier failure(s)
+Finished: FAILURE
+```
+
+<See>
+
+On GitHub, the check is red and the merge button says merging is blocked. On the build page in Jenkins, **Test Result** lists the one failing test by name, because `junit` read the report.
+
+</See>
+
+Put the `+ deliveryFeeCents` back, commit and push. The check goes green and the pull request can be merged. Merge it.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing here costs money. Keep the repository, the token and the `quickcart-orders` job: [Continuous delivery](/lessons/continuous-delivery/) builds on them.
+
+When you've finished with them, delete the job in Jenkins (**quickcart-orders** → **Delete Multibranch Pipeline**), delete the token on GitHub (**Settings** → **Developer settings** → **Fine-grained tokens** → **Delete**), and free the disk space the test images use:
+
+```sh
+docker image prune -a
+```
+
+| Part | What it means |
+|---|---|
+| `docker image prune` | delete images no container is using |
+| `-a` | all unused images, not only untagged ones. Docker asks you to confirm |
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Thing | Remember |
+|---|---|
+| CI | Every change checked the same way, on a clean agent, before it joins `main` |
+| Order | Cheapest first: lint, tests, build, scan, plan |
+| Fail fast | First failure stops the rest. `disableConcurrentBuilds(abortPrevious: true)` |
+| Multibranch | A job per branch and pull request. PR builds test the merge with `main` |
+| Webhook | `https://jenkins.example.com/github-webhook/`, with a secret. Polling is the slow fallback |
+| Required check | GitHub ruleset on `main`: `continuous-integration/jenkins/pr-merge` must pass |
+| Lint | `hadolint Dockerfile`, `terraform fmt -check -recursive` |
+| Tests | Write JUnit XML; `junit` in `post` → `always` |
+| Scan | `trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed` |
+| Plan on PR | Read-only role, shared state, `gh pr comment "$CHANGE_ID" --body-file plan.txt` |
+| Cache | Downloads (layers, packages, providers). Never results |
+| Shared library | `vars/name.groovy` → step `name()`. Load with `@Library('lib@v1') _` |
+| Flaky test | Quarantine with an owner. Never `retry` a test |
+
+</Cheat>
+
+</Part>

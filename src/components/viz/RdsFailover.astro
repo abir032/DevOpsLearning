@@ -1,0 +1,188 @@
+---
+/*
+ * RDS: what happens when a zone fails, Single-AZ vs Multi-AZ.
+ * Teaches: with Multi-AZ, RDS moves the endpoint's name to a standby that
+ * already has every write; with Single-AZ there is nowhere to move to.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="rds-failover">
+  <div class="viz-controls">
+    <span class="lbl" id="rf-lbl">Deployment</span>
+    <div class="seg" role="group" aria-labelledby="rf-lbl">
+      <button type="button" data-mode="single" aria-pressed="false">Single-AZ</button>
+      <button type="button" data-mode="multi" aria-pressed="true">Multi-AZ</button>
+    </div>
+    <button class="btn line" type="button" data-a="fail">Fail zone a</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole picture</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 370" role="img" aria-labelledby="rf-title">
+      <title id="rf-title">The QuickCart API connects to the database by its endpoint name. The name points at the primary database in zone a. In Multi-AZ, a standby copy sits in zone b.</title>
+      <text class="vz-label" x="20" y="32">Orders down for</text>
+      <text data-n="clock" class="rf-clock" x="20" y="62">0 s</text>
+
+      <path class="vz-wire" d="M160 215 L220 215" />
+
+      <rect data-n="app" class="vz-node" x="20" y="185" width="140" height="60" rx="10" />
+      <text class="vz-t" x="90" y="210" text-anchor="middle">QuickCart API</text>
+      <text data-n="app-s" class="vz-s" x="90" y="227" text-anchor="middle">orders working</text>
+
+      <rect class="vz-node" x="220" y="185" width="170" height="60" rx="10" />
+      <text class="vz-t" x="305" y="208" text-anchor="middle">Database endpoint</text>
+      <text class="vz-r" x="305" y="226" text-anchor="middle">quickcart-db (a DNS name)</text>
+
+      <rect data-n="za" class="vz-sub" x="440" y="20" width="320" height="160" rx="12" />
+      <text class="vz-s" x="456" y="42" font-weight="700">Zone a</text>
+      <rect data-n="pri" class="vz-node" x="500" y="84" width="200" height="48" rx="8" />
+      <text data-n="pri-t" class="vz-t" x="600" y="104" text-anchor="middle">Primary</text>
+      <text data-n="pri-s" class="vz-s" x="600" y="121" text-anchor="middle">reads and writes</text>
+
+      <rect data-n="zb" class="vz-sub" x="440" y="195" width="320" height="160" rx="12" />
+      <text class="vz-s" x="456" y="217" font-weight="700">Zone b</text>
+      <path data-n="dns-a" class="rf-dns" d="M390 200 L500 108" />
+      <path data-n="dns-b" class="rf-dns off" d="M390 230 L500 283" />
+      <path data-n="rep" class="rf-rep" d="M600 132 L600 258" />
+      <text data-n="rep-t" class="vz-s" x="610" y="191">copies every write</text>
+      <rect data-n="sby" class="vz-node" x="500" y="258" width="200" height="48" rx="8" />
+      <text data-n="sby-t" class="vz-t" x="600" y="278" text-anchor="middle">Standby</text>
+      <text data-n="sby-s" class="vz-s" x="600" y="295" text-anchor="middle">not used until needed</text>
+      <text data-n="empty" class="vz-s rf-empty" x="600" y="286" text-anchor="middle" opacity="0">nothing here</text>
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>The API talks to the database by its <b>endpoint name</b>, never by a server address. Choose <b>Fail zone a</b>, then switch to Single-AZ and try again.</div>
+</div>
+
+<script>
+  import { beat, press, reduced, sleep, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="rds-failover"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const clock = q<SVGTextElement>("clock");
+      const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+      const failBtn = root.querySelector<HTMLButtonElement>('[data-a="fail"]')!;
+      let mode: "single" | "multi" = "multi";
+      let run = 0;
+      let secs = 0;
+
+      const fmt = (s: number) => (s < 120 ? `${Math.round(s)} s` : `${Math.floor(s / 60)} min`);
+      function setClock(s: number, tone = "") {
+        secs = s;
+        clock.textContent = fmt(s);
+        clock.setAttribute("class", "rf-clock" + (tone ? " " + tone : ""));
+      }
+      /* Count the outage clock up to a value. Jumps when motion is reduced. */
+      async function countTo(to: number, ms: number, me: number) {
+        if (reduced()) { setClock(to, "bad"); await sleep(200); return; }
+        const from = secs;
+        const t0 = performance.now();
+        while (me === run) {
+          const k = Math.min(1, (performance.now() - t0) / ms);
+          setClock(from + (to - from) * k, "bad");
+          if (k >= 1) break;
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      }
+
+      function draw() {
+        const multi = mode === "multi";
+        q("sby").setAttribute("opacity", multi ? "1" : "0");
+        q("sby-t").setAttribute("opacity", multi ? "1" : "0");
+        q("sby-s").setAttribute("opacity", multi ? "1" : "0");
+        q("empty").setAttribute("opacity", multi ? "0" : "1");
+        q("rep").setAttribute("opacity", multi ? "1" : "0");
+        q("rep-t").setAttribute("opacity", multi ? "1" : "0");
+        q("za").setAttribute("class", "vz-sub");
+        q("pri").setAttribute("class", "vz-node okk");
+        q("sby").setAttribute("class", "vz-node");
+        q("app").setAttribute("class", "vz-node");
+        q("pri-t").textContent = "Primary";
+        q("pri-s").textContent = "reads and writes";
+        q("sby-t").textContent = "Standby";
+        q("sby-s").textContent = "not used until needed";
+        q("app-s").textContent = "orders working";
+        q("dns-a").setAttribute("class", "rf-dns");
+        q("dns-b").setAttribute("class", "rf-dns off");
+        setClock(0);
+      }
+
+      async function fail() {
+        const me = ++run; const ok = () => me === run;
+        failBtn.disabled = true; modeBtns.forEach((b) => (b.disabled = true));
+        draw();
+        q("za").setAttribute("class", "vz-sub exposed");
+        q("pri").setAttribute("class", "vz-node hit");
+        q("pri-s").textContent = "unreachable";
+        q("app").setAttribute("class", "vz-node hit");
+        q("app-s").textContent = "orders failing";
+        q("dns-a").setAttribute("class", "rf-dns broken");
+        tell(say, "Step 1: zone a fails", "Zone a goes dark, and the primary database with it. Every open connection from the API drops with <code>Lost connection to MySQL server</code>. New orders fail.", "bad");
+        await countTo(20, 1200, me); await beat(900); if (!ok()) return;
+
+        if (mode === "multi") {
+          q("sby").setAttribute("class", "vz-node lit");
+          q("sby-t").textContent = "Primary (was standby)";
+          q("sby-s").textContent = "promoted";
+          tell(say, "Step 2: promote the standby", "RDS notices the primary is gone and <b>promotes the standby</b>. It already has every committed order, because each write was copied to it before the write was confirmed to the API.");
+          await countTo(60, 1500, me); await beat(900); if (!ok()) return;
+          q("dns-a").setAttribute("class", "rf-dns off");
+          q("dns-b").setAttribute("class", "rf-dns");
+          tell(say, "Step 3: move the name", "RDS points the endpoint's <b>DNS name</b> at the new primary in zone b. The name stays the same; only where it leads changes.");
+          await countTo(90, 1200, me); await beat(900); if (!ok()) return;
+          q("sby").setAttribute("class", "vz-node okk");
+          q("app").setAttribute("class", "vz-node okk");
+          q("app-s").textContent = "reconnected";
+          setClock(90, "good");
+          tell(say, "Step 4: the API reconnects", "The API opens a new connection to the <b>same endpoint name</b> and reaches zone b. Orders work again after about a minute and a half — AWS says failover typically takes 60 to 120 seconds. No config change, and no committed order lost. When zone a recovers, RDS builds a new standby there.", "good");
+        } else {
+          q("empty").setAttribute("class", "vz-s rf-empty bad");
+          q("empty").textContent = "no copy to move to";
+          tell(say, "Step 2: nowhere to go", "Single-AZ means <b>there is no standby</b>. The only copy of the database's disk is in zone a. RDS has nothing to promote and nowhere to point the name.", "bad");
+          await countTo(900, 1800, me); await beat(900); if (!ok()) return;
+          setClock(900, "bad");
+          clock.textContent = "15 min and counting";
+          tell(say, "Step 3: still down", "Your choices are both bad. <b>Wait</b> for zone a to come back, which could be minutes or hours. Or <b>restore the latest backup into zone b</b>: that makes a new database with a <b>new endpoint name</b>, loses the last few minutes of orders, and means changing the API's config. Multi-AZ exists to avoid exactly this.", "bad");
+        }
+        failBtn.disabled = false; modeBtns.forEach((b) => (b.disabled = false));
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.mode) {
+          mode = b.dataset.mode as typeof mode;
+          press(modeBtns, (x) => x === b);
+          run++; draw();
+          tell(say, mode === "multi" ? "Multi-AZ" : "Single-AZ", mode === "multi"
+            ? "A <b>standby</b> in zone b receives a copy of every write, synchronously. You can't query it; it waits. Now fail zone a."
+            : "One database, in zone a only. Cheaper — about half the price. Now fail zone a.");
+        } else if (b.dataset.a === "fail") fail();
+        else if (b.dataset.a === "reset") {
+          run++; draw();
+          failBtn.disabled = false; modeBtns.forEach((x) => (x.disabled = false));
+          tell(say, "Ready", "Choose <b>Fail zone a</b>.");
+        }
+      });
+      draw();
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((f) => f());
+  });
+</script>
+
+<style is:global>
+  [data-viz="rds-failover"] .rf-clock { font-family: var(--font); font-size: 26px; font-weight: 800; fill: var(--ink); }
+  [data-viz="rds-failover"] .rf-clock.bad { fill: var(--bad); }
+  [data-viz="rds-failover"] .rf-clock.good { fill: var(--ok); }
+  [data-viz="rds-failover"] .rf-dns { fill: none; stroke: var(--cloud); stroke-width: 3; transition: opacity .3s; }
+  [data-viz="rds-failover"] .rf-dns.off { opacity: 0; }
+  [data-viz="rds-failover"] .rf-dns.broken { stroke: var(--bad); stroke-dasharray: 6 6; }
+  [data-viz="rds-failover"] .rf-rep { fill: none; stroke: var(--ink-3); stroke-width: 2; stroke-dasharray: 4 4; }
+  [data-viz="rds-failover"] .rf-empty { font-style: italic; }
+  [data-viz="rds-failover"] .rf-empty.bad { fill: var(--bad); font-weight: 700; font-style: normal; }
+</style>

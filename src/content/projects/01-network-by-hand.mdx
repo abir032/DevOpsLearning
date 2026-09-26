@@ -1,0 +1,1176 @@
+---
+time: 3 to 4 hours
+cost: about $3.50 a day while it exists; delete it after
+---
+
+QuickCart is about to leave its single server behind. Before any new server, load balancer or database can move in, it needs a network: one where customers can reach the front door, servers can reach the internet and AWS, and nothing outside can ever reach the database.
+
+In this project you build that network by hand, one piece at a time, in the AWS console. No wizard fills anything in for you. At the end you'll prove each piece works from inside the network, with real commands and real answers.
+
+## What you'll have at the end
+
+The finished network, drawn from what you'll build. Choose a kind of traffic to see which route-table line it uses.
+
+<NetworkByHandMap />
+
+| Piece | How many | What it's for |
+|---|---|---|
+| VPC `quickcart-vpc`, `10.0.0.0/16` | 1 | The private network everything lives in |
+| Subnets | 6: public, app and data, in each of two zones | Keeping each tier separate, in two buildings |
+| Internet gateway | 1 | The VPC's only door to the internet |
+| NAT gateway, with an Elastic IP | 1, in zone a | Lets private servers reach out, with nothing getting in |
+| Route tables | 4: public, app a, app b, data | Deciding which subnets are public, private or isolated |
+| Security groups | 4: load balancer, app, database, endpoints | A chain in which each group trusts only the one before it |
+| VPC endpoints | 1 gateway (S3) and 4 interface (Secrets Manager, SSM, SSM messages, EC2 messages) | Reaching AWS services without going through the internet |
+| IAM roles | 2: one for app servers, one for flow logs | Each can do exactly its job and nothing else |
+| Flow logs | 1 | A record of every connection accepted or rejected in the VPC |
+
+Project 2 builds a self-healing app on top of exactly this network.
+
+## Before you start
+
+Read these first. The project assumes you know what each piece is; here you put them together.
+
+| Lesson | What you need from it |
+|---|---|
+| [What is a VPC?](/lessons/vpc/) | VPCs, subnets and the one route that makes a subnet public |
+| [Subnets and IP ranges](/lessons/subnets-and-cidr/) | Reading `/16` and `/24`, and planning ranges |
+| [Routes, gateways and NAT](/lessons/routing/) | Internet gateways, NAT gateways and route tables |
+| [Security groups](/lessons/security-groups/) | Inbound and outbound rules, and naming another group as the source |
+| [Who can do what: IAM](/lessons/iam/) | Roles, policies and ARNs |
+| [Regions and zones](/lessons/regions-and-zones/) | Why everything comes in twos |
+
+You need:
+
+- An AWS account, signed in to the console as a user who can create VPC, EC2, IAM, S3, Secrets Manager and CloudWatch resources. [Set up your Mac](/lessons/mac-setup/) covers a safe login.
+- A **budget alert**, so a forgotten NAT gateway can't surprise you. **Billing and Cost Management → Budgets → Create budget**, a monthly cost budget of $20, with an email alert at 80%.
+- About 3 to 4 hours. You can stop between stages, but the NAT gateway and endpoints cost money while they exist.
+
+**Pick the region first.** At the top right of the console, choose **US East (N. Virginia) us-east-1**. Every resource in this project goes in that region. Check it at the start of each stage: a form that "can't see" your VPC is almost always in the wrong region.
+
+Your account ID appears in this project as `111122223333`. Find yours in the account menu at the top right, and use it wherever you see that number.
+
+## Cost
+
+<Cost kind="paid">about $3.50 a day while the NAT gateway and endpoints exist. Delete them when you're done.</Cost>
+
+| Resource | Rough price in us-east-1 | For this project |
+|---|---|---|
+| NAT gateway | about $0.045 an hour, plus $0.045 per GB it processes | about $1.10 a day |
+| Public IPv4 address (the NAT's Elastic IP) | about $0.005 an hour | about $0.12 a day |
+| Interface endpoints | about $0.01 an hour per endpoint per zone: 4 endpoints × 2 zones | about $1.92 a day |
+| S3 gateway endpoint | free | $0 |
+| Test server, `t3.micro`, with an 8 GB disk | about $0.0104 an hour, plus a few cents a day for the disk | about $0.30 a day, while it runs |
+| Secrets Manager secret | about $0.40 a month, charged by the day | about 1 cent a day |
+| S3 bucket with one small file | fractions of a cent | pennies |
+| Flow logs in CloudWatch Logs | about $0.50 per GB stored; a quiet VPC writes very little | pennies |
+| VPC, subnets, route tables, internet gateway, security groups, IAM roles | free | $0 |
+
+Prices change and differ by region. Check the AWS pricing pages for current figures.
+
+<Note title="Two things bill even when nothing is happening">
+
+The **NAT gateway** and the **interface endpoints** charge by the hour from the moment they exist, whether any traffic flows or not. Together they're most of this project's cost. If you stop for the day, you can delete them and recreate them later. The clean-up at the end removes everything, in the right order.
+
+</Note>
+
+## Stage 1: The VPC
+
+The VPC is the range of addresses everything else will live in. It has one important setting, the range, and one setting that's off by default and quietly breaks three things later.
+
+<Steps>
+
+<Step title="Create the VPC">
+
+<ConsolePath path="VPC > Your VPCs > Create VPC" />
+
+| Field | Enter |
+|---|---|
+| Resources to create | **VPC only**. The **VPC and more** option builds everything at once, which is exactly what this project avoids |
+| Name tag | `quickcart-vpc` |
+| IPv4 CIDR block | **IPv4 CIDR manual input** |
+| IPv4 CIDR | `10.0.0.0/16` |
+| IPv6 CIDR block | **No IPv6 CIDR block** |
+| Tenancy | **Default**. **Dedicated** costs much more and is for special compliance needs |
+
+Choose **Create VPC**.
+
+A `/16` gives you 65,536 addresses. You'll use a few dozen. The spare room is free, and it means you never have to renumber.
+
+</Step>
+
+<Step title="Turn on DNS hostnames">
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Actions > Edit VPC settings" />
+
+| Field | Enter |
+|---|---|
+| Enable DNS resolution | Ticked. It already is; leave it |
+| Enable DNS hostnames | **Ticked**. It's off by default for a VPC you create yourself |
+
+Choose **Save**.
+
+Without DNS hostnames, the interface endpoints in stage 7 can't use private DNS. Your servers would keep sending AWS traffic out through the NAT gateway, and the endpoints would bill you for doing nothing. The database's address in Project 2 wouldn't resolve either.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+On **Your VPCs**, `quickcart-vpc` with **State: Available**, **IPv4 CIDR: 10.0.0.0/16**, and on its **Details** tab both **DNS resolution** and **DNS hostnames** say **Enabled**.
+
+</See>
+
+## Stage 2: Six subnets
+
+A subnet is a slice of the VPC that lives in exactly one availability zone. Surviving the loss of a zone means having a copy of each tier in a second zone, so three tiers become six subnets.
+
+The numbering lets you read a subnet's job from its address: 1 and 2 are public, 11 and 12 are app, 21 and 22 are data. The gaps leave room to grow.
+
+<Steps>
+
+<Step title="Create all six on one form">
+
+<ConsolePath path="VPC > Subnets > Create subnet" />
+
+For **VPC ID**, choose `quickcart-vpc`. Fill in the first subnet, then choose **Add new subnet** for each of the others:
+
+| Subnet name | Availability Zone | IPv4 subnet CIDR block |
+|---|---|---|
+| `quickcart-public-a` | US East (N. Virginia) / us-east-1a | `10.0.1.0/24` |
+| `quickcart-public-b` | US East (N. Virginia) / us-east-1b | `10.0.2.0/24` |
+| `quickcart-app-a` | US East (N. Virginia) / us-east-1a | `10.0.11.0/24` |
+| `quickcart-app-b` | US East (N. Virginia) / us-east-1b | `10.0.12.0/24` |
+| `quickcart-data-a` | US East (N. Virginia) / us-east-1a | `10.0.21.0/24` |
+| `quickcart-data-b` | US East (N. Virginia) / us-east-1b | `10.0.22.0/24` |
+
+Leave **IPv4 VPC CIDR block** as `10.0.0.0/16`. Choose **Create subnet**.
+
+Nothing on this form makes a subnet public. The names are only labels for people. Stage 5's route tables decide what each subnet really is.
+
+</Step>
+
+<Step title="Check each subnet is in the zone you meant">
+
+<ConsolePath path="VPC > Subnets" />
+
+Look at the **Availability Zone** column. Two subnets that should be in different zones but ended up in the same one is a silent mistake. Nothing complains until the zone failure test in Project 2.
+
+<Mistake title="two subnets overlap">
+
+```output title="The console shows"
+The CIDR '10.0.11.0/24' conflicts with another subnet
+```
+
+**Why:** two subnets in one VPC can't share addresses. Usually a range was typed twice.
+
+**The fix:** give that row its own range from the table above.
+
+</Mistake>
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+Six subnets in **Subnets**, filtered to `quickcart-vpc`. Three are in `us-east-1a` and three are in `us-east-1b`. Each `/24` shows **251 available IPv4 addresses**, because AWS keeps 5 addresses in every subnet for itself.
+
+</See>
+
+## Stage 3: The internet gateway
+
+The internet gateway is the VPC's door to the internet. You create it and then attach it: two steps that people often only do half of.
+
+<Steps>
+
+<Step title="Create it">
+
+<ConsolePath path="VPC > Internet gateways > Create internet gateway" />
+
+| Field | Enter |
+|---|---|
+| Name tag | `quickcart-igw` |
+
+Choose **Create internet gateway**. Its state says **Detached**. It does nothing yet.
+
+</Step>
+
+<Step title="Attach it to the VPC">
+
+<ConsolePath path="VPC > Internet gateways > quickcart-igw > Actions > Attach to VPC" />
+
+| Field | Enter |
+|---|---|
+| Available VPCs | `quickcart-vpc` |
+
+Choose **Attach internet gateway**.
+
+An internet gateway costs nothing, and AWS runs it across every zone, so it can't be a single point of failure.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart-igw` with **State: Attached** and **VPC ID** showing `quickcart-vpc`.
+
+</See>
+
+## Stage 4: The NAT gateway
+
+Servers in the app subnets must never be reachable from the internet, but they still need to reach out: to install packages when they boot, for example. A NAT gateway is that one-way door.
+
+It goes in a **public** subnet, which feels backwards. It serves the private subnets, but it needs its own route to the internet gateway, and only a public subnet has one.
+
+<Steps>
+
+<Step title="Create the NAT gateway, with an Elastic IP">
+
+<ConsolePath path="VPC > NAT gateways > Create NAT gateway" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-nat-a` |
+| Subnet | `quickcart-public-a` |
+| Connectivity type | **Public** |
+| Elastic IP allocation ID | Choose **Allocate Elastic IP**. A new address is filled in |
+
+If your console also asks for an **Availability mode**, choose **Zonal**. This project deliberately builds the classic NAT gateway, which lives in one zone, so you can see the zone dependency it creates.
+
+Choose **Create NAT gateway**. It takes two or three minutes to become available.
+
+</Step>
+
+<Step title="Understand the trade-off you just made">
+
+One NAT gateway, in zone a, serves both zones. That halves its cost, but zone b's servers now depend on zone a for their way out to the internet. If zone a fails, they lose it.
+
+Stage 7 softens this: the endpoints give both zones a private path to the AWS services they need, without the NAT. The fully resilient design has **one NAT gateway per zone**, each app subnet using the one in its own zone, for about $1.10 more a day. Write this trade-off down now. You'll see it for yourself in Project 2's zone failure test.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+`quickcart-nat-a` with **State: Available**, **Connectivity type: Public**, and a **Primary public IPv4 address**. Write that address down. You'll see it again in *Prove it*.
+
+</See>
+
+## Stage 5: Route tables
+
+This is the stage that decides which subnets are public. Before it, every subnet uses the VPC's **main** route table, which has only the `local` route, so every subnet is isolated.
+
+You'll build four tables. Every table also gets `10.0.0.0/16 → local`, which AWS adds and you can't remove.
+
+| Route table | Its one extra route | Subnets | So the subnets are |
+|---|---|---|---|
+| `quickcart-rt-public` | `0.0.0.0/0 → quickcart-igw` | public-a, public-b | **Public** |
+| `quickcart-rt-app-a` | `0.0.0.0/0 → quickcart-nat-a` | app-a | **Private**: out only |
+| `quickcart-rt-app-b` | `0.0.0.0/0 → quickcart-nat-a` | app-b | **Private**: out only, through zone a |
+| `quickcart-rt-data` | none | data-a, data-b | **Isolated**: no way in or out |
+
+The two app tables say the same thing today. Keeping them separate makes the cross-zone dependency visible, and adding a second NAT gateway later becomes a one-line change.
+
+<Steps>
+
+<Step title="The public route table">
+
+<ConsolePath path="VPC > Route tables > Create route table" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-rt-public` |
+| VPC | `quickcart-vpc` |
+
+Choose **Create route table**. On its **Routes** tab, choose **Edit routes**, then **Add route**:
+
+| Destination | Target |
+|---|---|
+| `0.0.0.0/0` | **Internet Gateway**, then `quickcart-igw` |
+
+Choose **Save changes**. On the **Subnet associations** tab, choose **Edit subnet associations**, tick `quickcart-public-a` and `quickcart-public-b`, and choose **Save associations**.
+
+</Step>
+
+<Step title="The two app route tables">
+
+Create two more route tables in the same way, in `quickcart-vpc`:
+
+| Name | Route to add | Associate with |
+|---|---|---|
+| `quickcart-rt-app-a` | `0.0.0.0/0` → **NAT Gateway** → `quickcart-nat-a` | `quickcart-app-a` |
+| `quickcart-rt-app-b` | `0.0.0.0/0` → **NAT Gateway** → `quickcart-nat-a` | `quickcart-app-b` |
+
+</Step>
+
+<Step title="The data route table, with no routes added">
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-rt-data` |
+| VPC | `quickcart-vpc` |
+
+Add **no** routes. Associate it with `quickcart-data-a` and `quickcart-data-b`.
+
+An empty table is a security control. The database has no reason to reach the internet. With no route out, even a compromised database couldn't send data anywhere or download anything.
+
+</Step>
+
+<Step title="Check the main route table is harmless">
+
+<ConsolePath path="VPC > Route tables" />
+
+Find the table in `quickcart-vpc` that shows **Main: Yes**. It should have only the `local` route and no explicit subnet associations.
+
+Any subnet you forget to associate falls back to the main table. Keeping it local-only means a forgotten subnet has *too little* access, which you notice in minutes, rather than too much, which you might never notice.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+On **Subnets**, open each subnet's **Route table** tab. public-a and public-b show `quickcart-rt-public`; app-a shows `quickcart-rt-app-a`; app-b shows `quickcart-rt-app-b`; data-a and data-b show `quickcart-rt-data`. None shows the main table.
+
+</See>
+
+## Stage 6: Security groups
+
+A route table decides whether traffic **can** arrive. A security group decides whether it's **allowed** when it does. You'll build four, as a chain: each one names the group before it as its source, never a range of addresses.
+
+| Group | Inbound | From | Why |
+|---|---|---|---|
+| `quickcart-alb-sg` | HTTPS 443, HTTP 80 | `0.0.0.0/0`, anywhere | The load balancer is the only thing customers talk to. Port 80 is only there to redirect to HTTPS |
+| `quickcart-app-sg` | HTTP 80 | `quickcart-alb-sg` | Only the load balancer can reach the app servers |
+| `quickcart-db-sg` | MySQL 3306 | `quickcart-app-sg` | Only app servers can reach the database |
+| `quickcart-endpoints-sg` | HTTPS 443 | `quickcart-app-sg` | Only app servers can use the interface endpoints |
+
+Naming a group means "anything wearing that group". When a server is replaced and gets a new address, nothing needs updating.
+
+<Steps>
+
+<Step title="The load balancer's group">
+
+<ConsolePath path="VPC > Security groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-alb-sg` |
+| Description | `Load balancer: HTTPS and HTTP from anywhere` |
+| VPC | `quickcart-vpc` |
+
+Under **Inbound rules**, choose **Add rule** twice:
+
+| Type | Source |
+|---|---|
+| **HTTPS** | **Anywhere-IPv4** (`0.0.0.0/0`) |
+| **HTTP** | **Anywhere-IPv4** (`0.0.0.0/0`) |
+
+Leave **Outbound rules** as they are: **All traffic** to `0.0.0.0/0`. Choose **Create security group**.
+
+</Step>
+
+<Step title="The app servers' group">
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-app-sg` |
+| Description | `App servers: HTTP from the load balancer only` |
+| VPC | `quickcart-vpc` |
+
+One inbound rule:
+
+| Type | Source |
+|---|---|
+| **HTTP** | **Custom**, then start typing `quickcart-alb-sg` and choose the **group**, not an address range |
+
+**Leave the outbound rule in place: All traffic to `0.0.0.0/0`.** Security groups are stateful, so replies to incoming requests go back out on their own. But connections the server **starts** need an outbound rule, and a booting server does little else: it registers with Systems Manager, fetches its secret and downloads packages. Choose **Create security group**.
+
+There's no SSH rule, on purpose. You'll reach servers through Session Manager, which needs no open inbound port at all.
+
+</Step>
+
+<Step title="The database's group">
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-db-sg` |
+| Description | `Database: MySQL from app servers only` |
+| VPC | `quickcart-vpc` |
+
+| Type | Source |
+|---|---|
+| **MYSQL/Aurora** (port 3306) | **Custom** → `quickcart-app-sg` |
+
+Choose **Create security group**.
+
+</Step>
+
+<Step title="The endpoints' group">
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-endpoints-sg` |
+| Description | `Interface endpoints: HTTPS from app servers only` |
+| VPC | `quickcart-vpc` |
+
+| Type | Source |
+|---|---|
+| **HTTPS** | **Custom** → `quickcart-app-sg` |
+
+Choose **Create security group**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+Open `quickcart-db-sg` → **Inbound rules**. The source shows a group ID followed by `/ quickcart-app-sg`, not an address like `10.0.11.0/24`. The same goes for `quickcart-app-sg` (source `quickcart-alb-sg`) and `quickcart-endpoints-sg` (source `quickcart-app-sg`). No group except `quickcart-alb-sg` allows anything from `0.0.0.0/0`.
+
+</See>
+
+## Stage 7: VPC endpoints
+
+App servers need S3, Secrets Manager and Systems Manager. Without endpoints, those requests go out through the NAT gateway to AWS's public addresses. Endpoints keep them inside AWS's network, and keep them working if the NAT gateway or its zone fails.
+
+| Kind | How it works | Cost |
+|---|---|---|
+| **Gateway endpoint** (S3) | Adds a route to your route tables. S3's addresses go to the endpoint instead of the NAT gateway | Free |
+| **Interface endpoint** (everything else) | Puts a network interface with a private address in your subnets, and makes the service's normal name resolve to it | About $0.01 an hour per zone, each |
+
+<Steps>
+
+<Step title="The S3 gateway endpoint">
+
+<ConsolePath path="VPC > Endpoints > Create endpoint" />
+
+| Field | Enter |
+|---|---|
+| Name tag | `quickcart-ep-s3` |
+| Type | **AWS services** |
+| Services | Search for `s3`, and choose `com.amazonaws.us-east-1.s3` with **Type: Gateway**. There's also an **Interface** one with the same name; not that one |
+| VPC | `quickcart-vpc` |
+| Route tables | Tick `quickcart-rt-app-a` and `quickcart-rt-app-b` |
+| Policy | **Full access** |
+
+Choose **Create endpoint**.
+
+</Step>
+
+<Step title="Four interface endpoints">
+
+Create four more endpoints on the same form. Everything is the same except the name and the service:
+
+| Name tag | Service (Type: Interface) | What it's for |
+|---|---|---|
+| `quickcart-ep-secretsmanager` | `com.amazonaws.us-east-1.secretsmanager` | Reading the database password |
+| `quickcart-ep-ssm` | `com.amazonaws.us-east-1.ssm` | Systems Manager itself. Without it, Session Manager can't start |
+| `quickcart-ep-ssmmessages` | `com.amazonaws.us-east-1.ssmmessages` | The channel a Session Manager shell runs over. Without it, a session connects and then hangs |
+| `quickcart-ep-ec2messages` | `com.amazonaws.us-east-1.ec2messages` | The agent's command channel. Without it, the server may never show up as managed |
+
+For each one:
+
+| Field | Enter |
+|---|---|
+| Type | **AWS services** |
+| VPC | `quickcart-vpc` |
+| Additional settings → Enable DNS name | **Ticked**. This is the whole point: see below |
+| DNS record IP type | **IPv4** |
+| Subnets | us-east-1a → `quickcart-app-a`; us-east-1b → `quickcart-app-b` |
+| IP address type | **IPv4** |
+| Security groups | `quickcart-endpoints-sg` only. Untick the VPC's default group |
+| Policy | **Full access** |
+
+**Why the DNS setting matters.** With it ticked, the normal name `secretsmanager.us-east-1.amazonaws.com` resolves to the endpoint's private address inside your subnet. Your code doesn't change at all. With it unticked, the name still resolves to a public address, traffic still goes through the NAT gateway, and the endpoint sits there billing you.
+
+<Mistake title="private DNS can't be turned on">
+
+```output title="Creating the endpoint fails with"
+Enabling private DNS requires both enableDnsSupport and enableDnsHostnames VPC attributes set to true for vpc-0a1b2c3d
+```
+
+**Why:** DNS hostnames were never turned on for the VPC.
+
+**The fix:** do stage 1's **Edit VPC settings** step, then create the endpoint again.
+
+</Mistake>
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+**Endpoints** lists five, all with **Status: Available**: one of **Type: Gateway** and four of **Type: Interface**. Open `quickcart-rt-app-a` → **Routes**: there's a new route whose destination starts `pl-` (a prefix list, AWS's managed list of S3's addresses) with a target starting `vpce-`. Open any interface endpoint → **Subnets** tab: one private address in `10.0.11.x` and one in `10.0.12.x`.
+
+</See>
+
+## Stage 8: A bucket and a secret to test with
+
+To prove the endpoints and the roles work, you need something to read. Project 2 uses the same bucket for its app files.
+
+<Steps>
+
+<Step title="Create the bucket">
+
+<ConsolePath path="S3 > General purpose buckets > Create bucket" />
+
+| Field | Enter |
+|---|---|
+| Bucket type | **General purpose** |
+| Bucket name | `quickcart-assets-` followed by your account ID, like `quickcart-assets-111122223333`. Names are shared across every AWS account, so the number keeps yours unique |
+| Object Ownership | **ACLs disabled** (the default) |
+| Block all public access | **On** (the default). Leave all four boxes ticked |
+| Bucket Versioning | **Enable** |
+| Default encryption | **SSE-S3** (the default) |
+
+Choose **Create bucket**.
+
+</Step>
+
+<Step title="Upload a small test file">
+
+On your Mac, create a text file called `hello.txt` containing one line: `hello from quickcart`. Then:
+
+<ConsolePath path="S3 > quickcart-assets-111122223333 > Upload" />
+
+Choose **Add files**, pick `hello.txt`, and choose **Upload**.
+
+</Step>
+
+<Step title="Store a test secret">
+
+<ConsolePath path="Secrets Manager > Secrets > Store a new secret" />
+
+| Field | Enter |
+|---|---|
+| Secret type | **Other type of secret** |
+| Key/value pairs | Key `hello`, value `world` |
+| Encryption key | **aws/secretsmanager** (the default) |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Secret name | `quickcart/test` |
+| Description | `Test secret for the network project` |
+
+Choose **Next**. Leave **Automatic rotation** off, choose **Next**, then **Store**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+The bucket holds `hello.txt`, and its **Permissions** tab says **Block all public access: On**. **Secrets Manager** lists `quickcart/test`. Open it and copy its **Secret ARN**: it ends in `quickcart/test-` followed by six random characters. Those six characters matter in the next stage.
+
+</See>
+
+## Stage 9: Least-privilege IAM roles
+
+A server that calls AWS needs permission. Access keys on the server are how credentials leak. Instead, the server wears an **IAM role**: AWS hands it short-lived credentials that change on their own, and nothing is stored on disk.
+
+**Least privilege** means each role can do exactly its job. The app role can read **one** secret and **one** bucket, not every secret and every bucket.
+
+<Steps>
+
+<Step title="Create the app servers' role">
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+| Field | Enter |
+|---|---|
+| Trusted entity type | **AWS service** |
+| Service or use case | **EC2** |
+| Use case | **EC2** |
+
+Choose **Next**. Search for and tick these two AWS managed policies:
+
+| Policy | What it allows |
+|---|---|
+| `AmazonSSMManagedInstanceCore` | Registering with Systems Manager, so you can use Session Manager with no SSH |
+| `CloudWatchAgentServerPolicy` | Sending logs and metrics to CloudWatch. Project 2 uses it |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Role name | `quickcart-app-role` |
+| Description | `QuickCart app servers: SSM, CloudWatch, one secret, one bucket` |
+
+Choose **Create role**.
+
+</Step>
+
+<Step title="Add a policy for exactly one secret">
+
+<ConsolePath path="IAM > Roles > quickcart-app-role > Add permissions > Create inline policy" />
+
+Choose **JSON**, delete what's there, and paste this. Put your own account ID in place of the highlighted number:
+
+```json title="quickcart-read-secret" ph="111122223333"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTheTestSecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:us-east-1:111122223333:secret:quickcart/test-*"
+    }
+  ]
+}
+```
+
+| Part | What it means |
+|---|---|
+| `"Version": "2012-10-17"` | The policy language version. Always this date; it isn't when you wrote it |
+| `"Sid"` | A label for this statement, for people reading it |
+| `"Effect": "Allow"` | This statement grants permission. Anything not allowed is denied |
+| `"Action": "secretsmanager:GetSecretValue"` | Only reading a secret's value. Not listing secrets, changing them or deleting them |
+| `"Resource"` | Only this secret. The `-*` at the end matches the six random characters AWS adds to every secret's ARN. Without it, the policy matches nothing |
+
+Choose **Next**, name it `quickcart-read-secret`, and choose **Create policy**.
+
+</Step>
+
+<Step title="Add a policy for exactly one bucket">
+
+Create a second inline policy in the same way:
+
+```json title="quickcart-read-assets" ph="111122223333"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadObjects",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::quickcart-assets-111122223333/*"
+    },
+    {
+      "Sid": "ListTheBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::quickcart-assets-111122223333"
+    }
+  ]
+}
+```
+
+| Part | What it means |
+|---|---|
+| `s3:GetObject` on `…/*` | Read any **object** (file) in the bucket. Objects are addressed as bucket name, a slash, then the object's key, hence `/*` |
+| `s3:ListBucket` on the bucket's ARN | List what's **in** the bucket. This action acts on the bucket itself, so its ARN has no `/*` |
+
+Name it `quickcart-read-assets` and choose **Create policy**. Mixing up the two ARNs is one of the most common IAM mistakes there is: see *Troubleshooting*.
+
+</Step>
+
+<Step title="Create the flow logs' log group">
+
+Flow logs need somewhere to write. Create the log group first, so the role can be limited to exactly it.
+
+<ConsolePath path="CloudWatch > Log groups > Create log group" />
+
+| Field | Enter |
+|---|---|
+| Log group name | `/quickcart/vpc-flow-logs` |
+| Retention setting | **1 week**. Logs kept forever cost money forever |
+| Log class | **Standard** |
+
+Choose **Create**.
+
+</Step>
+
+<Step title="Create the flow logs' role">
+
+This role is used by the VPC Flow Logs service, not by a server, so it needs a custom trust policy.
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+For **Trusted entity type**, choose **Custom trust policy**, and paste:
+
+```json title="Trust policy" ph="111122223333"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": { "Service": "vpc-flow-logs.amazonaws.com" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "aws:SourceAccount": "111122223333" }
+      }
+    }
+  ]
+}
+```
+
+| Part | What it means |
+|---|---|
+| `"Principal": { "Service": "vpc-flow-logs.amazonaws.com" }` | Only the VPC Flow Logs service may use this role |
+| `"Action": "sts:AssumeRole"` | "Use" means taking on the role's permissions for a while |
+| `"Condition"` → `"aws:SourceAccount"` | And only when it's acting for **your** account. This stops another account's flow logs being pointed at your role |
+
+Choose **Next**, add no managed policies, choose **Next**, name it `quickcart-flow-logs-role`, and choose **Create role**. Then add this inline policy to it, named `quickcart-write-flow-logs`:
+
+```json title="quickcart-write-flow-logs" ph="111122223333"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteToOneLogGroup",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:111122223333:log-group:/quickcart/vpc-flow-logs:*"
+    },
+    {
+      "Sid": "FindTheLogGroup",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+| Part | What it means |
+|---|---|
+| `logs:CreateLogStream`, `logs:PutLogEvents` | Create a stream inside the group, and write records to it |
+| `logs:DescribeLogStreams` | See which streams already exist |
+| Resource ending `log-group:/quickcart/vpc-flow-logs:*` | Only this one log group, and the streams inside it |
+| `logs:DescribeLogGroups` on `*` | List the names of log groups, to find this one. It can't read or change any of them |
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+**IAM → Roles** lists `quickcart-app-role` with 2 managed and 2 inline policies, and `quickcart-flow-logs-role` with 1 inline policy. Neither has anything like `AdministratorAccess` or a `*` action.
+
+</See>
+
+## Stage 10: Flow logs
+
+Flow logs record every connection in the VPC: who talked to whom, on which port, and whether it was **ACCEPT**ed or **REJECT**ed. When something times out, they tell you whether a security group dropped it.
+
+<Steps>
+
+<Step title="Turn on flow logs for the VPC">
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Flow logs > Create flow log" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-flow-logs` |
+| Filter | **All**. In production you might record only **Reject**, to save money |
+| Maximum aggregation interval | **1 minute**, so records appear quickly |
+| Destination | **Send to CloudWatch Logs** |
+| Destination log group | `/quickcart/vpc-flow-logs` |
+| Service access / IAM role | **Use an existing service role**, then `quickcart-flow-logs-role` |
+| Log record format | **AWS default format** |
+
+Choose **Create flow log**.
+
+</Step>
+
+</Steps>
+
+**Checkpoint**
+
+<See>
+
+On the VPC's **Flow logs** tab, `quickcart-flow-logs` with **Status: Active**. The log group fills up after the next section starts some traffic.
+
+</See>
+
+## Prove it
+
+Every piece is in place. Now prove it from **inside** the network, with a throwaway server in an app subnet: no public address, no SSH key, and only the app security group and app role.
+
+Each check below tests one or more pieces. If one fails, *Troubleshooting* says which piece to look at.
+
+<Steps>
+
+<Step title="Launch a test server in app subnet a">
+
+<ConsolePath path="EC2 > Instances > Launch instances" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-test` |
+| Application and OS Images | **Amazon Linux 2023 AMI**, 64-bit (x86) |
+| Instance type | `t3.micro` |
+| Key pair | **Proceed without a key pair** |
+
+Under **Network settings**, choose **Edit**:
+
+| Field | Enter |
+|---|---|
+| VPC | `quickcart-vpc` |
+| Subnet | `quickcart-app-a` |
+| Auto-assign public IP | **Disable** |
+| Firewall (security groups) | **Select existing security group** → `quickcart-app-sg` |
+
+Under **Advanced details**:
+
+| Field | Enter |
+|---|---|
+| IAM instance profile | `quickcart-app-role` |
+| Metadata version | **V2 only (token required)** |
+
+Choose **Launch instance**. Wait until **Status check** shows **3/3 checks passed**, a few minutes.
+
+</Step>
+
+<Step title="Check 1: Session Manager connects">
+
+<ConsolePath path="EC2 > Instances > quickcart-test > Connect > Session Manager > Connect" />
+
+<See>
+
+A black terminal in your browser, with a prompt like `sh-5.2$`. That alone proves several things: the app role reached the server, the `ssm`, `ssmmessages` and `ec2messages` endpoints work, the endpoints' security group lets the app group in, and the app group's outbound rule is there. No port was opened and no key was used.
+
+</See>
+
+If the **Connect** button says the agent isn't online, wait two more minutes. If it still isn't, see *Troubleshooting*.
+
+</Step>
+
+<Step title="Check 2: the NAT gateway works">
+
+In the Session Manager terminal:
+
+```sh
+curl -s checkip.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch a web address and print what comes back |
+| `-s` | silent: no progress bar |
+| `checkip.amazonaws.com` | an AWS page that replies with the public address your request came from |
+
+```output
+203.0.113.25
+```
+
+The address should match the NAT gateway's public address from stage 4, not anything belonging to the server, which has no public address. That proves the app route table sends traffic to the NAT, the NAT works, the public route table sends it to the internet gateway, and the gateway is attached.
+
+</Step>
+
+<Step title="Check 3: Secrets Manager's name resolves to a private address">
+
+```sh
+getent hosts secretsmanager.us-east-1.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `getent hosts` | look up the address a name resolves to, the same way programs on this server do |
+| `secretsmanager.us-east-1.amazonaws.com` | the normal, public name of Secrets Manager in this region |
+
+```output
+10.0.11.143     secretsmanager.us-east-1.amazonaws.com
+```
+
+Your address differs, but it starts `10.0.11.`: the endpoint's interface in this subnet. That's private DNS working.
+
+</Step>
+
+<Step title="Check 4: read the secret through the endpoint">
+
+```sh
+aws secretsmanager get-secret-value --secret-id quickcart/test --query SecretString --output text --region us-east-1
+```
+
+| Part | What it means |
+|---|---|
+| `aws secretsmanager get-secret-value` | ask Secrets Manager for a secret's value |
+| `--secret-id quickcart/test` | which secret, by name |
+| `--query SecretString` | print only the secret itself, not the other details |
+| `--output text` | as plain text instead of JSON |
+| `--region us-east-1` | the region the secret is in |
+
+```output
+{"hello":"world"}
+```
+
+The server used the role's short-lived credentials, reached Secrets Manager over the endpoint, and was allowed by the one-secret policy.
+
+</Step>
+
+<Step title="Check 5: read from S3 through the gateway endpoint">
+
+```sh
+aws s3 cp s3://quickcart-assets-111122223333/hello.txt - --region us-east-1
+```
+
+| Part | What it means |
+|---|---|
+| `aws s3 cp` | copy a file to or from S3 |
+| `s3://quickcart-assets-111122223333/hello.txt` | the file you uploaded. **Use your own bucket name** |
+| `-` | copy it to the screen instead of to a file |
+| `--region us-east-1` | the bucket's region |
+
+```output
+hello from quickcart
+```
+
+</Step>
+
+<Step title="Check 6: least privilege says no">
+
+Now ask for something the role was never given: a list of every bucket in the account.
+
+```sh
+aws s3 ls --region us-east-1
+```
+
+| Part | What it means |
+|---|---|
+| `aws s3 ls` | with no bucket named, list every bucket in the account |
+| `--region us-east-1` | the region to ask |
+
+```output
+An error occurred (AccessDenied) when calling the ListBuckets operation: User: arn:aws:sts::111122223333:assumed-role/quickcart-app-role/i-0a1b2c3d is not authorized to perform: s3:ListAllMyBuckets because no identity-based policy allows the s3:ListAllMyBuckets action
+```
+
+**This error is a pass.** The role can read one bucket, and can't even see that others exist. Your instance ID in the message differs.
+
+</Step>
+
+<Step title="Check 7: flow logs are recording">
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/vpc-flow-logs" />
+
+<See>
+
+One or more **log streams**, named after network interfaces (`eni-…`). Open one: each line is one flow, ending in `ACCEPT OK` or `REJECT OK`. Traffic to port 443 on the endpoints' private addresses shows up as `ACCEPT`.
+
+</See>
+
+</Step>
+
+</Steps>
+
+Record your results. Everything should pass:
+
+| Check | Proves | Result |
+|---|---|---|
+| 1. Session Manager connects | App role, three SSM endpoints, endpoints group, app group's outbound rule | |
+| 2. `curl` shows the NAT's address | App route tables, NAT gateway, public route table, internet gateway | |
+| 3. The name resolves to `10.0.11.x` | DNS hostnames, private DNS on the interface endpoints | |
+| 4. Secret read | Secrets Manager endpoint, secret policy | |
+| 5. File read | S3 gateway endpoint, bucket policy | |
+| 6. Listing all buckets refused | The role is least-privilege | |
+| 7. Flow log records | Flow logs role and log group | |
+
+Nothing here tested the data subnets directly: nothing lives there yet. Their route table, with only `local`, and the database group, which only trusts `quickcart-app-sg`, are checked by reading them in stages 5 and 6. Project 2 puts a database there and proves the chain end to end.
+
+## Troubleshooting
+
+These are real mistakes from building exactly this network.
+
+<Mistake title="everything on the server times out, and Session Manager won't connect">
+
+The server starts, but **Connect** says the agent isn't online. With no shell, you can't look inside. **EC2 → Instances → quickcart-test → Actions → Monitor and troubleshoot → Get system log** shows the boot output, with lines like:
+
+```output title="The system log shows lines like"
+Failed to connect to ssm.us-east-1.amazonaws.com port 443 after 130000 ms: Connection timed out
+```
+
+**Why:** `quickcart-app-sg` has **no outbound rule**. It's easy to assume that because security groups are stateful, outbound is taken care of. Only **replies** are. Every connection the server starts, to the SSM endpoints, to Secrets Manager, to package mirrors, needs an outbound rule, and a timeout is what a dropped packet looks like.
+
+**The fix:** add the outbound rule back to `quickcart-app-sg`: **All traffic** to `0.0.0.0/0`. The agent connects within a minute or two. The **Get system log** trick is worth remembering: it works even when nothing else can reach the server.
+
+</Mistake>
+
+<Mistake title="Session Manager connects, then the shell never appears">
+
+The browser tab opens and stays blank, or shows only a spinner.
+
+**Why:** the `ssmmessages` endpoint is missing, or it's using the VPC's default security group. Registration uses `ssm` and `ec2messages`, but the shell itself runs over `ssmmessages`.
+
+**The fix:** check that `quickcart-ep-ssmmessages` exists, is **Available**, is in both app subnets, and has `quickcart-endpoints-sg`. To change an endpoint's group: **VPC → Endpoints → the endpoint → Actions → Manage security groups**.
+
+</Mistake>
+
+<Mistake title="reading a file from S3 says Forbidden, with no reason">
+
+```output title="aws s3 cp fails with"
+fatal error: An error occurred (403) when calling the HeadObject operation: Forbidden
+```
+
+**Why:** `s3:GetObject` was granted on `arn:aws:s3:::quickcart-assets-111122223333`, the **bucket**, instead of `arn:aws:s3:::quickcart-assets-111122223333/*`, the **objects in it**. The CLI checks the file first with a `HeadObject` request, which S3 refuses without saying why.
+
+**The fix:** make sure the `GetObject` statement's resource ends in `/*`, and the `ListBucket` statement's doesn't.
+
+</Mistake>
+
+<Mistake title="the role can't read its own secret">
+
+```output title="get-secret-value fails with"
+An error occurred (AccessDeniedException) when calling the GetSecretValue operation: User: arn:aws:sts::111122223333:assumed-role/quickcart-app-role/i-0a1b2c3d is not authorized to perform: secretsmanager:GetSecretValue on resource: quickcart/test because no identity-based policy allows the secretsmanager:GetSecretValue action
+```
+
+**Why:** the policy's resource ends in `secret:quickcart/test` with no `-*`. Every secret's real ARN has six random characters on the end, so the policy matches nothing.
+
+**The fix:** end the resource with `quickcart/test-*`, or paste the secret's full ARN from its page.
+
+</Mistake>
+
+<Mistake title="the secret request hangs instead of failing">
+
+The `get-secret-value` command sits there for a minute or more, then fails with a message about the endpoint URL or a timeout.
+
+**Why:** the interface endpoints are still using the VPC's **default** security group, which only allows traffic from itself. Nothing from `quickcart-app-sg` gets in, and dropped traffic looks like silence.
+
+**The fix:** swap each interface endpoint's group to `quickcart-endpoints-sg`, as in *the shell never appears* above.
+
+</Mistake>
+
+<Mistake title="curl to checkip hangs">
+
+`curl -s checkip.amazonaws.com` prints nothing for a long time.
+
+**Why:** usually one of three things. The NAT gateway was created in a **private** subnet, so it has no route to the internet itself. Its **Connectivity type** is **Private**. Or `quickcart-app-a` is still using the main route table, which has no `0.0.0.0/0` route.
+
+**The fix:** check the app subnet's **Route table** tab first. If that's right, open the NAT gateway and check its **Subnet** is `quickcart-public-a` and its type is **Public**. A NAT gateway can't be moved; delete it and create it again in the right place.
+
+</Mistake>
+
+<Mistake title="the bill still shows an Elastic IP after clean-up">
+
+**Why:** deleting a NAT gateway doesn't release its Elastic IP. An address that isn't released keeps costing about $0.005 an hour, even attached to nothing.
+
+**The fix:** **VPC → Elastic IPs → the address → Actions → Release Elastic IP addresses**. The clean-up below includes it.
+
+</Mistake>
+
+## Clean up
+
+**Going straight on to Project 2?** Terminate the test server (step 1) and keep everything else: Project 2 builds on this network. If you'll start it another day, do the whole clean-up now and rebuild later. The network costs about $3.50 a day even when idle.
+
+Delete things in this order. Some can't be deleted while something else still uses them.
+
+<Steps>
+
+<Step title="Terminate the test server">
+
+<ConsolePath path="EC2 > Instances > quickcart-test > Instance state > Terminate (delete) instance" />
+
+Confirm with **Terminate (delete)**. Its state goes to **Terminated**.
+
+</Step>
+
+<Step title="Delete the five endpoints">
+
+<ConsolePath path="VPC > Endpoints" />
+
+Tick all five `quickcart-ep-…` endpoints, choose **Actions → Delete VPC endpoints**, type `delete`, and choose **Delete**.
+
+</Step>
+
+<Step title="Delete the NAT gateway, then release its address">
+
+<ConsolePath path="VPC > NAT gateways > quickcart-nat-a > Actions > Delete NAT gateway" />
+
+Type `delete` and confirm. Wait until its state is **Deleted**, a minute or two. Then:
+
+<ConsolePath path="VPC > Elastic IPs > the address > Actions > Release Elastic IP addresses" />
+
+Choose **Release**.
+
+</Step>
+
+<Step title="Delete the flow log, then the VPC">
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Flow logs > quickcart-flow-logs > Actions > Delete flow logs" />
+
+Then delete the VPC itself:
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Actions > Delete VPC" />
+
+The console lists what goes with it: the six subnets, the route tables, the internet gateway and the security groups. Type `delete` and choose **Delete**.
+
+</Step>
+
+<Step title="Empty and delete the bucket">
+
+<ConsolePath path="S3 > quickcart-assets-111122223333 > Empty" />
+
+Type `permanently delete` and choose **Empty**. With versioning on, this also removes every old version. Then choose **Delete** on the bucket and type its name to confirm.
+
+</Step>
+
+<Step title="Schedule the secret for deletion">
+
+<ConsolePath path="Secrets Manager > quickcart/test > Actions > Delete secret" />
+
+Set the waiting period to **7 days**, the shortest the console allows, and choose **Schedule deletion**. You're not charged for a secret that's waiting to be deleted.
+
+</Step>
+
+<Step title="Delete the log group and the two roles">
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/vpc-flow-logs > Actions > Delete log group(s)" />
+
+<ConsolePath path="IAM > Roles" />
+
+Tick `quickcart-app-role` and `quickcart-flow-logs-role`, choose **Delete**, type `delete` and confirm. Their inline policies go with them.
+
+</Step>
+
+<Step title="Confirm nothing is left billing" cleanup>
+
+Check each of these:
+
+| Where | Should show |
+|---|---|
+| **VPC → NAT gateways** | Nothing, or only `quickcart-nat-a` as **Deleted** |
+| **VPC → Elastic IPs** | No addresses |
+| **VPC → Endpoints** | No endpoints |
+| **VPC → Your VPCs** | Only the account's default VPC |
+| **EC2 → Instances** | `quickcart-test` as **Terminated**, or gone |
+| **Resource Groups & Tag Editor → Tag Editor**, region us-east-1, resource types **All supported resource types**, search | No resources with a `quickcart` name |
+
+<See>
+
+All six checks come back empty. Tomorrow, check **Billing and Cost Management → Bills**: the charges for this project stop on the day you cleaned up.
+
+</See>
+
+</Step>
+
+</Steps>

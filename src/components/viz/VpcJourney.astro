@@ -1,0 +1,165 @@
+---
+/*
+ * VPC: a request's journey through the network.
+ * Teaches: one line in a route table decides what the internet can reach.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="vpc-journey">
+  <div class="viz-controls">
+    <span class="lbl" id="vj-lbl">Database subnet</span>
+    <div class="seg" role="group" aria-labelledby="vj-lbl">
+      <button type="button" data-mode="private" aria-pressed="true">Private</button>
+      <button type="button" data-mode="public" aria-pressed="false">Public</button>
+    </div>
+    <button class="btn line" type="button" data-act="order">Send an order</button>
+    <button class="btn" type="button" data-act="attack">Attack the database</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole network</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 400" role="img" aria-labelledby="vj-title">
+      <title id="vj-title">QuickCart's network. On the internet: the QuickCart app and a bot. An internet gateway leads into the VPC. Inside, a public subnet holds the load balancer, a private app subnet holds the API servers, and a database subnet holds the database.</title>
+      <text class="vz-label" x="22" y="42">The internet</text>
+      <path class="vz-wire" d="M140 102 L240 200" /><path class="vz-wire" d="M140 294 L240 200" />
+      <path class="vz-wire" d="M240 200 L318 119" /><path class="vz-wire" d="M452 119 L575 119" /><path class="vz-wire" d="M642 142 L642 263" />
+      <rect class="vz-vpc" x="240" y="20" width="525" height="365" rx="14" />
+      <text class="vz-label" x="262" y="44">QuickCart VPC (10.0.0.0/16)</text>
+
+      <rect class="vz-sub pub" x="290" y="60" width="190" height="130" rx="10" />
+      <text class="vz-s" x="302" y="78" font-weight="700">Public subnet</text>
+      <text class="vz-r" x="302" y="178">0.0.0.0/0 → internet gw</text>
+      <rect data-n="lb" class="vz-node" x="318" y="96" width="134" height="46" rx="8" />
+      <text class="vz-t" x="385" y="116" text-anchor="middle">Load balancer</text>
+      <text class="vz-s" x="385" y="132" text-anchor="middle">the front door</text>
+
+      <rect class="vz-sub" x="540" y="60" width="205" height="130" rx="10" />
+      <text class="vz-s" x="552" y="78" font-weight="700">App subnet (private)</text>
+      <text class="vz-r" x="552" y="178">0.0.0.0/0 → NAT gw (out only)</text>
+      <rect data-n="api" class="vz-node" x="575" y="96" width="134" height="46" rx="8" />
+      <text class="vz-t" x="642" y="116" text-anchor="middle">API servers</text>
+      <text class="vz-s" x="642" y="132" text-anchor="middle">the order service</text>
+
+      <rect data-n="dbsub" class="vz-sub" x="540" y="225" width="205" height="140" rx="10" />
+      <text class="vz-s" x="552" y="243" font-weight="700">Database subnet</text>
+      <text data-n="dbroute" class="vz-r" x="552" y="352">local only — no way in</text>
+      <rect data-n="db" class="vz-node" x="575" y="263" width="134" height="50" rx="8" />
+      <text class="vz-t" x="642" y="285" text-anchor="middle">Database</text>
+      <text class="vz-s" x="642" y="301" text-anchor="middle">every order</text>
+
+      <rect data-n="phone" class="vz-node" x="20" y="70" width="120" height="64" rx="10" />
+      <text class="vz-t" x="80" y="98" text-anchor="middle">QuickCart app</text>
+      <text class="vz-s" x="80" y="115" text-anchor="middle">a customer's phone</text>
+      <rect data-n="bot" class="vz-node" x="20" y="262" width="120" height="64" rx="10" />
+      <text class="vz-t" x="80" y="290" text-anchor="middle">A bot</text>
+      <text class="vz-s" x="80" y="307" text-anchor="middle">scans the internet</text>
+
+      <rect class="vz-igw" x="226" y="176" width="28" height="48" rx="5" />
+      <path class="vz-igw-bars" d="M233 186v28M240 186v28M247 186v28" />
+      <text class="vz-s" x="240" y="244" text-anchor="middle" font-weight="700">internet</text>
+      <text class="vz-s" x="240" y="258" text-anchor="middle" font-weight="700">gateway</text>
+
+      <g data-n="x" opacity="0"><line class="vz-x" x1="522" y1="278" x2="540" y2="296" /><line class="vz-x" x1="540" y1="278" x2="522" y2="296" /></g>
+      <circle data-n="dot" class="vz-dot" r="8" cx="140" cy="102" opacity="0" />
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Choose <b>Send an order</b> to follow a request from the app.</div>
+</div>
+
+<script>
+  import { beat, moveDot, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="vpc-journey"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const dot = q<SVGCircleElement>("dot");
+    const x = q<SVGGElement>("x");
+    const dbSub = q<SVGRectElement>("dbsub");
+    const dbRoute = q<SVGTextElement>("dbroute");
+    const nodes = ["lb", "api", "db", "phone", "bot"].map((n) => q<SVGRectElement>(n));
+    const [lb, api, db, phone, bot] = nodes;
+    const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+    let mode: "private" | "public" = "private";
+    let run = 0; /* bumped on reset, so an animation in flight stops narrating */
+
+    function clear() {
+      nodes.forEach((n) => n.classList.remove("lit", "hit", "okk"));
+      dot.setAttribute("opacity", "0");
+      x.setAttribute("opacity", "0");
+    }
+    function busy(on: boolean) {
+      root.querySelectorAll<HTMLButtonElement>("[data-act=order],[data-act=attack],[data-mode]").forEach((b) => (b.disabled = on));
+    }
+    function setMode(m: typeof mode) {
+      mode = m;
+      press(modeBtns, (b) => b.dataset.mode === m);
+      dbSub.setAttribute("class", m === "public" ? "vz-sub exposed" : "vz-sub");
+      dbRoute.textContent = m === "public" ? "0.0.0.0/0 → internet gateway" : "local only — no way in";
+      dbRoute.setAttribute("class", m === "public" ? "vz-r bad" : "vz-r");
+      clear();
+      tell(say, "Database subnet: " + m, m === "public"
+        ? "The database subnet's route table now sends <b>0.0.0.0/0 to the internet gateway</b>. One line changed. Try the attack again."
+        : "The database subnet has <b>no route to the internet</b>. Nothing outside can start a connection to it. Try the attack.");
+    }
+
+    async function order() {
+      const me = ++run; busy(true); clear();
+      const live = () => me === run;
+      phone.classList.add("lit");
+      tell(say, "Step 1 of 6", "A customer taps <b>Place order</b>. The app sends it to QuickCart's address on the internet.");
+      await moveDot(dot, [[140, 102], [240, 200]]); if (!live()) return;
+      tell(say, "Step 2 of 6", "It reaches the <b>internet gateway</b> — the VPC's only door. The public subnet's route table uses this door, so the request may enter.");
+      await beat(500); await moveDot(dot, [[240, 200], [318, 119]]); if (!live()) return;
+      lb.classList.add("lit");
+      tell(say, "Step 3 of 6", "The <b>load balancer</b> in the public subnet receives it. This is the only thing QuickCart puts in a public subnet.");
+      await beat(450); await moveDot(dot, [[452, 119], [575, 119]]); if (!live()) return;
+      api.classList.add("lit");
+      tell(say, "Step 4 of 6", "The load balancer passes it to an <b>API server</b> in the private app subnet, over the VPC's <code>local</code> route. It never touches the internet.");
+      await beat(450); await moveDot(dot, [[642, 142], [642, 263]]); if (!live()) return;
+      db.classList.add("okk");
+      tell(say, "Step 5 of 6", "The API saves the order in the <b>database</b>. It can reach the database because they are neighbours inside the VPC.");
+      await beat(700);
+      dot.setAttribute("class", "vz-dot back");
+      await moveDot(dot, [[642, 263], [642, 142], [575, 119], [452, 119], [318, 119], [240, 200], [140, 102]], 520); if (!live()) return;
+      dot.setAttribute("class", "vz-dot");
+      phone.classList.replace("lit", "okk");
+      tell(say, "Step 6 of 6", "<b>Order confirmed</b> travels back the same way. The customer only ever talked to the load balancer — never to the database.", "good");
+      busy(false);
+    }
+
+    async function attack() {
+      const me = ++run; busy(true); clear();
+      const live = () => me === run;
+      bot.classList.add("hit");
+      dot.setAttribute("class", "vz-dot bot");
+      tell(say, "Step 1 of 3", "A bot scanning the internet tries to connect straight to the <b>database</b>.");
+      await moveDot(dot, [[140, 294], [240, 200]]); if (!live()) return;
+      tell(say, "Step 2 of 3", "It reaches the internet gateway. Now the database subnet's route table decides whether any path leads in.");
+      await beat(700);
+      if (mode === "private") {
+        await moveDot(dot, [[240, 200], [522, 287]]); if (!live()) return;
+        x.setAttribute("opacity", "1");
+        tell(say, "Step 3 of 3: blocked", "<b>No way in.</b> The database subnet has no route to the internet gateway, so nothing on the internet can reach anything inside it. The password was never even tried.", "good");
+      } else {
+        await moveDot(dot, [[240, 200], [575, 288]]); if (!live()) return;
+        db.classList.add("hit");
+        tell(say, "Step 3 of 3: it got through", "<b>It reached the database.</b> With the subnet public, the only thing left in the way is the database's own firewall, its security group. This is how exposed databases get wiped.", "bad");
+      }
+      dot.setAttribute("class", "vz-dot");
+      busy(false);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.mode) setMode(b.dataset.mode as typeof mode);
+      else if (b.dataset.act === "order") order();
+      else if (b.dataset.act === "attack") attack();
+      else if (b.dataset.act === "reset") {
+        run++; busy(false); clear(); dot.setAttribute("class", "vz-dot");
+        tell(say, "Ready", "Choose <b>Send an order</b> or <b>Attack the database</b>.");
+      }
+    });
+  }));
+</script>

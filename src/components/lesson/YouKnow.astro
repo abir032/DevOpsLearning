@@ -1,0 +1,9 @@
+---
+/* "You already know this": one comparison to something app developers know. */
+interface Props { title?: string }
+const { title = "You already know this" } = Astro.props;
+---
+<aside class="youknow" aria-label={title}>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2.5" /><path d="M10.5 18.5h3" /></svg>
+  <div><div class="t">{title}</div><slot /></div>
+</aside>

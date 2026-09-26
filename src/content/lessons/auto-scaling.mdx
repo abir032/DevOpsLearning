@@ -1,0 +1,561 @@
+---
+time: 50 minutes
+level: Intermediate
+before: [ec2, load-balancers]
+cost: paid
+quiz:
+  - q: An Auto Scaling group has min 2, desired 2 and max 4. You terminate one of its two servers from the EC2 console. What happens next?
+    answer: 2
+    options:
+      - t: Nothing. You asked for one server fewer, so the group now has one
+        why: Terminating an instance doesn't change the desired capacity. The group still wants two, and only has one.
+      - t: The group refuses to let you terminate it
+        why: EC2 lets you terminate any instance you have permission for. The group only notices afterwards.
+      - t: The group sees one running against a desired two, and launches a replacement from the launch template
+        why: That's self-healing. The group constantly compares what is running with the number you asked for, and fixes any difference.
+      - t: The group lowers its maximum to 1
+        why: Minimum and maximum only change when you change them. The group never edits its own limits.
+  - q: The app on one server has crashed, but the server itself is still running. The group uses EC2 health checks only. What does the group do?
+    answer: 0
+    options:
+      - t: Nothing. The server looks healthy to EC2, so it stays in service serving errors
+        why: An EC2 health check only asks whether the machine is running. To replace a server whose app is broken, turn on ELB health checks, which ask the app itself through its health path.
+      - t: It replaces the server within a minute
+        why: Only if the group uses ELB health checks. EC2 checks can't see inside the app.
+      - t: It restarts the app for you
+        why: A group never restarts software. It replaces whole servers, and only when a health check it uses says so.
+      - t: It scales out, because the app is slow
+        why: A crashed app uses little CPU, so a CPU-based policy wouldn't even notice.
+  - q: The app takes about 90 seconds to start. The group uses ELB health checks with a 30-second grace period. What happens?
+    answer: 3
+    options:
+      - t: The app starts a bit more slowly than usual
+        why: The app would start fine, if it were given the time. The problem is what the group does after 30 seconds.
+      - t: Nothing unusual; the grace period only affects scaling
+        why: The grace period is exactly the time the group waits before trusting health checks, so it matters here.
+      - t: The load balancer waits until the app is ready
+        why: The load balancer does keep traffic away, but the group has already decided the server is unhealthy.
+      - t: New servers are marked unhealthy before they finish starting, terminated, and replaced, over and over
+        why: After 30 seconds the group starts believing health checks, which fail because the app isn't up yet. Set the grace period comfortably longer than the real start-up time.
+  - q: Target tracking aims for 50% average CPU. Max is 4. A rush needs six servers' worth of CPU. What happens?
+    answer: 1
+    options:
+      - t: The group launches six servers
+        why: The group never goes past the maximum, even when it would help.
+      - t: The group stops at four, and average CPU stays above 50% until the rush passes or you raise the max
+        why: The maximum is a hard limit, usually set to protect your bill. If it's hit often, that's the sign to raise it.
+      - t: The group lowers the target to fit
+        why: The target only changes when you change it.
+      - t: Target tracking switches itself off
+        why: It keeps working inside the limits. It just can't go past the maximum.
+  - q: Why does QuickCart pick subnets in two availability zones for its group?
+    answer: 0
+    options:
+      - t: So losing one zone leaves servers running in the other, and the group relaunches the lost ones there
+        why: The group spreads servers across the zones you give it. If one zone fails, the others keep serving and the group makes up the numbers where it can.
+      - t: Because a group needs two subnets to start
+        why: A group can use a single subnet. It just can't survive that zone failing.
+      - t: To get a discount on the servers
+        why: Where a server runs doesn't change its hourly price.
+      - t: So each server gets two IP addresses
+        why: Each server is in one subnet and gets one private address from it.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first big promotion">
+
+QuickCart ran on two servers behind a load balancer. That was plenty for a normal evening.
+
+Then marketing sent a push notification: *free delivery tonight*. Within minutes, orders were five times higher than usual. Both servers hit 100% CPU. Pages took ten seconds, then started timing out. Sam launched two more servers by hand and added them to the load balancer. By the time they were ready, the rush was over — and the two extra servers ran, unused, for the rest of the week.
+
+A month later, one server died at 3am. Nobody noticed. The other server carried everything alone until Priya saw the alarm at breakfast.
+
+</Story>
+
+Two problems, one cause: **the number of servers was decided by a person**, and people are slow, asleep, or busy.
+
+<Case title="Some teams switch off their own servers on purpose">
+
+Around 2011, a large video-streaming company described a tool it had built called **Chaos Monkey**. It randomly terminates servers in production, during working hours. It was later released as open source.
+
+The idea is that losing a server should be completely normal. If it happens every day, the systems have to replace servers automatically, and any weak spot shows up while engineers are at their desks — not at 3am. That only works because something else, like an Auto Scaling group, brings the server back.
+
+</Case>
+
+QuickCart needs something that adds servers when it's busy, removes them when it's quiet, and replaces any that die. That's an **Auto Scaling group**.
+
+</Part>
+
+<Part id="idea">
+
+An **Auto Scaling group** looks after a set of identical servers. You tell it **how many you want**. It keeps checking how many are running, and fixes any difference: launching a server when there are too few, terminating one when there are too many.
+
+You stop managing servers one by one. You manage a number.
+
+<Key>You don't look after servers any more. You tell the group how many you want, and it keeps that true.</Key>
+
+<YouKnow title="You already know this: a sticky service">
+
+On Android, a background service that returns `START_STICKY` is restarted by the system if it gets killed. You never restart it yourself — you declared that you want it running, and the system keeps that true. An Auto Scaling group does the same for whole servers.
+
+</YouKnow>
+
+### Three numbers
+
+| Number | What it means | QuickCart's value |
+|---|---|---|
+| **Minimum** | Never fewer than this, whatever happens | 2 — one in each zone |
+| **Desired** | How many there should be right now | 2 on a normal day. Scaling changes this number |
+| **Maximum** | Never more than this, however busy | 4 — a limit that protects the bill |
+
+Scaling never touches servers directly. It only changes **desired**. Then the group launches or terminates servers to match.
+
+### The recipe: a launch template
+
+To launch a server, the group needs to know what kind. It reads a **launch template**: everything you'd choose when [launching a server on EC2](/lessons/ec2/), saved once.
+
+| Part of the template | QuickCart uses |
+|---|---|
+| Image (AMI) | Amazon Linux 2023 |
+| Instance type | `t3.micro` |
+| Security group | The web servers' group |
+| Instance profile | A role that allows Session Manager, so no SSH keys |
+| Metadata version | IMDSv2 only |
+| User data | The start-up script that installs and starts the app |
+
+Launch templates are **versioned**. To change something — a newer image, say — you make version 2 and tell the group to use it. Version 1 stays, so going back is one click.
+
+The template leaves out the subnet. The **group** picks subnets, because it decides where each server goes.
+
+### Spreading across zones
+
+You give the group subnets in two or more [availability zones](/lessons/regions-and-zones/). It keeps the servers balanced between them: with four servers and two zones, two in each.
+
+If a whole zone fails, the servers there are lost. The group notices it's short and launches replacements in the zones that still work. That's why QuickCart's minimum is 2: never fewer than one per zone.
+
+### How the group knows a server is broken
+
+The group replaces any server it thinks is unhealthy. What "unhealthy" means depends on which checks you turn on:
+
+| Health check | Asks | Catches | Misses |
+|---|---|---|---|
+| **EC2** — always on | Is the machine running? | A server that stopped, was terminated, or failed its hardware checks | An app that crashed on a machine that's still running |
+| **ELB** — turn it on when you use a load balancer | Does the app answer on its health path? | A crashed or stuck app | — |
+
+With EC2 checks alone, a server whose app has crashed looks fine forever. It stays in the group, doing nothing useful. With a [load balancer](/lessons/load-balancers/) in front, turn on **ELB health checks** too, so the group replaces servers the load balancer has given up on.
+
+### The grace period
+
+A new server needs time to boot and run its start-up script before its app can answer. For the **health check grace period**, the group ignores health checks on a new server. The default is 300 seconds.
+
+<Mistake title="a grace period shorter than the start-up time">
+
+The app takes 90 seconds to start, and the grace period is 30. In the group's **Activity** tab you see the same pattern repeat:
+
+```output title="The Activity tab shows lines like"
+Terminating EC2 instance: i-0123abcd
+Cause: an instance was taken out of service in response to an ELB system health check failure.
+Launching a new EC2 instance: i-0456cdef
+```
+
+**Why:** after 30 seconds the group trusts the health checks, which fail because the app isn't up yet. It terminates the server and launches another, which meets the same fate. You pay for every one.
+
+**The fix:** time how long a new server really takes to pass its health check, and set the grace period well above that. The exact wording in the Activity tab varies; the repeating launch and terminate is the sign.
+
+</Mistake>
+
+### Scaling: changing desired on its own
+
+A **scaling policy** changes the desired number for you.
+
+| Policy | How it works | Use it when |
+|---|---|---|
+| **Target tracking** | You pick a metric and a target, like *average CPU 50%*. The group adds or removes servers to stay near it | Almost always. Start here |
+| Step scaling | You set thresholds: *above 70%, add 2; above 90%, add 4* | You need finer control than target tracking gives |
+| Scheduled | At a set time, set desired to a number: *every day at 6pm, 4* | Busy times you can predict, like QuickCart's dinner rush |
+
+Target tracking works like a thermostat. Behind the scenes it creates two CloudWatch alarms: one that adds servers when the metric stays above the target, and one that removes them when it stays well below. **It adds quickly and removes slowly**, so a short dip doesn't throw away servers you'll need again a minute later.
+
+The **instance warmup** setting tells target tracking to ignore a brand-new server's metrics for a while. A server that's still booting shows low CPU, which would otherwise make the average look better than it is.
+
+### Terminating a server on purpose
+
+Terminating a server from the EC2 console is a **hard stop**. The load balancer keeps sending it requests until its health checks notice, and any requests it was handling fail.
+
+Asking the **group** to terminate it is gentler. The group first takes it out of the load balancer, waits for the [deregistration delay](/lessons/load-balancers/) so requests in progress can finish, and only then terminates it. The CLI is the clearest way to do this:
+
+```sh ph="INSTANCE_ID"
+aws autoscaling terminate-instance-in-auto-scaling-group --instance-id INSTANCE_ID --no-should-decrement-desired-capacity
+```
+
+| Part | What it means |
+|---|---|
+| `aws autoscaling` | the Auto Scaling part of the AWS CLI |
+| `terminate-instance-in-auto-scaling-group` | ask the group to remove one of its servers, draining it first |
+| `--instance-id INSTANCE_ID` | which server. Replace `INSTANCE_ID` with the ID from **EC2 → Instances**, like `i-0123abcd` |
+| `--no-should-decrement-desired-capacity` | keep desired the same, so the group launches a replacement. Use `--should-decrement-desired-capacity` to shrink the group by one instead |
+
+To replace **every** server — after a new launch template version, for example — use **Instance refresh** on the group. It replaces servers in batches, waiting for each new one to pass its health checks. That's a [rolling release](/lessons/release-strategies/), done for you.
+
+### What this means for your app
+
+Servers now come and go without warning. So **nothing important can live on one server**: not uploaded files (they go to [S3](/lessons/s3/)), not orders (they go to the [database](/lessons/rds/)), not a customer's login session. Any server must be able to handle any request, and losing one must lose nothing.
+
+</Part>
+
+<Part id="see">
+
+Below is QuickCart's group: two zones, minimum 2, maximum 4, target tracking at 50% CPU. **Raise the traffic** and watch the group add servers. Then **terminate a server** and watch it come back. Try the dinner rush to see what the maximum does.
+
+<AsgLoad />
+
+**What to notice:** a new server doesn't help straight away. It boots, sits out its grace period, and only then takes traffic. That delay is why teams schedule extra servers before a rush they can predict, instead of waiting for CPU to climb.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">two `t3.micro` servers, at about $0.0104 an hour each on demand in us-east-1, plus about $0.005 an hour for each server's public IP address. Up to four servers run during the scale-out step, and detailed monitoring adds a little. Well under $0.25 if you clean up within two hours. Prices change; check the EC2 pricing page.</Cost>
+
+<Note title="Delete the group, not the servers">
+
+An Auto Scaling group replaces any server you terminate. That's the point of it, and it's also how labs end up running all weekend. When you're finished, **delete the group** in the last step. It terminates its servers for you.
+
+</Note>
+
+You'll build a launch template and a group of two servers across two zones, reach a server through Session Manager, kill one and watch it come back, then load the servers until the group scales out. About 45 minutes, most of it watching.
+
+This lab uses your account's **default VPC**, which already has a public subnet in every zone. That keeps it cheap: no NAT gateway. The servers get public addresses so they can reach Systems Manager, but their security group lets **nothing** in. Check the region selector says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create a security group for the servers">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-web-sg` |
+| Description | `QuickCart web servers` |
+| VPC | the default VPC |
+| Inbound rules | **none** — delete any row the form adds |
+| Outbound rules | leave the default: **All traffic** to `0.0.0.0/0` |
+
+Choose **Create security group**.
+
+<See>
+
+The group, with **0** inbound rules and **1** outbound rule. Session Manager needs no inbound rule: the agent on the server connects **out** to Systems Manager.
+
+</See>
+
+<Mistake title="removing the outbound rule">
+
+This one is easy to do while "tightening" a group, and the symptoms point everywhere except the cause. New servers boot, but:
+
+```output title="Connect → Session Manager says"
+SSM Agent is not online
+```
+
+The start-up script hangs while installing packages. The server's system log (**Actions → Monitor and troubleshoot → Get system log**) shows the package manager giving up with a line like:
+
+```output
+Curl error (28): Timeout was reached
+```
+
+With a load balancer attached, the health checks fail too, so the group terminates the server, launches another, and loops.
+
+**Why:** security groups are stateful. Replies to connections that come **in** are allowed back out automatically. But connections the server **starts** — to download packages, to reach Systems Manager — need an outbound rule. A booting server does almost nothing except start outbound connections.
+
+**The fix:** put the outbound rule back. In a locked-down network you'd allow only port 443 out, to the services the server needs.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create a role for Session Manager">
+
+If you still have a role with `AmazonSSMManagedInstanceCore` from [Servers on EC2](/lessons/ec2/), you can use that and skip this step.
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+| Field | Enter |
+|---|---|
+| Trusted entity type | **AWS service** |
+| Service or use case | **EC2**, then the use case **EC2** |
+| Permissions policies | search for and tick `AmazonSSMManagedInstanceCore` |
+| Role name | `quickcart-web-role` |
+
+Choose **Create role**. The console also creates an **instance profile** with the same name — the wrapper that lets a server wear the role.
+
+</Step>
+
+<Step title="Create the launch template">
+
+<ConsolePath path="EC2 > Launch Templates > Create launch template" />
+
+| Field | Enter |
+|---|---|
+| Launch template name | `quickcart-web-lt` |
+| Template version description | `nginx with a health page` |
+| Auto Scaling guidance | tick **Provide guidance to help me set up a template that I can use with EC2 Auto Scaling** |
+| Application and OS Images | **Quick Start → Amazon Linux → Amazon Linux 2023 AMI**, architecture **64-bit (x86)** |
+| Instance type | `t3.micro` |
+| Key pair name | **Don't include in launch template** |
+| Subnet | **Don't include in launch template** — the group chooses |
+| Firewall (security groups) | **Select existing security group** → `quickcart-web-sg` |
+
+Then open **Advanced details**:
+
+| Field | Enter |
+|---|---|
+| IAM instance profile | `quickcart-web-role` |
+| Detailed CloudWatch monitoring | **Enable** — CPU every minute instead of every five, so scaling reacts sooner. It costs a little extra |
+| Metadata accessible | **Enabled** |
+| Metadata version | **V2 only (token required)** |
+| User data | the script below |
+
+```sh title="user-data.sh"
+#!/bin/bash
+dnf install -y nginx
+echo "QuickCart web server" > /usr/share/nginx/html/index.html
+echo "ok" > /usr/share/nginx/html/health
+systemctl enable --now nginx
+```
+
+| Line | What it does |
+|---|---|
+| `#!/bin/bash` | run this script with bash. User data must start with this line, or it isn't run as a script |
+| `dnf install -y nginx` | install the nginx web server. `-y` answers yes, because nobody is there to type it |
+| `echo "QuickCart web server" > /usr/share/nginx/html/index.html` | write a home page. `>` sends the text into that file |
+| `echo "ok" > /usr/share/nginx/html/health` | write a tiny page at `/health` for health checks to ask for |
+| `systemctl enable --now nginx` | start nginx now, and every time the server boots |
+
+The script runs once, as root, on first boot. Choose **Create launch template**.
+
+<See>
+
+**Successfully created quickcart-web-lt**, with version **1**.
+
+</See>
+
+</Step>
+
+<Step title="Create the Auto Scaling group">
+
+<ConsolePath path="EC2 > Auto Scaling groups > Create Auto Scaling group" />
+
+The wizard has several pages. The page names change from time to time; the fields are what matter.
+
+**Choose launch template**
+
+| Field | Enter |
+|---|---|
+| Auto Scaling group name | `quickcart-web-asg` |
+| Launch template | `quickcart-web-lt` |
+| Version | **Default (1)** |
+
+**Choose instance launch options**
+
+| Field | Enter |
+|---|---|
+| VPC | the default VPC |
+| Availability Zones and subnets | the default subnets in **us-east-1a** and **us-east-1b** |
+| Availability Zone distribution | **Balanced best effort** |
+
+**Integrate with other services**
+
+| Field | Enter |
+|---|---|
+| Load balancing | **No load balancer** |
+| Turn on Elastic Load Balancing health checks | leave unticked — there's no load balancer |
+| Health check grace period | `300` seconds |
+
+**Configure group size and scaling**
+
+| Field | Enter |
+|---|---|
+| Desired capacity | `2` |
+| Min desired capacity | `2` |
+| Max desired capacity | `4` |
+| Automatic scaling | **Target tracking scaling policy** |
+| Metric type | **Average CPU utilization** |
+| Target value | `50` |
+| Instance warmup | `120` seconds |
+| Instance maintenance policy | **No policy** |
+
+Skip notifications. On **Add tags**, add Key `Name`, Value `quickcart-web`, so the servers have a name in the instance list. Then **Create Auto Scaling group**.
+
+<Note title="If you kept the load balancer from the last lesson">
+
+Choose **Attach to an existing load balancer**, pick its target group, and tick **Turn on Elastic Load Balancing health checks**. The servers' security group then also needs an inbound rule for port 80 from the load balancer's security group. Without the load balancer, everything below still works; the group relies on EC2 health checks.
+
+</Note>
+
+</Step>
+
+<Step title="Watch the group launch its servers">
+
+<ConsolePath path="EC2 > Auto Scaling groups > quickcart-web-asg > Activity" />
+
+```output title="The Activity history shows lines like"
+Launching a new EC2 instance: i-0123abcd
+Cause: At 2026-09-25T10:02:14Z an instance was started in response to a difference between desired and actual capacity, increasing the capacity from 0 to 2.
+```
+
+Your IDs and times will differ. Now open **EC2 → Instances**.
+
+<See>
+
+Two instances called `quickcart-web`, one in **us-east-1a** and one in **us-east-1b**, both **Running**. You didn't launch either of them.
+
+</See>
+
+</Step>
+
+<Step title="Check the app from inside a server">
+
+Wait a couple of minutes after the servers show **Running**, so the agent and the start-up script can finish.
+
+<ConsolePath path="EC2 > Instances > one quickcart-web instance > Connect > Session Manager > Connect" />
+
+A terminal opens in your browser. Ask nginx for the health page:
+
+```sh
+curl -s localhost/health
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch a web address and print what comes back |
+| `-s` | silent: no progress bar |
+| `localhost/health` | the `/health` page on this same server |
+
+```output
+ok
+```
+
+The user data ran, and no SSH key or open port was needed to check. Leave this tab open; you'll use it in a later step.
+
+</Step>
+
+<Step title="Kill a server and watch it come back">
+
+<ConsolePath path="EC2 > Instances > the other quickcart-web instance > Instance state > Terminate (delete) instance" />
+
+Confirm. Then go back to the group's **Activity** tab and refresh it every half-minute or so.
+
+```output title="Within a minute or two, lines like"
+Terminating EC2 instance: i-0456cdef
+Cause: an instance was taken out of service in response to an EC2 health check indicating it has been terminated or stopped.
+Launching a new EC2 instance: i-0789abcd
+Cause: an instance was started in response to a difference between desired and actual capacity, increasing the capacity from 1 to 2.
+```
+
+<See>
+
+In **EC2 → Instances**, the terminated server and a brand-new one, launched in the **same zone** to keep the group balanced. That's self-healing: nobody launched it.
+
+</See>
+
+</Step>
+
+<Step title="Load the servers and watch the group scale out">
+
+To push the average CPU above 50%, load **both** servers. A `t3.micro` has two virtual CPUs, so you run two busy processes on each.
+
+In the Session Manager tab from before, run this **twice**:
+
+```sh
+timeout 900 yes > /dev/null &
+```
+
+| Part | What it means |
+|---|---|
+| `yes` | a tiny program that prints `y` forever, as fast as it can. It keeps one CPU at 100% |
+| `> /dev/null` | throw the output away, so it doesn't fill your screen |
+| `timeout 900` | stop it automatically after 900 seconds (15 minutes), so you can't forget it |
+| `&` | run it in the background and give you the prompt back |
+
+```output title="Each time, it prints a job number and a process ID, like"
+[1] 4321
+```
+
+Now connect to the **other** server the same way (**Connect → Session Manager**) and run the same command twice there too.
+
+Watch the group's **Activity** tab. After about five minutes:
+
+```output title="A line like"
+Cause: At 2026-09-25T10:31:40Z a monitor alarm TargetTracking-quickcart-web-asg-AlarmHigh-4f2c9e1a in state ALARM triggered policy Target Tracking Policy changing the desired capacity from 2 to 4.
+```
+
+<See>
+
+**Desired capacity: 4** on the group's **Details** tab, and two new servers launching. With the new servers idle, the average CPU across all four comes back towards 50%. In **CloudWatch → Alarms** you'll find the two alarms target tracking made for you: one **AlarmHigh** and one **AlarmLow**.
+
+</See>
+
+After 15 minutes the `yes` processes stop by themselves. About 15 minutes after that, the low alarm lowers desired back to 2 and the group terminates two servers. **You don't need to wait for it** — scaling in slowly is deliberate. Go on to clean up.
+
+<Note title="Burstable CPU">
+
+`t3` servers are burstable: they earn CPU credits while idle and spend them when busy. In the default **unlimited** mode, running flat out for a while can add a small charge — a cent or two for this lab. That's another reason the command stops itself.
+
+</Note>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Order matters: **the group first**. Delete the servers first and the group just launches more.
+
+<ConsolePath path="EC2 > Auto Scaling groups > quickcart-web-asg > Actions > Delete" />
+
+Type `delete` and confirm. The group sets its capacity to 0, terminates every server, and then disappears. It takes a few minutes. The alarms target tracking made are deleted with it.
+
+<See>
+
+**EC2 → Instances** shows every `quickcart-web` server as **Terminated**, and the group is gone from the list.
+
+</See>
+
+Then remove the rest:
+
+1. **EC2 → Launch Templates →** `quickcart-web-lt` **→ Actions → Delete template**, and type `Delete` to confirm.
+2. **EC2 → Security Groups →** `quickcart-web-sg` **→ Actions → Delete security groups**. If it says the group is in use, wait until every server has finished terminating.
+3. **IAM → Roles →** `quickcart-web-role` **→ Delete**, unless you're keeping it for the next lessons.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Auto Scaling group | Keeps the number of running servers equal to *desired* |
+| Min / desired / max | Never fewer / right now / never more. Scaling only changes desired |
+| Launch template | The recipe for each server. Versioned; no subnet |
+| Zones | Give the group subnets in two or more; it balances between them |
+| EC2 health check | Is the machine running? Always on |
+| ELB health check | Does the app answer? Turn on when behind a load balancer |
+| Grace period | Time before health checks count. Longer than real start-up time |
+| Target tracking | Keep a metric near a target, like average CPU 50%. Out fast, in slowly |
+| Terminate gracefully | Through the group, so it drains first |
+| Instance refresh | Replace every server in batches, for a new template version |
+| Clean up | Delete the group first. Deleting servers just makes it launch more |
+
+</Cheat>
+
+</Part>

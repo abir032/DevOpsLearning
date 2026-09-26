@@ -1,0 +1,6 @@
+---
+/* A real-world case. Only genuine, widely reported patterns. */
+interface Props { title?: string }
+const { title = "This really happens" } = Astro.props;
+---
+<aside class="case" aria-label={title}><div class="t">{title}</div><slot /></aside>

@@ -1,0 +1,515 @@
+---
+time: 50 minutes
+level: Beginner
+before: [vpc, subnets-and-cidr]
+cost: paid
+quiz:
+  - q: A subnet's route table has 10.0.0.0/16 → local and 0.0.0.0/0 → nat-gateway. What kind of subnet is it?
+    answer: 2
+    options:
+      - t: Public
+        why: A public subnet sends 0.0.0.0/0 to an internet gateway. This one uses a NAT gateway.
+      - t: Isolated
+        why: An isolated subnet has no 0.0.0.0/0 route at all. This one has one.
+      - t: Private — it can reach out to the internet, but nothing can reach in
+        why: The NAT gateway lets connections the servers start go out and their replies come back. Nothing on the internet can start a connection in.
+      - t: It depends on the subnet's name
+        why: Names are only labels. The route table decides.
+  - q: The same table also has a route for S3's prefix list to a gateway endpoint. Where does a request to S3 go?
+    answer: 0
+    options:
+      - t: Through the gateway endpoint
+        why: S3's prefix list is more specific than 0.0.0.0/0, and the most specific matching route always wins. So S3 traffic takes the endpoint, privately and free.
+      - t: Through the NAT gateway, because 0.0.0.0/0 matches everything
+        why: 0.0.0.0/0 does match, but it's the least specific route there is. A more specific match wins.
+      - t: It's split between the two
+        why: Each packet follows one route — the most specific match.
+      - t: It fails, because two routes match
+        why: Several routes matching is normal. The most specific one is used.
+  - q: Where must a NAT gateway be created?
+    answer: 3
+    options:
+      - t: In the private subnet it serves
+        why: Then the NAT gateway itself has no route to the internet gateway, and nothing gets out.
+      - t: Outside the VPC
+        why: A NAT gateway always lives in a subnet inside your VPC.
+      - t: In any subnet, it doesn't matter
+        why: It matters. It has to be somewhere with a route to the internet gateway.
+      - t: In a public subnet, whose route table sends 0.0.0.0/0 to the internet gateway
+        why: The private subnets send their traffic to the NAT gateway, and the NAT gateway sends it on through the internet gateway.
+  - q: QuickCart runs in two zones with one NAT gateway, in zone a. Zone a fails. What happens to servers in zone b's private subnet?
+    answer: 1
+    options:
+      - t: Nothing — NAT gateways work across zones automatically
+        why: A standard NAT gateway lives in one zone. If that zone fails, so does the NAT gateway.
+      - t: They lose their way out to the internet, although they are healthy
+        why: Their route table still points at the NAT gateway in the failed zone. This is why production puts one NAT gateway in each zone.
+      - t: They switch to the internet gateway
+        why: Routes don't change by themselves. The table still points at the dead NAT gateway.
+      - t: They stop being able to reach each other
+        why: The local route still works. Only the way out to the internet is lost.
+  - q: You're cleaning up. What order works?
+    answer: 2
+    options:
+      - t: Release the Elastic IP, then delete the NAT gateway
+        why: AWS won't release an address that's still in use by the NAT gateway.
+      - t: Delete the VPC; everything goes with it
+        why: The VPC can't be deleted while a NAT gateway is still in it, and the Elastic IP isn't part of the VPC — it would keep billing.
+      - t: Delete the NAT gateway, wait until it says Deleted, release the Elastic IP, then delete the VPC
+        why: Each step frees the thing the next one needs. Forgetting the Elastic IP leaves a small charge running forever.
+      - t: Stop the NAT gateway for the night
+        why: NAT gateways can't be stopped. They cost money every hour they exist.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first bill after launch">
+
+Sam moved QuickCart's API servers into private subnets, exactly as planned. The next morning, a security update wouldn't install. The command just sat there, printing nothing, until it gave up. The servers had no way out to the internet at all.
+
+Sam added a NAT gateway and updates worked again. A month later the bill arrived, with a large line for "NAT gateway data processing". Every night, the servers copied the day's receipts to S3 — and every gigabyte of it went through the NAT gateway, which charges for each one.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Sending S3 traffic through a NAT gateway is one of the most widely reported surprises on an AWS bill. A NAT gateway charges for every gigabyte it processes, on top of its hourly price. Servers in private subnets reach S3 through it by default, so a busy backup job, a data pipeline or a service pulling large files can cost more in NAT charges than in anything else.
+
+The fix is one route: an S3 **gateway endpoint**, which is free and sends S3 traffic a different way. Nothing in the application changes.
+
+</Case>
+
+Both of Sam's problems are about routing: where traffic is allowed to go, and which way it takes to get there.
+
+</Part>
+
+<Part id="idea">
+
+Every subnet has a **route table**: a list of rules. Each rule says *traffic for these addresses goes to this target*.
+
+| Destination | Target | Means |
+|---|---|---|
+| `10.0.0.0/16` | `local` | Anything inside the VPC: deliver it inside the VPC |
+| `0.0.0.0/0` | an internet gateway | Everything else: out to the internet, both ways |
+| `0.0.0.0/0` | a NAT gateway | Everything else: out through the NAT gateway, one way |
+| S3's prefix list | a gateway endpoint | Anything for S3: through the private endpoint |
+
+The [VPC lesson](/lessons/vpc/) showed the one line that makes a subnet public. This lesson is about everything else in the table.
+
+### The local route
+
+Every route table starts with a route for the VPC's own range, with the target `local`. You can't delete it or change its target. It's why every server in a VPC can reach every other one, whatever else the table says. (Whether they're *allowed* to talk is a job for [security groups](/lessons/security-groups/).)
+
+### The most specific route wins
+
+A packet often matches more than one route. `0.0.0.0/0` matches every address. `10.0.0.0/16` matches only the VPC. The rule is: **the most specific match wins** — the route with the longest prefix, the biggest number after the slash.
+
+| Packet going to | Matching routes | Chosen |
+|---|---|---|
+| `10.0.21.9` (the database) | `10.0.0.0/16` and `0.0.0.0/0` | `10.0.0.0/16 → local`. /16 is more specific than /0 |
+| An address on the internet | only `0.0.0.0/0` | `0.0.0.0/0` |
+| An S3 address | S3's prefix list and `0.0.0.0/0` | The prefix list. It names S3's exact ranges |
+
+This is why you can add a special route without breaking the general one.
+
+### Which table does a subnet use?
+
+Each subnet is associated with exactly one route table. Every VPC comes with a **main route table**, and any subnet you don't associate explicitly uses it.
+
+| Table | What it's for | Good practice |
+|---|---|---|
+| Main | The fallback for every subnet not given another table | Leave it with only `local`, so a new subnet starts isolated, not public by accident |
+| Custom | One per kind of subnet: public, app, data | Associate every subnet on purpose |
+
+### The internet gateway: two-way, one per VPC
+
+An **internet gateway** is the VPC's door to the internet. There is one per VPC, it scales by itself, and it costs nothing. Traffic flows both ways through it — but only for servers that also have a **public IP address**. A server with only a private address can't use it, even if the route is there.
+
+### The NAT gateway: one-way, out only
+
+Private servers still need to reach out: to download updates, to call a payment provider. A **NAT gateway** gives them a way out without a way in.
+
+It sits in a **public** subnet. Private subnets send `0.0.0.0/0` to it. It swaps each server's private address for its own public one, sends the request on through the internet gateway, and passes the reply back. Nothing on the internet can start a connection to the servers behind it.
+
+<YouKnow title="You already know this: your home Wi-Fi router">
+
+Every phone and laptop in your home has a private address, and they all share one public address: the router's. Websites only ever see the router. Your laptop can browse anything, but nobody on the internet can connect to your laptop directly. A NAT gateway is that router, for a subnet.
+
+</YouKnow>
+
+| NAT gateway fact | What it means for you |
+|---|---|
+| Needs an **Elastic IP** | A fixed public address that stays yours until you release it. The NAT gateway uses it as the address the internet sees |
+| Lives in **one zone** | If that zone fails, the NAT gateway goes with it |
+| Costs money every hour, plus every gigabyte | In us-east-1, about $0.045 an hour and about $0.045 per GB processed at the time of writing. Prices change; check the VPC pricing page |
+| Can't be stopped | Only deleted. It bills every hour it exists |
+
+**One per zone, or one for all?** Production puts a NAT gateway in each zone, and each zone's private subnets route to their own. Lose a zone, and the other zone still has its way out. A test environment often shares one NAT gateway to halve the cost, accepting that losing that zone cuts everyone off. AWS has also recently added a regional mode that spreads a NAT gateway across zones for you; this lesson uses the long-standing zonal kind, which is what you'll meet in most existing setups.
+
+<Key>The route table decides where traffic goes: `local` inside the VPC, an internet gateway for two-way, a NAT gateway for out-only, an endpoint for a private path to an AWS service.</Key>
+
+### VPC endpoints: reaching AWS without the internet
+
+S3, Secrets Manager, ECR and the other AWS services live outside your VPC, on public addresses. A **VPC endpoint** gives your subnets a private path to one of them instead.
+
+| | Gateway endpoint | Interface endpoint |
+|---|---|---|
+| For | S3 and DynamoDB only | Most other services: Secrets Manager, ECR, CloudWatch, Systems Manager |
+| How it works | Adds a route to your route tables: S3's prefix list → the endpoint | Puts a network interface with a private address in your subnets |
+| Cost | Free | About $0.01 an hour per zone, plus data, at the time of writing |
+| Why use it | Cuts NAT data charges; S3 traffic never leaves AWS's network | Private servers reach the service with no NAT gateway at all |
+
+A **prefix list** is a named, AWS-maintained list of a service's address ranges, shown as an ID starting `pl-`. You'll see it as the destination of the endpoint's route.
+
+</Part>
+
+<Part id="see">
+
+Below is one subnet with one API server, and its route table. It starts with only the `local` route. Add and remove routes, and send the three kinds of traffic each time. Watch the label on the subnet change.
+
+<RouteEditor />
+
+**What to notice:** nothing about the server changed — only the table. The same server is public, private or isolated depending on one route, and S3 traffic switches to the endpoint the moment its more specific route exists.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $1.20 a day while the NAT gateway and its Elastic IP exist, in us-east-1 — delete them after. Finished within an hour, this lab costs around 10 cents.</Cost>
+
+<Note title="This lab creates things that bill by the hour">
+
+A NAT gateway costs about $0.045 an hour whether or not anything uses it, plus about $0.045 for every gigabyte through it. Its Elastic IP is a public IPv4 address, which costs about $0.005 an hour while you hold it. The test server costs about a cent an hour. These are rough us-east-1 figures and prices change. **Do the clean-up step as soon as you finish, and in the order given.**
+
+</Note>
+
+You'll build a public subnet with a NAT gateway, a private subnet that uses it, and an S3 gateway endpoint, then prove a private server can reach out. About 40 minutes. Region: **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create the VPC and two subnets">
+
+<ConsolePath path="VPC > Your VPCs > Create VPC" />
+
+| Field | Enter |
+|---|---|
+| Resources to create | **VPC only** |
+| Name tag | `quickcart-vpc` |
+| IPv4 CIDR block | **IPv4 CIDR manual input** |
+| IPv4 CIDR | `10.0.0.0/16` |
+| IPv6 CIDR block | **No IPv6 CIDR block** |
+| Tenancy | **Default** |
+
+Choose **Create VPC**. Then:
+
+<ConsolePath path="VPC > Subnets > Create subnet" />
+
+Choose `quickcart-vpc`, and add two subnets:
+
+| Subnet name | Availability Zone | IPv4 subnet CIDR block |
+|---|---|---|
+| `quickcart-public-a` | us-east-1a | `10.0.1.0/24` |
+| `quickcart-app-a` | us-east-1a | `10.0.11.0/24` |
+
+Choose **Create subnet**.
+
+<See>
+
+Two subnets. Both use the main route table, which has only the `local` route: both are isolated for now.
+
+</See>
+
+</Step>
+
+<Step title="Make the public subnet public">
+
+<ConsolePath path="VPC > Internet gateways > Create internet gateway" />
+
+| Field | Enter |
+|---|---|
+| Name tag | `quickcart-igw` |
+
+Choose **Create internet gateway**, then **Actions → Attach to VPC**, pick `quickcart-vpc`, and choose **Attach internet gateway**.
+
+<ConsolePath path="VPC > Route tables > Create route table" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-rt-public` |
+| VPC | `quickcart-vpc` |
+
+Choose **Create route table**. On **Routes**, choose **Edit routes → Add route**:
+
+| Destination | Target |
+|---|---|
+| `0.0.0.0/0` | **Internet Gateway**, then `quickcart-igw` |
+
+Choose **Save changes**. On **Subnet associations**, choose **Edit subnet associations**, tick `quickcart-public-a`, and choose **Save associations**.
+
+<See>
+
+`quickcart-rt-public` with two routes, `10.0.0.0/16 → local` and `0.0.0.0/0 → igw-…`, and one associated subnet.
+
+</See>
+
+</Step>
+
+<Step title="Create the NAT gateway in the public subnet">
+
+<ConsolePath path="VPC > NAT gateways > Create NAT gateway" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-nat-a` |
+| Availability mode (if the form shows it) | **Zonal** |
+| Subnet | `quickcart-public-a` — the **public** one |
+| Connectivity type | **Public** |
+| Elastic IP allocation ID | Choose **Allocate Elastic IP** |
+
+Choose **Create NAT gateway**. The clock on its cost starts now.
+
+<See>
+
+**State: Pending**, changing to **Available** after a minute or two. The details show a **Primary public IPv4 address**: the Elastic IP the internet will see.
+
+</See>
+
+<Mistake title="the NAT gateway in the private subnet">
+
+Nothing complains when you create it. The NAT gateway reaches **Available**, and private servers still can't reach anything. Commands just hang and time out:
+
+```output title="A download on a private server ends with something like"
+curl: (28) Connection timed out after 10001 milliseconds
+```
+
+**Why:** the NAT gateway forwards traffic using the route table of the subnet it lives in. In a private subnet, that table has no route to the internet gateway, so the traffic has nowhere to go.
+
+**The fix:** a NAT gateway can't be moved. Delete it, release its Elastic IP, and create a new one in the public subnet.
+
+</Mistake>
+
+</Step>
+
+<Step title="Route the private subnet through the NAT gateway">
+
+<ConsolePath path="VPC > Route tables > Create route table" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-rt-app` |
+| VPC | `quickcart-vpc` |
+
+Choose **Create route table**. On **Routes**, choose **Edit routes → Add route**:
+
+| Destination | Target |
+|---|---|
+| `0.0.0.0/0` | **NAT Gateway**, then `quickcart-nat-a` |
+
+Save, then on **Subnet associations** associate `quickcart-app-a`.
+
+<See>
+
+`quickcart-rt-app` with `10.0.0.0/16 → local` and `0.0.0.0/0 → nat-…`. The app subnet is now private: out only.
+
+</See>
+
+<Mistake title="pointing the private table at the internet gateway">
+
+It's tempting to "fix" a private subnet that can't get out by sending `0.0.0.0/0` to the internet gateway. Servers with only private addresses still can't get out:
+
+```output title="Still, something like"
+curl: (28) Connection timed out after 10001 milliseconds
+```
+
+And any server launched there with a public address is now open to the internet.
+
+**Why:** the internet gateway only works for servers with a public IP, and it lets traffic in as well as out.
+
+**The fix:** private subnets send `0.0.0.0/0` to a NAT gateway. Only public subnets use the internet gateway.
+
+</Mistake>
+
+</Step>
+
+<Step title="Add the S3 gateway endpoint">
+
+<ConsolePath path="VPC > Endpoints > Create endpoint" />
+
+| Field | Enter |
+|---|---|
+| Name tag | `quickcart-s3` |
+| Type (or Service category) | **AWS services** |
+| Services | Search `s3`, and choose `com.amazonaws.us-east-1.s3` with type **Gateway** |
+| VPC | `quickcart-vpc` |
+| Route tables | Tick `quickcart-rt-app` |
+| Policy | **Full access** |
+
+Choose **Create endpoint**.
+
+<See>
+
+Open `quickcart-rt-app` again. It now has a third route: destination `pl-…` (S3's prefix list), target `vpce-…`. You never typed it — creating the endpoint added it. From now on S3 traffic from the app subnet skips the NAT gateway.
+
+</See>
+
+<Note title="Pick the Gateway one">
+
+The search shows two S3 entries: **Gateway** and **Interface**. The interface one costs money by the hour. For this lab, and for most VPCs, choose **Gateway**.
+
+</Note>
+
+</Step>
+
+<Step title="Launch a test server in the private subnet">
+
+This server has no public address and no way to log in. It will check the internet as it boots and write the answer to its system log.
+
+<ConsolePath path="EC2 > Instances > Launch instances" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-route-test` |
+| Application and OS Images | **Amazon Linux 2023** — the default |
+| Instance type | **t3.micro** |
+| Key pair | **Proceed without a key pair** |
+| Network settings | Choose **Edit** |
+| VPC | `quickcart-vpc` |
+| Subnet | `quickcart-app-a` |
+| Auto-assign public IP | **Disable** |
+| Firewall (security groups) | **Create security group**, and untick **Allow SSH traffic from**. Nothing needs to connect in |
+
+Open **Advanced details**. In **User data**, paste this script:
+
+```sh title="user data"
+#!/bin/bash
+if curl --silent --max-time 10 --output /dev/null https://example.com; then
+  echo "QUICKCART CHECK: the internet is reachable"
+else
+  echo "QUICKCART CHECK: the internet is NOT reachable"
+fi
+```
+
+| Part | What it means |
+|---|---|
+| `#!/bin/bash` | run this script with bash. User data runs once, as root, on first boot |
+| `if … then … else … fi` | run the first `echo` if the command succeeds, the second if it fails |
+| `curl` | fetch a web address |
+| `--silent` | don't print a progress bar |
+| `--max-time 10` | give up after 10 seconds instead of hanging |
+| `--output /dev/null` | throw the page away; only success or failure matters |
+| `https://example.com` | a public test site; any public HTTPS address would do |
+| `echo "QUICKCART CHECK: …"` | print a line that's easy to spot in the log |
+
+Choose **Launch instance**.
+
+</Step>
+
+<Step title="Read the answer in the system log">
+
+Wait until the instance shows **Running** and its status checks have passed — a few minutes.
+
+<ConsolePath path="EC2 > Instances > quickcart-route-test > Actions > Monitor and troubleshoot > Get system log" />
+
+Scroll near the end, or use your browser's find, for `QUICKCART CHECK`.
+
+```output title="Among the boot messages"
+QUICKCART CHECK: the internet is reachable
+```
+
+The log can take a few minutes to fill in; if the line isn't there, wait and choose **Get system log** again. The lines around it will differ from anyone else's.
+
+<See>
+
+A server with no public address reached the internet: out through `quickcart-nat-a`, through `quickcart-igw`, and back. Nothing on the internet can reach it.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Do these in order. Each one frees what the next one needs.
+
+**1. Terminate the test server.**
+
+<ConsolePath path="EC2 > Instances > quickcart-route-test > Instance state > Terminate (delete) instance" />
+
+**2. Delete the endpoint.**
+
+<ConsolePath path="VPC > Endpoints > quickcart-s3 > Actions > Delete VPC endpoints" />
+
+Type `delete` and confirm.
+
+**3. Delete the NAT gateway, and wait.**
+
+<ConsolePath path="VPC > NAT gateways > quickcart-nat-a > Actions > Delete NAT gateway" />
+
+Type `delete` and confirm. Refresh until **State** is **Deleted**. It takes a few minutes.
+
+**4. Release the Elastic IP.** This is the step people forget.
+
+<ConsolePath path="VPC > Elastic IPs > Actions > Release Elastic IP addresses" />
+
+Tick the address the NAT gateway used, then choose **Release**.
+
+<Mistake title="releasing the address before the NAT gateway is gone">
+
+```output title="A message like"
+The address with allocation id [eipalloc-0123456789abcdef0] is in use.
+```
+
+The exact wording may differ.
+
+**Why:** the NAT gateway still holds the address until it reaches **Deleted**.
+
+**The fix:** wait for **Deleted**, refresh, and release it again.
+
+</Mistake>
+
+**5. Delete the VPC.**
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Actions > Delete VPC" />
+
+Type `delete` and choose **Delete**. If it complains that something is still in use, the instance is still terminating; wait a minute and try again.
+
+<See>
+
+No NAT gateways except the deleted one, **no Elastic IPs** in the list, no running instance, and no `quickcart-vpc`. Nothing is left billing.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Route table | Destination → target rules for a subnet. One table per subnet |
+| `local` | The VPC's own range. Always there, can't be removed |
+| Most specific wins | Of all matching routes, the one with the biggest number after the slash |
+| Main route table | Used by any subnet not associated with another. Keep it isolated |
+| Public subnet | `0.0.0.0/0 → igw`. Servers also need a public IP |
+| Private subnet | `0.0.0.0/0 → nat`. Out only |
+| Isolated subnet | No `0.0.0.0/0` route |
+| Internet gateway | One per VPC, two-way, free |
+| NAT gateway | In a public subnet, one zone, needs an Elastic IP, bills hourly and per GB |
+| High availability | One NAT gateway per zone, each zone routing to its own |
+| Gateway endpoint | S3 and DynamoDB. A route, free. Cuts NAT charges |
+| Interface endpoint | Other services. A private address in your subnet, bills hourly |
+| Clean-up order | NAT gateway → wait for Deleted → release Elastic IP → VPC |
+
+</Cheat>
+
+</Part>

@@ -1,0 +1,177 @@
+---
+/*
+ * Search. Two sources, shown together:
+ *  1. an instant index of every module, lesson, project and glossary term
+ *     (built here, a few KB), matched on titles as you type;
+ *  2. Pagefind's full-text index, loaded the first time search opens,
+ *     for anything said inside a lesson.
+ * Opens with "/" or Ctrl/Cmd+K.
+ */
+import { MODULES, PROJECTS, href, lessonHref, moduleHref, projectHref } from "../data/curriculum";
+import { GLOSSARY, termId } from "../data/glossary";
+import { readySlugs } from "../lib/lessons";
+
+const ready = await readySlugs();
+const index = [
+  ...MODULES.map((m) => ({ t: m.title, s: `Module ${m.id}. ${m.blurb}`, u: moduleHref(m), k: m.track, g: "Modules" })),
+  ...MODULES.flatMap((m) => m.lessons.map((l) => ({
+    t: l.title, s: `${m.title}. ${l.sum}${ready.has(l.slug) ? "" : " (being written)"}`, u: lessonHref(l.slug), k: m.track, g: "Lessons", r: ready.has(l.slug) ? 1 : 0,
+  }))),
+  ...PROJECTS.map((p) => ({ t: `Project ${p.n}: ${p.title}`, s: `${p.sum}${ready.has(p.slug) ? "" : " (being written)"}`, u: projectHref(p.slug), k: "proj", g: "Projects", r: ready.has(p.slug) ? 1 : 0 })),
+  ...GLOSSARY.map((g) => ({ t: g.term, s: `Glossary. ${g.def}`, u: href(`/glossary/#${termId(g.term)}`), k: "start", g: "Glossary" })),
+  { t: "Which lesson do I need?", s: "Common questions, mapped to the lesson that answers them.", u: href("/which-lesson/"), k: "start", g: "Pages" },
+  { t: "Cheat sheets", s: "Every lesson's essentials, on one card each. Printable.", u: href("/cheat-sheets/"), k: "start", g: "Pages" },
+];
+const pagefindUrl = href("/pagefind/pagefind.js");
+---
+<dialog class="search-dlg" id="searchDlg" aria-label="Search the course" transition:persist="search">
+  <div class="search">
+    <div class="search-in">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+      <label class="sr" for="searchInput">Search lessons and terms</label>
+      <input id="searchInput" type="search" placeholder="Search — try state, subnet, NAT" autocomplete="off" spellcheck="false"
+        role="combobox" aria-expanded="true" aria-controls="results" aria-autocomplete="list" />
+      <button class="esc" type="button" data-close>Esc</button>
+    </div>
+    <ul class="results" id="results" role="listbox" aria-label="Results"></ul>
+    <p class="sr" id="searchStatus" aria-live="polite"></p>
+  </div>
+</dialog>
+<script type="application/json" id="searchIndex" set:html={JSON.stringify({ index, pagefind: pagefindUrl })}></script>
+
+<style is:global>
+  .search-dlg { padding: 0; border: 0; background: transparent; width: calc(100% - 32px); max-width: 660px; margin: 70px auto auto; overflow: visible; color: var(--ink); }
+  .search-dlg::backdrop { background: rgba(0, 0, 0, .45); }
+</style>
+
+<script>
+  import { navigate } from "astro:transitions/client";
+  interface Item { t: string; s: string; u: string; k: string; g: string; r?: number; ex?: string }
+  const data = JSON.parse(document.getElementById("searchIndex")!.textContent!);
+  const INDEX: Item[] = data.index;
+  const dlg = document.getElementById("searchDlg") as HTMLDialogElement;
+  const input = document.getElementById("searchInput") as HTMLInputElement;
+  const list = document.getElementById("results")!;
+  const status = document.getElementById("searchStatus")!;
+  let hits: Item[] = [];
+  let sel = 0;
+  let seq = 0;
+  let pagefind: any = null;
+  let pagefindTried = false;
+
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+
+  async function loadPagefind() {
+    if (pagefindTried) return pagefind;
+    pagefindTried = true;
+    try {
+      pagefind = await import(/* @vite-ignore */ data.pagefind);
+      await pagefind.init?.();
+    } catch {
+      pagefind = null; /* dev server, or index missing: titles only */
+    }
+    return pagefind;
+  }
+
+  function open() {
+    if (!dlg.open) dlg.showModal();
+    input.value = "";
+    run("");
+    input.focus();
+    loadPagefind();
+  }
+  function close() { if (dlg.open) dlg.close(); }
+
+  function score(it: Item, q: string) {
+    const t = it.t.toLowerCase(), s = it.s.toLowerCase();
+    if (t === q) return 100;
+    if (t.startsWith(q)) return 70;
+    if (new RegExp("\\b" + q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(t)) return 50;
+    if (t.includes(q)) return 35;
+    if (s.includes(q)) return 10;
+    return 0;
+  }
+
+  async function run(raw: string) {
+    const my = ++seq;
+    const q = raw.trim().toLowerCase();
+    if (!q) {
+      hits = INDEX.filter((x) => x.g === "Lessons" && x.r).map((x) => ({ ...x, g: "Finished lessons" }));
+      sel = 0; paint(q); return;
+    }
+    const local = INDEX.map((x) => ({ x, sc: score(x, q) + (x.r ? 3 : 0) }))
+      .filter((r) => r.sc > 3).sort((a, b) => b.sc - a.sc).slice(0, 8).map((r) => ({ ...r.x, g: "Titles and terms" }));
+    hits = local; sel = 0; paint(q);
+
+    const pf = await loadPagefind();
+    if (!pf || my !== seq) return;
+    const res = pf.debouncedSearch ? await pf.debouncedSearch(raw, {}, 120) : await pf.search(raw);
+    if (!res || my !== seq) return;
+    const rows = await Promise.all(res.results.slice(0, 8).map((r: any) => r.data()));
+    if (my !== seq) return;
+    const seen = new Set(local.map((l) => l.u.split("#")[0]));
+    const text: Item[] = [];
+    for (const d of rows) {
+      const sub = (d.sub_results || []).find((s: any) => s.url !== d.url) || null;
+      const url = sub ? sub.url : d.url;
+      if (seen.has(url.split("#")[0]) && !sub) continue;
+      text.push({
+        t: (d.meta?.title || "").replace(/ — Laptop to Production$/, "") + (sub ? ` › ${sub.title}` : ""),
+        s: "", ex: (sub || d).excerpt, u: url, k: d.meta?.track || "start", g: "In the lessons",
+      });
+    }
+    hits = local.concat(text.slice(0, 8));
+    paint(q);
+  }
+
+  function paint(q: string) {
+    if (!hits.length) {
+      list.innerHTML = `<li class="none">Nothing matches “${esc(q)}”. Try a shorter word, like <b>state</b> or <b>subnet</b>.</li>`;
+      status.textContent = "No results";
+      input.removeAttribute("aria-activedescendant");
+      return;
+    }
+    let g = "";
+    list.innerHTML = hits.map((x, i) => {
+      const head = x.g !== g ? `<li class="grp" role="presentation">${esc((g = x.g))}</li>` : "";
+      const body = x.ex ?? esc(x.s); /* Pagefind excerpts are already escaped, with <mark> */
+      return head + `<li role="option" id="sr-${i}" aria-selected="${i === sel}" data-track="${esc(x.k)}"><a href="${esc(x.u)}" tabindex="-1"><i></i><div><b>${esc(x.t)}</b><span>${body}</span></div></a></li>`;
+    }).join("");
+    input.setAttribute("aria-activedescendant", "sr-" + sel);
+    status.textContent = `${hits.length} results`;
+  }
+
+  function move(d: number) {
+    if (!hits.length) return;
+    sel = (sel + d + hits.length) % hits.length;
+    list.querySelectorAll("[role=option]").forEach((li, i) => li.setAttribute("aria-selected", String(i === sel)));
+    input.setAttribute("aria-activedescendant", "sr-" + sel);
+    document.getElementById("sr-" + sel)?.scrollIntoView({ block: "nearest" });
+  }
+
+  function go(u: string) { close(); navigate(u); }
+
+  input.addEventListener("input", () => run(input.value));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+    else if (e.key === "Enter" && hits[sel]) { e.preventDefault(); go(hits[sel].u); }
+    /* A search input eats the first Escape to clear itself; close instead. */
+    else if (e.key === "Escape") { e.preventDefault(); close(); document.getElementById("searchBtn")!.focus(); }
+  });
+  list.addEventListener("click", (e) => {
+    const a = (e.target as HTMLElement).closest("a");
+    if (a) { e.preventDefault(); go(a.getAttribute("href")!); }
+  });
+  dlg.addEventListener("click", (e) => {
+    if (e.target === dlg || (e.target as HTMLElement).closest("[data-close]")) close();
+  });
+  document.getElementById("searchBtn")!.addEventListener("click", open);
+  document.addEventListener("keydown", (e) => {
+    const el = document.activeElement as HTMLElement | null;
+    const typing = !!el && (/^(input|textarea|select)$/i.test(el.tagName) || el.isContentEditable);
+    if ((e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) || (e.key === "/" && !typing && !dlg.open)) {
+      e.preventDefault(); open();
+    }
+  });
+</script>

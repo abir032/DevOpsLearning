@@ -1,0 +1,420 @@
+---
+time: 40 minutes
+level: Beginner
+before: [devops-lifecycle]
+cost: pennies
+quiz:
+  - q: A new version has a bug that only shows up with real customers' data. Which strategy lets it reach the fewest customers before it's stopped?
+    answer: 2
+    options:
+      - t: Blue/green
+        why: Blue/green switches everyone at once. Its tests run before the switch, so a bug that only real traffic triggers reaches every customer, although switching back is fast.
+      - t: Rolling
+        why: Rolling exposes a growing share, a server at a time, until someone or something notices. That's usually more than a small canary.
+      - t: Canary
+        why: Right. A small share of real traffic goes to the new version first, and the release is stopped if its errors rise. Only that small share is ever affected.
+      - t: Recreate, stopping everything and starting the new version
+        why: That gives everyone the new version at once, after a gap where nobody is served at all.
+  - q: What does blue/green need that rolling doesn't?
+    answer: 0
+    options:
+      - t: A complete second copy of the environment, running for a while
+        why: Right. Green is built in full next to blue, so for a while you pay for both. Rolling replaces servers in place.
+      - t: A load balancer
+        why: Rolling needs one too, to stop sending traffic to servers while they're replaced.
+      - t: Automated tests
+        why: Every strategy benefits from tests. That isn't the difference.
+      - t: A second AWS account
+        why: Green can live in the same account.
+  - q: During a rolling release, old and new versions answer requests at the same time. What does that mean for a database change?
+    answer: 3
+    options:
+      - t: Nothing, because only one version talks to the database at a time
+        why: Both versions are live for the whole rollout, and both use the same database.
+      - t: The database must be copied for the new version
+        why: There's one database. The versions have to share it.
+      - t: You have to stop the database during the release
+        why: That would cause the downtime the rolling release avoids.
+      - t: The change must work with both versions, for example by adding a column rather than renaming one
+        why: Right. Renaming or removing a column breaks whichever version still expects the old one. Add first, move over, and remove the old column in a later release.
+  - q: A canary is showing an error rate ten times higher than the old version. What should happen?
+    answer: 1
+    options:
+      - t: Promote it anyway; errors often settle down
+        why: The whole point of the canary is to act on what it shows. Promoting it would spread the errors to everyone.
+      - t: Abort the release, sending all traffic back to the old version, ideally automatically
+        why: Right. The abort rule is written down before the release starts, so nobody has to make a judgement call under pressure.
+      - t: Wait a day to collect more data
+        why: The canary's users are getting errors the whole time you wait.
+      - t: Switch to blue/green
+        why: The problem is the new version, not the strategy. Any strategy would release the same bug.
+  - q: In the App Store, you release an update to 1% of users on day one, then more each day. Which strategy is that?
+    answer: 0
+    options:
+      - t: Canary
+        why: Right. A small share first, growing while you watch the crash reports, and a pause button if something looks wrong.
+      - t: Blue/green
+        why: Blue/green moves everyone at once.
+      - t: Rolling
+        why: Rolling is about replacing servers a few at a time. A phased release chooses which users get it, which is what a canary does.
+      - t: Recreate
+        why: Recreate replaces everything at once, with a gap in between.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, deploy night">
+
+QuickCart's releases work like this: stop the API servers, copy the new code on, start them again. For about two minutes, every order fails. The team deploys at 11pm, when it hurts least.
+
+One Tuesday, the new version has a bug in the delivery fee. The moment it starts, **every** customer is charged the wrong fee. Rolling back means doing the whole stop-copy-start again: two more minutes of failures, then the old bug-free version.
+
+Leo asks the obvious question: why does every customer have to get a new version at the same moment?
+
+</Story>
+
+<Case title="This really happened: an update sent to everyone at once">
+
+In July 2024, a security company pushed a faulty configuration update for its Windows software. It went to all of its customers' computers at the same time. About 8.5 million Windows machines crashed and couldn't restart normally. Airlines, hospitals, banks and broadcasters were disrupted, and many machines had to be fixed by hand, one at a time.
+
+In its review afterwards, the company said it would stop sending these updates everywhere at once. Updates would go to a small group of machines first, then to more, watching for problems at each step. That is a canary release.
+
+</Case>
+
+The fix is the same for QuickCart as for anyone: stop giving everyone a new version at the same moment.
+
+</Part>
+
+<Part id="idea">
+
+Deploying means replacing the running version with a new one while customers keep using it. There are a few standard ways to do the replacement. They all end in the same place, with everyone on the new version. **They differ in how traffic moves** from old to new, and that decides what happens when the new version is bad.
+
+<YouKnow title="You already know this: a phased release">
+
+In App Store Connect you can release an update to 1% of users on day one, then 2%, 5%, 10%, 20%, 50% and everyone over a week. The Play Console calls it a staged rollout. You watch the crash reports as it grows, and pause if something's wrong.
+
+That's a canary release. The rest of this lesson is the same idea for servers, where it takes minutes instead of days.
+
+</YouKnow>
+
+### The four ways
+
+| Strategy | How traffic moves | If the new version is bad | Extra cost | Undoing it |
+|---|---|---|---|---|
+| **Recreate** | Stop everything, then start the new version | Everyone gets it, after a gap with no service | None | Do it all again |
+| **Rolling** | Replace servers a few at a time | A growing share gets it until someone notices | None, or one extra server | Roll back, a few servers at a time |
+| **Blue/green** | Build a full copy with the new version, then switch all traffic at once | Everyone gets it, but only until you switch back | A second full copy, for a while | Instant: switch back |
+| **Canary** | Send a small share of traffic to the new version, then grow it | Only the small share gets it, and the release is stopped | Small: one extra server, or none | Instant: send the share back |
+
+QuickCart's current method is **recreate**. It's the simplest, and the only one with downtime built in.
+
+<Key>All four end with everyone on the new version. What differs is how traffic moves, which decides how many customers a bad version reaches before you stop it.</Key>
+
+### What each one needs
+
+| Strategy | You need |
+|---|---|
+| Rolling | A load balancer that stops sending traffic to a server before it's replaced, and health checks so it only sends traffic to servers that work |
+| Blue/green | A way to switch all traffic at once, usually a load balancer or DNS, and room for a second copy |
+| Canary | A way to split traffic by percentage, **and** monitoring that compares the canary with the old version, and rules for when to stop |
+
+The canary's rules are called **abort criteria**, and they're written down before the release starts. For example: *if the canary's error rate is more than double the old version's for five minutes, send all traffic back.* The best pipelines apply them automatically. [Canary from a pipeline](/lessons/canary-pipeline/) builds exactly that.
+
+### Old and new run side by side
+
+In rolling and canary releases, and briefly in blue/green, both versions answer requests at the same time, and both use the **same database**. So every database change has to work with both versions:
+
+| Safe | Breaks the version that doesn't expect it |
+|---|---|
+| Adding a new column or table | Renaming a column |
+| Adding a column with a default value | Removing a column |
+| Removing a column, in a *later* release, once nothing uses it | Changing a column's type |
+
+This pattern is called **expand, then contract**: add the new thing, move the code over, and remove the old thing only when nothing uses it any more.
+
+<Note title="Rolling back code doesn't roll back the world">
+
+Switching back to the old version undoes the code, not what the bad version did while it ran. Wrong fees already charged, emails already sent and data already written in a new format all stay. That's why reaching fewer customers matters more than undoing quickly, and why the next lesson's [feature flags](/lessons/feature-flags/) are often the fastest way out.
+
+</Note>
+
+### Choosing one
+
+| Situation | A good fit |
+|---|---|
+| A small internal tool where a minute of downtime is fine | Recreate |
+| Most services, most of the time | Rolling, with good health checks |
+| A risky change you want to test fully before anyone sees it, with an instant way back | Blue/green |
+| A change to something customers depend on, like checkout | Canary |
+
+</Part>
+
+<Part id="see">
+
+The three strategies release the same version side by side. Release a **good** version first. Then switch to **Bad** and release again. Watch how traffic moves, and how many customers the bad version reaches.
+
+<ReleaseRace />
+
+**What to notice:** blue/green undid the bad version fastest, but it had already reached every customer. The canary reached only one in ten, because it was stopped while it was still small. Speed of undoing and number of customers hit are different things.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">a few calls to a tiny Lambda function. Well under a cent, and inside the free allowance on most accounts.</Cost>
+
+You'll run a real canary release on AWS, without any servers. You'll put two versions of a small function behind one name, send 10% of calls to the new version, watch the split, then promote it, and finally switch back instantly. About 20 minutes.
+
+The function runs on **Lambda**, which runs code without you managing a server. You don't need to know Lambda yet: it's just the simplest thing on AWS that can split traffic by percentage. The same ideas apply to servers and containers later in the course.
+
+Check the region selector says **N. Virginia (us-east-1)**, and that you've set up the AWS CLI in [Set up your Mac](/lessons/mac-setup/).
+
+<Steps>
+
+<Step title="Create the function">
+
+<ConsolePath path="Lambda > Functions > Create function" />
+
+| Field | Enter |
+|---|---|
+| Create function | **Author from scratch** |
+| Function name | `quickcart-menu` |
+| Runtime | The newest **Node.js** version in the list |
+| Architecture | **arm64** |
+| Permissions | Leave the default: **Create a new role with basic Lambda permissions** |
+
+Choose **Create function**.
+
+<See>
+
+The function's page, with a **Code** tab showing a file called `index.mjs`.
+
+</See>
+
+</Step>
+
+<Step title="Write version 1 and publish it">
+
+In the **Code** tab, replace everything in `index.mjs` with:
+
+```js title="index.mjs"
+export const handler = async () => {
+  return { version: "1", menu: "Margherita, Pepperoni" };
+};
+```
+
+| Line | What it does |
+|---|---|
+| `export const handler` | the function Lambda calls. It must be called `handler`, because that's what the default settings look for |
+| `async () =>` | it takes no input we need, and may do slow work |
+| `return { version: "1", menu: "Margherita, Pepperoni" }` | the answer, including which version sent it |
+
+Choose **Deploy**. Then fix this code as a numbered version that can never change:
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Actions > Publish new version" />
+
+| Field | Enter |
+|---|---|
+| Version description | `v1` |
+
+Choose **Publish**.
+
+<See>
+
+A message saying **Version 1** was created. You're now looking at version 1's page.
+
+</See>
+
+</Step>
+
+<Step title="Point a name at version 1">
+
+An **alias** is a fixed name that points at one or more versions. Callers always use the name; you change what it points at. That's what makes the release strategies possible.
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Aliases > Create alias" />
+
+| Field | Enter |
+|---|---|
+| Name | `live` |
+| Version | `1` |
+
+Leave **Weighted alias** empty. Choose **Save**.
+
+<See>
+
+The `live` alias, pointing at version 1.
+
+</See>
+
+</Step>
+
+<Step title="Write version 2 and publish it">
+
+Go back to the function (**Lambda → Functions → quickcart-menu**), open the **Code** tab, and change `index.mjs` to:
+
+```js title="index.mjs"
+export const handler = async () => {
+  return { version: "2", menu: "Margherita, Pepperoni, Veggie" };
+};
+```
+
+Choose **Deploy**, then **Actions → Publish new version** with the description `v2`, and **Publish**.
+
+<See>
+
+**Version 2** created. Nobody is calling it yet: `live` still points at version 1. That's **deploy without release**.
+
+</See>
+
+</Step>
+
+<Step title="Start the canary: 10% to version 2">
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Aliases > live > Edit" />
+
+| Field | Enter |
+|---|---|
+| Version | `1` |
+| Weighted alias: Additional version | `2` |
+| Weight | `10` |
+
+Choose **Save**.
+
+<See>
+
+The alias shows version 1 at 90% and version 2 at 10%.
+
+</See>
+
+</Step>
+
+<Step title="Call the alias and watch the split">
+
+Now call `live` the way a real caller would. The console's **Test** button is built for trying one version; to see which version answers each call through the alias, the terminal is simpler, because it prints that for you.
+
+```sh
+aws lambda invoke --function-name quickcart-menu:live response.json
+```
+
+| Part | What it means |
+|---|---|
+| `aws lambda invoke` | call a Lambda function once and wait for the answer |
+| `--function-name quickcart-menu:live` | the function, and after the colon the alias to call through |
+| `response.json` | a file to save the function's answer in. It's created in the folder you're in |
+
+```output
+{
+    "StatusCode": 200,
+    "ExecutedVersion": "1"
+}
+```
+
+`ExecutedVersion` is the version that answered. Run the same command ten or twenty times: press <kbd>↑</kbd> then <kbd>Return</kbd> to repeat it.
+
+<See>
+
+Mostly `"ExecutedVersion": "1"`, and now and then `"2"`. Over many calls, about 1 in 10 is version 2. With so few calls, you might see none or several; that's chance, not a fault.
+
+</See>
+
+<Mistake title="the function can't be found">
+
+```output title="The terminal says"
+An error occurred (ResourceNotFoundException) when calling the Invoke operation: Function not found: arn:aws:lambda:us-east-1:111122223333:function:quickcart-menu:live
+```
+
+**Why:** usually the CLI is looking in a different region from the one you used in the console, or the alias name is misspelled.
+
+**The fix:** check the region in the console is **N. Virginia**, and that your profile's region is `us-east-1` with `aws configure list`. Check the alias is called exactly `live`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Promote it">
+
+The canary looks healthy, so give version 2 everyone. Edit `live` again:
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Aliases > live > Edit" />
+
+| Field | Enter |
+|---|---|
+| Version | `2` |
+| Weighted alias: Additional version | Remove it, so there is none |
+
+Choose **Save**, and run the `invoke` command a few more times.
+
+<See>
+
+`"ExecutedVersion": "2"` every time. The release is complete.
+
+</See>
+
+</Step>
+
+<Step title="Switch back instantly">
+
+Say version 2 turns out to be wrong. Edit `live` once more and set **Version** to `1`. Choose **Save**, and invoke again.
+
+<See>
+
+`"ExecutedVersion": "1"` every time. Version 2 still exists, so switching forward again is just as quick. This is the blue/green idea: two complete versions, and one pointer that moves between them.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="Lambda > Functions > quickcart-menu > Actions > Delete function" />
+
+Type `confirm` if asked, and choose **Delete**. This removes every version and the alias.
+
+Lambda also created a log group for the function's logs. Delete it too:
+
+<ConsolePath path="CloudWatch > Log groups > /aws/lambda/quickcart-menu > Actions > Delete log group(s)" />
+
+Finally, remove the answer file from your laptop:
+
+```sh
+rm response.json
+```
+
+| Part | What it means |
+|---|---|
+| `rm` | remove a file |
+| `response.json` | the file `aws lambda invoke` wrote |
+
+The IAM role Lambda created, named like `quickcart-menu-role-` followed by random letters, costs nothing. You can delete it in **IAM → Roles** if you like to keep things tidy.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Strategy or idea | In one line |
+|---|---|
+| Recreate | Stop everything, start the new version. Downtime built in |
+| Rolling | Replace servers a few at a time. No extra cost; bad versions spread until noticed |
+| Blue/green | Full second copy, then switch all at once. Instant undo; everyone hit if bad |
+| Canary | Small share first, grow while watching. Fewest customers hit |
+| Abort criteria | The rule for stopping a canary, written before you start |
+| Expand, then contract | Database changes that work with old and new versions at once |
+| Rolling back | Undoes code, not what the bad version already did |
+| Lambda alias | A name pointing at one version, or two with weights |
+| `aws lambda invoke --function-name NAME:ALIAS out.json` | Call through an alias; `ExecutedVersion` says who answered |
+
+</Cheat>
+
+</Part>

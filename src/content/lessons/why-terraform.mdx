@@ -1,0 +1,564 @@
+---
+time: 30 minutes
+level: Beginner
+before: []
+cost: free
+quiz:
+  - q: QuickCart's network was built by hand and works. Why is that still a problem?
+    answer: 2
+    options:
+      - t: Hand-built resources are slower than ones Terraform builds
+        why: AWS runs them the same way however they were created. Speed isn't the difference.
+      - t: AWS charges more for resources made in the console
+        why: The price is the same. The console and Terraform call the same AWS APIs.
+      - t: Nobody can rebuild it exactly, review a change to it, or see how it was set up
+        why: The steps live in one person's memory. A second copy, a rebuild after a mistake, or a new team member all depend on that memory being perfect.
+      - t: Console-built resources can't be deleted later
+        why: They can be deleted like anything else. The trouble is building them again.
+  - q: What does "declarative" mean for Terraform code?
+    answer: 0
+    options:
+      - t: You describe the end result, and Terraform works out the steps to get there
+        why: You write "there is a VPC with these settings", not "create a VPC, then add a subnet". Terraform compares that with what exists and does the difference.
+      - t: You list the commands to run, in order
+        why: That's imperative, like a shell script. Run it twice and it tries to do everything twice.
+      - t: You declare variables before using them
+        why: Terraform does have variables, but that's not what declarative means.
+      - t: Every change must be declared to AWS support first
+        why: No such thing. Terraform talks to AWS directly through its API.
+  - q: You run terraform apply twice in a row with no changes to the code. What does the second run do?
+    answer: 3
+    options:
+      - t: Builds a second copy of everything
+        why: That's what a script would do. Terraform first checks what already exists.
+      - t: Deletes everything and builds it again
+        why: Terraform only replaces something when a change forces it. Here nothing changed.
+      - t: Fails with an error saying the resources already exist
+        why: Terraform knows they exist, from its state. So there's nothing to create and nothing to fail.
+      - t: Nothing. It reports "No changes"
+        why: The code, the state and what's real all match, so there's nothing to do. This is called being idempotent, and it's why running apply again is safe.
+  - q: Why does terraform plan exist as a separate step from apply?
+    answer: 1
+    options:
+      - t: Because apply can only run once a day
+        why: You can apply as often as you like.
+      - t: So you, and a reviewer, can read exactly what will change before anything does
+        why: The plan changes nothing. It's your chance to spot a "destroy" you didn't expect, before it happens.
+      - t: Because plan downloads the provider
+        why: That's what init does.
+      - t: Plan is only needed the first time
+        why: You read a plan before every apply, forever. apply even shows it again and asks you to confirm.
+  - q: Someone fixes an outage by changing a setting in the console, and doesn't update the code. What happens at the next apply?
+    answer: 2
+    options:
+      - t: Terraform keeps the console change, because it's newer
+        why: Terraform doesn't compare dates. The code is what it builds towards.
+      - t: The apply fails until someone deletes the resource
+        why: No error. Terraform just sees a difference.
+      - t: Terraform changes it back to what the code says, and the outage can return
+        why: The code is the truth. A fix that only lives in the console is quietly undone. Every fix belongs in the code.
+      - t: Terraform updates the code file to match
+        why: Terraform never edits your files. It changes AWS to match them.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first environment">
+
+QuickCart's first network, load balancer and database were built by Maya, by hand, in the AWS console. It took her most of a Tuesday: about a hundred form fields, in the right order.
+
+It worked. Six months later, QuickCart needed a second copy in another region, closer to customers in Europe. Maya had left for a two-week holiday. Leo opened her notes: a short document and a few screenshots.
+
+He clicked through it all again. It took him two days. The new servers couldn't download updates, and it took another day to find why: one route table was missing a single line. Maya's notes didn't mention it, because she'd fixed it on the first day and forgotten.
+
+</Story>
+
+That's what building by hand costs. Not the first time, which goes fine. Every time after.
+
+<Case title="Amazon S3, February 2017">
+
+A large part of the internet slowed down or stopped for about four hours when S3 in us-east-1 went down. AWS's own public summary said an engineer, following an established playbook, typed a command with one input wrong, and removed far more servers than intended. Part of AWS's fix was adding safeguards to the tool, so it couldn't remove too much at once. A change typed by hand has no reviewer and no preview. Terraform gives you both: a written change, and a plan to read before anything happens.
+
+</Case>
+
+This lesson is about writing infrastructure down as code, and why that fixes both Leo's two lost days and the typo nobody could review.
+
+</Part>
+
+<Part id="idea">
+
+Building by clicking in the console has a nickname: **ClickOps**. It's the right way to learn, and to explore. The trouble starts when a whole environment exists only because someone clicked it into being.
+
+### What goes wrong with clicking
+
+| Problem | What it looks like at QuickCart |
+|---|---|
+| **Unrepeatable** | Leo can't build Maya's network again exactly. He can only try |
+| **Undocumented** | The real setup is whatever is in AWS right now. Nobody wrote down why each setting is there |
+| **Unreviewed** | One person clicks, and the change is live. Nobody else looks first |
+| **Drift** | Someone changes a setting in a hurry. Now dev and production differ, and nobody knows how |
+| **Slow to copy** | A second region, or a staging copy, means all the clicking again, from memory |
+
+### The idea: write it down as code
+
+**Infrastructure as code** means you describe your infrastructure in text files. A tool reads the files and builds what they describe.
+
+**Terraform** is the most widely used tool for this. You write files ending in `.tf`, like this:
+
+```hcl title="main.tf"
+resource "aws_ecr_repository" "orders" {
+  name = "quickcart-orders"
+}
+```
+
+| Part | What it means |
+|---|---|
+| `resource` | something Terraform creates and looks after |
+| `"aws_ecr_repository"` | the **type**: an ECR repository, a private store for container images |
+| `"orders"` | the name **your code** uses for it |
+| `name` | the name **AWS** gives it. Leave it out and Terraform stops with an error, because it's required |
+
+That says: *there should be an ECR repository called quickcart-orders*. You'll build exactly this in [Your first resource](/lessons/first-resource/).
+
+Because the files are text, they go into git, like app code. So you get what app developers already rely on:
+
+| With code | What it gives QuickCart |
+|---|---|
+| Git history | Who changed what, when, and why |
+| Pull requests | Someone reviews a change before it runs |
+| Run it again | An identical copy, as many times as you like |
+| Change one value | The same environment in another region |
+
+### Declarative, not step by step
+
+There are two ways to tell a computer what to do.
+
+| | Imperative: a list of steps | Declarative: the end result |
+|---|---|---|
+| You write | "Create a VPC. Then create a subnet in it." | "There is a VPC. It has this subnet." |
+| Run it twice | Tries to create everything twice, and fails or duplicates | Sees it already exists, and does nothing |
+| Something changed by hand | The script doesn't know | Spotted, and put back to match |
+| Examples | A shell script, clicking through the console | Terraform |
+
+Terraform is **declarative**. You describe what should exist. Terraform works out the steps.
+
+<YouKnow title="You already know this: declarative UI">
+
+In SwiftUI, Jetpack Compose or React, you don't write "add a button, then move the label down". You describe what the screen looks like for the current state, and the framework works out what to change on screen.
+
+Terraform does the same for infrastructure. You describe the end state. It compares that with what exists, and makes only the difference.
+
+</YouKnow>
+
+<Key>Describe what should exist, read the plan, then apply. The code is the truth.</Key>
+
+### How Terraform knows what to do
+
+Every run compares three things:
+
+| Thing | What it is |
+|---|---|
+| **Your code** | What you want to exist |
+| **State** | Terraform's record of what it built last time. [Terraform state](/lessons/terraform-state/) covers it in depth |
+| **AWS** | What really exists right now |
+
+From the difference, it makes a **plan**: a list of what it would create, change or destroy.
+
+### The loop you'll use every day
+
+| Step | Command | What happens |
+|---|---|---|
+| 1 | `terraform init` | Set up the folder and download the plugins it needs. Once per folder |
+| 2 | Edit the `.tf` files | Describe what you want |
+| 3 | `terraform plan` | See exactly what would change. Nothing changes yet |
+| 4 | `terraform apply` | Shows the plan again, asks you to type `yes`, then makes the changes |
+| 5 | `terraform destroy` | Remove everything this code built. For practice environments |
+
+Then back to step 2. Because apply compares first, running it again with no changes does nothing. That's called **idempotent**, and it's why it's safe to run as often as you like.
+
+### What Terraform doesn't do
+
+It doesn't make clicking wrong. You'll still use the console to look at things, to learn, and for the one bucket that holds Terraform's own state. What changes is where the truth lives: in the code, not in someone's memory.
+
+<Note title="You'll hear about OpenTofu">
+
+In 2023, HashiCorp, who make Terraform, changed its licence. The community then started a fork called **OpenTofu**. It reads the same files and works almost identically, with the command `tofu` instead of `terraform`. This course uses Terraform. Almost everything here works in OpenTofu too.
+
+</Note>
+
+</Part>
+
+<Part id="see">
+
+Build QuickCart's environment both ways. Then build a second copy in another region, and compare.
+
+<TfClickVsCode />
+
+**What to notice:** the first build costs about the same either way. The difference only shows on the second copy: clicking is just as slow again and quietly misses a step, while code builds an identical copy by changing one value.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything runs on your laptop. Nothing is created in AWS.</Cost>
+
+You'll install Terraform and run the whole loop — init, plan, apply, apply again, change, destroy — with a built-in resource that lives only in Terraform's memory. No AWS account needed. About 15 minutes.
+
+<Steps>
+
+<Step title="Install Terraform">
+
+On a Mac, Terraform comes from HashiCorp's own Homebrew collection. First add the collection:
+
+```sh
+brew tap hashicorp/tap
+```
+
+| Part | What it means |
+|---|---|
+| `brew tap` | add another collection of software that Homebrew can install from |
+| `hashicorp/tap` | HashiCorp's own collection |
+
+Then install Terraform from it:
+
+```sh
+brew install hashicorp/tap/terraform
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | install a program |
+| `hashicorp/tap/terraform` | Terraform, from HashiCorp's collection |
+
+Check it worked:
+
+```sh
+terraform version
+```
+
+| Part | What it means |
+|---|---|
+| `terraform version` | print the version of Terraform installed |
+
+```output
+Terraform v1.16.4
+on darwin_arm64
+```
+
+Yours may be newer. Anything from 1.10 upwards works for this course.
+
+<Note title="Why not just brew install terraform?">
+
+After the 2023 licence change, Terraform left Homebrew's main collection, which only carries open-source software. The plain command no longer gets you the current Terraform. The two commands above are HashiCorp's official way.
+
+</Note>
+
+On Windows or Linux, follow the install page on HashiCorp's developer site, then run `terraform version` the same way.
+
+</Step>
+
+<Step title="Make a folder and describe something">
+
+Make a folder for this lesson:
+
+```sh
+mkdir quickcart-hello
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-hello` | its name |
+
+```sh
+cd quickcart-hello
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory. Every later command runs in here |
+| `quickcart-hello` | the folder you just made |
+
+Create `main.tf` in that folder, in any text editor:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+resource "terraform_data" "environment" {
+  input = {
+    app    = "quickcart"
+    region = "us-east-1"
+    zones  = 2
+  }
+}
+
+output "environment" {
+  value = terraform_data.environment.output
+}
+```
+
+`terraform_data` is a resource built into Terraform. It creates nothing outside Terraform: it just stores the values you give it. That makes it perfect for practising the loop without an AWS account.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `terraform` → `required_version` | Refuse to run on a Terraform older than 1.10 | Any version runs it, and an old one may fail later with a confusing error | When your code starts relying on a newer feature |
+| `resource "terraform_data" "environment"` | Declare one resource. `terraform_data` is the **type**; `environment` is the **name** your code uses for it | — | — |
+| `input` | The values to store. Here, a small description of an environment | The resource stores nothing, and has nothing to show | Change it to see how a plan shows an update |
+| `output "environment"` | Print a value after apply | Nothing is printed after apply | Add one for anything you'll want to see or use elsewhere |
+| `value` | What the output prints: the stored values, read back from the resource | Required — an output without a value is an error | Point it at whatever you want to see |
+
+</Step>
+
+<Step title="Initialise the folder">
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | set up this folder: find and download any plugins the code needs |
+
+```output
+Initializing the backend...
+
+Initializing provider plugins...
+- terraform.io/builtin/terraform is built in to Terraform
+
+Terraform has been successfully initialized!
+```
+
+`terraform_data` is built in, so there's nothing to download. With AWS, this is where the AWS plugin would be downloaded.
+
+</Step>
+
+<Step title="Read the plan">
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | compare the code with what exists, and show what would change. Changes nothing |
+
+```output
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # terraform_data.environment will be created
+  + resource "terraform_data" "environment" {
+      + id     = (known after apply)
+      + input  = {
+          + app    = "quickcart"
+          + region = "us-east-1"
+          + zones  = 2
+        }
+      + output = (known after apply)
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + environment = (known after apply)
+```
+
+Read it top to bottom:
+
+| Line | What it tells you |
+|---|---|
+| `+ create` | the key: `+` means something will be created |
+| `# terraform_data.environment will be created` | which resource, and what will happen to it |
+| `(known after apply)` | a value that doesn't exist until it's created, like an ID |
+| `Plan: 1 to add, 0 to change, 0 to destroy.` | the summary. **Always read this line** |
+
+It also warns you that the plan wasn't saved. That's fine here: you'll use saved plans later, in pipelines.
+
+</Step>
+
+<Step title="Apply it, then apply again">
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | make the plan again, show it, and carry it out once you type `yes` |
+
+It shows the same plan, then asks. Type `yes`:
+
+```output
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: yes
+
+terraform_data.environment: Creating...
+terraform_data.environment: Creation complete after 0s [id=2af1f034-bd2c-4555-3989-3189330c5de7]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+environment = {
+  "app" = "quickcart"
+  "region" = "us-east-1"
+  "zones" = 2
+}
+```
+
+Your ID will be different. A new file has appeared in the folder: `terraform.tfstate`. That's Terraform's record of what it built.
+
+Now run exactly the same command again:
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | the same command, with no change to the code |
+
+```output
+terraform_data.environment: Refreshing state... [id=2af1f034-bd2c-4555-3989-3189330c5de7]
+
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+```
+
+**Nothing was built twice.** A script would have tried to create it again. Terraform compared, found everything matching, and did nothing. This is what makes it safe to run as often as you like.
+
+</Step>
+
+<Step title="Change the code, and read the plan">
+
+QuickCart decides to run in three zones. In `main.tf`, change `zones  = 2` to `zones  = 3`. The whole file now reads:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+}
+
+resource "terraform_data" "environment" {
+  input = {
+    app    = "quickcart"
+    region = "us-east-1"
+    zones  = 3
+  }
+}
+
+output "environment" {
+  value = terraform_data.environment.output
+}
+```
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | compare the changed code with what was built |
+
+```output
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  ~ update in-place
+
+Terraform will perform the following actions:
+
+  # terraform_data.environment will be updated in-place
+  ~ resource "terraform_data" "environment" {
+        id     = "2af1f034-bd2c-4555-3989-3189330c5de7"
+      ~ input  = {
+          ~ zones  = 2 -> 3
+            # (2 unchanged attributes hidden)
+        }
+      ~ output = {
+          - app    = "quickcart"
+          - region = "us-east-1"
+          - zones  = 2
+        } -> (known after apply)
+    }
+
+Plan: 0 to add, 1 to change, 0 to destroy.
+```
+
+`~` means **change in place**. The line `zones = 2 -> 3` shows the old value, an arrow, and the new one. Only what you changed is planned: the two unchanged values are hidden.
+
+You don't need to apply this. The point was to see how Terraform describes a change.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything this folder built, and carry it out once you type `yes` |
+
+It shows a plan full of `-` lines and asks. Type `yes`:
+
+```output
+Plan: 0 to add, 0 to change, 1 to destroy.
+
+Do you really want to destroy all resources?
+  Terraform will destroy all your managed infrastructure, as shown above.
+  There is no undo. Only 'yes' will be accepted to confirm.
+
+  Enter a value: yes
+
+terraform_data.environment: Destroying... [id=2af1f034-bd2c-4555-3989-3189330c5de7]
+terraform_data.environment: Destruction complete after 0s
+
+Destroy complete! Resources: 1 destroyed.
+```
+
+Nothing existed outside your laptop, so nothing else needs cleaning up. You can delete the `quickcart-hello` folder, or keep it to experiment with.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Idea or command | What it means |
+|---|---|
+| ClickOps | Building by clicking in the console. Fine for learning; unrepeatable for real environments |
+| Infrastructure as code | Infrastructure described in text files, kept in git, built by a tool |
+| Declarative | Describe the end result; the tool works out the steps |
+| Idempotent | Running it again with no changes does nothing |
+| `terraform init` | Set up a folder and download plugins. Once per folder |
+| `terraform plan` | Show what would change. Changes nothing |
+| `terraform apply` | Show the plan, ask for `yes`, make the changes |
+| `terraform destroy` | Remove everything this code built |
+| `+` `~` `-` | Create, change in place, destroy |
+| The rule | Every fix goes in the code. A console-only fix gets undone |
+
+</Cheat>
+
+</Part>

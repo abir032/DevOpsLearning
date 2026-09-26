@@ -1,0 +1,632 @@
+---
+time: 45 minutes
+level: Beginner
+before: [ec2]
+cost: pennies
+quiz:
+  - q: QuickCart's servers are replaced by auto scaling several times a day. Where should their logs live?
+    answer: 2
+    options:
+      - t: In a file on each server's disk
+        why: When a server is replaced, its disk goes with it, and so do its logs. The evidence disappears exactly when you need it.
+      - t: In the git repository
+        why: Git is for code. Logs are written constantly by running servers and would never belong in a repository.
+      - t: In a CloudWatch log group, shipped there by an agent as they're written
+        why: The agent sends each line off the server within seconds. Servers can come and go; the log group keeps everything in one place for as long as its retention says.
+      - t: Nowhere — logs are only for developers on their laptops
+        why: Production is exactly where you need logs. You can't attach a debugger to a customer's failed checkout.
+  - q: Every error line in the logs reads "ERROR database_unavailable". What would help most to tell different causes apart?
+    answer: 1
+    options:
+      - t: Logging more lines with the same message
+        why: More copies of the same text answer the same question — which is none.
+      - t: Writing each line as JSON with fields like error_type, latency_ms and instance_id
+        why: Named fields can be filtered, counted and averaged. An error_type field and a latency of 3,000 ms versus 5 ms is what separated a firewall problem from a missing table.
+      - t: Turning on debug logging everywhere
+        why: That adds volume and cost, but if the lines are still free text, you still can't count or group them.
+      - t: Keeping logs for longer
+        why: Retention decides how long logs are kept, not what they say.
+  - q: A new log group is created with the default settings. How long are its logs kept?
+    answer: 3
+    options:
+      - t: 30 days
+        why: 30 days is a sensible choice, but you have to choose it. It isn't the default.
+      - t: 90 days
+        why: 90 days is how long CloudTrail's event history keeps events, not CloudWatch Logs.
+      - t: One year
+        why: There's no one-year default. Nothing is deleted unless you set a retention period.
+      - t: Forever, until you set a retention period
+        why: The default is Never expire. Storage is cheap per gigabyte, but it adds up for ever. Set retention on every log group.
+  - q: You create a metric filter for { $.level = "ERROR" } at 10:30. The errors happened at 10:00. What does the metric show for 10:00?
+    answer: 0
+    options:
+      - t: Nothing — metric filters only count events that arrive after the filter exists
+        why: A metric filter works on log events as they are ingested. It never goes back over old ones. Use Logs Insights to count past events.
+      - t: The correct count, calculated from the stored logs
+        why: That's what Logs Insights does. Metric filters don't look back.
+      - t: Zero, because the default value is 0
+        why: The default value is only published for periods after the filter exists, when logs arrive but none match.
+      - t: An error, because the filter was created too late
+        why: There's no error. The metric simply has no data for the time before the filter.
+  - q: In the metric HTTPCode_Target_5XX_Count, you want the total number of 5xx responses each minute. Which statistic and period?
+    answer: 1
+    options:
+      - t: Average, 5 minutes
+        why: Average of a count gives the average per report, not the total. And 5 minutes hides a short spike.
+      - t: Sum, 1 minute
+        why: Counts are added up with Sum. A one-minute period shows how many happened in each minute.
+      - t: Maximum, 1 hour
+        why: Maximum gives the largest single report, not the total, and an hour is far too coarse to see an incident.
+      - t: p95, 1 minute
+        why: Percentiles suit things like response time, where you care about the slow tail. For a count, you want the total.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, launch month">
+
+At 2am, the orders page started failing. By the time Leo woke up and opened a laptop, auto scaling had already replaced the two servers that were failing. Their logs had been on their own disks, so the logs were gone with them.
+
+The next night it happened again, and this time Leo was quick. He opened a shell on a server and read the log file. Every error said the same thing: `ERROR database_unavailable`. Was it one problem or two? Which server? Since when? How many customers? The log couldn't say.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Many teams log free text, such as "Error processing order", written for a person reading one line at a time. When a real incident comes, they need to count: how many orders failed, on which servers, starting when. Free text can't be counted reliably, so they add better logging, deploy it, and wait for the problem to happen again. The first time is lost.
+
+</Case>
+
+QuickCart needs two things:
+
+- Logs that **leave the server** the moment they're written, so they survive the server.
+- Logs that can **answer questions**: filter, count, group, average.
+
+This lesson covers both, and metrics: the numbers you'll hang alarms on in the next lesson.
+
+</Part>
+
+<Part id="idea">
+
+A running system tells you what it's doing in two ways.
+
+| | Logs | Metrics |
+|---|---|---|
+| What it is | One line of text per event: "this request failed, here's why" | A number measured over time: "14 errors this minute" |
+| Good for | Finding out **why** something happened | Seeing **that** something is wrong, and how much |
+| Example | `{"level":"ERROR","error_type":"OperationalError"}` | `HTTPCode_Target_5XX_Count = 14` |
+| Cost grows with | How much you write | How many different metrics you keep |
+
+In AWS, both live in **CloudWatch**.
+
+### Where logs go: CloudWatch Logs
+
+| Piece | What it is | QuickCart's |
+|---|---|---|
+| Log event | One line, with a timestamp | One request to the orders API |
+| Log stream | The events from one source, in order | One stream per server, named after the server |
+| Log group | A set of streams that belong together. Settings like retention live here | `/quickcart/orders` — every server's stream |
+| Retention | How long events are kept before CloudWatch deletes them | 30 days |
+
+**Retention defaults to "Never expire".** Every log group you create keeps everything forever unless you choose otherwise. Choose a period every time.
+
+### Getting logs off the server
+
+The app writes to a file, as it always has. Something has to copy each line to CloudWatch as it's written.
+
+| Where the app runs | What ships its logs |
+|---|---|
+| EC2 server | The **CloudWatch agent**: a small program you install, which follows log files and sends new lines |
+| ECS container | The `awslogs` log driver: whatever the container prints goes to a log group. You set it in the task definition |
+| Lambda function | Nothing to set up. Lambda sends what the function prints automatically |
+
+The agent reads a JSON config file. This one follows the app's log file and sends it to `/quickcart/orders`, one stream per server:
+
+```json title="quickcart-agent.json"
+{
+  "agent": {
+    "metrics_collection_interval": 60
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/app/app.log",
+            "log_group_name": "/quickcart/orders",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30,
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "metrics_collected": {
+      "mem": {
+        "measurement": ["mem_used_percent"]
+      },
+      "disk": {
+        "measurement": ["used_percent"],
+        "resources": ["/"]
+      }
+    }
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `metrics_collection_interval` | How often, in seconds, the agent measures the metrics below | Defaults to 60 | Lower only if you really need finer detail; it costs more |
+| `file_path` | The log file to follow | Required — nothing to ship | When the app writes somewhere else |
+| `log_group_name` | Which log group to send lines to. Created if it doesn't exist | The agent makes a name up from the file path. Always set it | One group per app or service |
+| `log_stream_name` | The stream name. `{instance_id}` is replaced by the server's ID, so each server gets its own stream | Defaults to the instance ID | Rarely |
+| `retention_in_days` | Retention for the group, if the agent creates it | The group keeps logs forever | Match what your team agreed, such as 30 days |
+| `timezone` | Which time zone the file's timestamps are in | Local time on the server | Keep `UTC` everywhere, so times from different servers line up |
+| `mem`, `disk` | Measure memory and disk use. EC2 can't see inside the server, so it never reports these on its own | No memory or disk metrics at all | Add more, such as swap, if you need them |
+
+The server also needs an IAM role that lets it write to CloudWatch; AWS's managed policy `CloudWatchAgentServerPolicy` covers it. On the server, this starts the agent with that file:
+
+```sh
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/quickcart-agent.json
+```
+
+| Part | What it means |
+|---|---|
+| `sudo` | run as the administrator; the agent is a system service |
+| `/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl` | the agent's control program, where the package installs it |
+| `-a fetch-config` | the action: load a config file |
+| `-m ec2` | the mode: running on an EC2 server |
+| `-s` | start (or restart) the agent once the config is loaded |
+| `-c file:/opt/aws/amazon-cloudwatch-agent/etc/quickcart-agent.json` | where the config file is |
+
+<See>
+
+A few lines saying the config was read and checked, then that the agent service was started. The exact wording changes between agent versions. You don't need a server for this lesson's lab; [A self-healing environment](/projects/02-self-healing-environment/) runs this in a server's boot script.
+
+</See>
+
+### Why the format of each line matters
+
+Here is the same failure, written two ways:
+
+```output title="Plain text"
+2026-09-25T02:06:15Z ERROR GET /orders 500 database_unavailable
+```
+
+```output title="Structured JSON"
+{"level":"ERROR","route":"/orders","status":500,"latency_ms":3004,"error_type":"OperationalError","instance_id":"i-0aa11","detail":"Can't connect to MySQL server on 'quickcart-db' (timed out)"}
+```
+
+The plain line is easy to read and impossible to query. To count errors by type, you'd have to guess at words inside the text. The JSON line is a set of **named fields**. CloudWatch finds them automatically, so you can ask "how many errors of each `error_type`?" or "what was the average `latency_ms`?" This is called **structured logging**.
+
+<Key>Write every log line as JSON, so every detail is a field you can filter, count and average.</Key>
+
+<YouKnow title="You already know this: crash reporting">
+
+A crash reporting tool doesn't just store a pile of stack traces. It groups them by type, counts them, and shows which app version and device each came from, because every report carries those as fields. Structured logs give your servers the same thing: each line carries `error_type`, `route` and `instance_id`, so you can group and count them.
+
+</YouKnow>
+
+A few habits make structured logs useful:
+
+| Habit | Why |
+|---|---|
+| Always include `level` | So you can find every `ERROR` in one filter |
+| Include the thing that varies: `error_type`, `status`, `latency_ms` | These are what you'll group and average by |
+| Include where it happened: `instance_id`, zone | So you can tell one bad server from all of them |
+| Include a request ID if you have one | So you can follow one customer's request through several services |
+| Never log passwords, tokens or card numbers | Logs are read by many people and kept for weeks |
+
+### Metrics: numbers over time
+
+A **metric** is one number, reported again and again. AWS services publish many for free. Five words describe any metric:
+
+| Word | What it means | Example |
+|---|---|---|
+| Namespace | The group the metric belongs to. AWS services use `AWS/…` | `AWS/ApplicationELB` |
+| Metric name | What is being measured | `HTTPCode_Target_5XX_Count` |
+| Dimension | Which one: a name and value that pick out one resource | `LoadBalancer = app/quickcart-alb/50dc6c495c0c9188` |
+| Statistic | How reports in one period are combined | `Sum`, `Average`, `Maximum`, `Minimum`, `SampleCount`, or a percentile like `p95` |
+| Period | The length of each time slice | 1 minute, 5 minutes |
+
+The statistic matters. **Counts are added up** with `Sum`: errors per minute. **Levels are averaged**: CPU with `Average`. **Response times use a percentile**: `p95` is the time 95% of requests beat, which shows the slow minority an average hides.
+
+A few metrics QuickCart will use constantly:
+
+| Namespace | Metric | Statistic | Tells you |
+|---|---|---|---|
+| `AWS/ApplicationELB` | `HTTPCode_Target_5XX_Count` | Sum | How many requests the app failed |
+| `AWS/ApplicationELB` | `TargetResponseTime` | p95 | How slow the slowest requests are |
+| `AWS/ApplicationELB` | `UnHealthyHostCount`, per target group | Maximum | How many servers the load balancer has given up on |
+| `AWS/EC2` | `CPUUtilization` | Average | How busy the servers are |
+| `AWS/RDS` | `DatabaseConnections` | Maximum | How close the database is to its connection limit |
+| `CWAgent` | `mem_used_percent` | Average | Memory use, reported by the agent |
+
+EC2 reports every 5 minutes unless you turn on **detailed monitoring**, which reports every minute. The difference matters for alarms: a problem can be 5 minutes old before a 5-minute metric even shows it.
+
+### Metric filters: turning log lines into a metric
+
+A **metric filter** watches a log group and adds to a metric whenever a line matches a pattern. It's how "an ERROR line was written" becomes a number you can alarm on.
+
+| Field | QuickCart's | What it does |
+|---|---|---|
+| Filter pattern | `{ $.level = "ERROR" }` | Match JSON lines whose `level` field is `ERROR`. `$` is the whole line; `$.level` is its `level` field |
+| Metric namespace | `QuickCart/App` | Your own namespace, so it doesn't mix with AWS's |
+| Metric name | `AppErrorCount` | The name you'll alarm on |
+| Metric value | `1` | Each matching line adds 1 |
+| Default value | `0` | Report 0 in periods when logs arrived but none matched. Without it, a healthy minute reports nothing at all, and alarms can't tell "no errors" from "no data" |
+
+The `{ $.field = value }` pattern only works on JSON lines — one more reason to log structured. Metric filters only see lines that arrive **after** they're created. They never go back over old logs.
+
+### Logs Insights: asking questions of your logs
+
+**Logs Insights** is a query tool in the CloudWatch console. You pick log groups and a time range, write a query, and it scans the logs. Each query is a series of commands joined by `|`, like a pipe in the terminal: each step works on what the step before it produced.
+
+| Command | What it does | Example |
+|---|---|---|
+| `fields` | Choose which fields to show | `fields @timestamp, level, error_type` |
+| `filter` | Keep only lines that match | `filter level = "ERROR"` |
+| `stats` | Count, sum or average, optionally grouped with `by` | `stats count() by error_type` |
+| `sort` | Order the results | `sort @timestamp desc` |
+| `limit` | Show at most this many | `limit 20` |
+
+Fields that start with `@` are added by CloudWatch: `@timestamp` is the event's time, and `@message` is the whole raw line. Fields from your JSON appear under their own names.
+
+```sql title="Logs Insights query"
+filter level = "ERROR"
+| stats count() as errors by bin(1m)
+| sort @timestamp asc
+```
+
+| Part | What it means |
+|---|---|
+| `filter level = "ERROR"` | keep only lines whose `level` field is `ERROR` |
+| `\|` | pass what's left to the next command |
+| `stats count() as errors` | count the lines, and call the column `errors` |
+| `by bin(1m)` | one count for each one-minute slice of time |
+| `sort @timestamp asc` | earliest minute first |
+
+That one query shows when the trouble started, when it stopped and how bad it got. It's usually the first thing to run in an incident.
+
+<Note title="What this costs">
+
+Prices change, so treat these as rough figures for us-east-1. Sending logs to CloudWatch costs about $0.50 per gigabyte, and keeping them about $0.03 per gigabyte per month. Logs Insights charges about $0.005 per gigabyte it scans. A custom metric, like the one a metric filter creates, costs about $0.30 a month, and the free tier covers the first ten. This lab sends a few kilobytes.
+
+</Note>
+
+</Part>
+
+<Part id="see">
+
+Below are twelve log lines from QuickCart's orders API: a few normal requests and six errors. Switch between **plain text** and **structured JSON**, then try to find out what went wrong. Filter by `level` and `error_type`, and count by type or by server.
+
+<LogsQuery />
+
+**What to notice:** in plain text, all six errors look identical, and no query can split them. In JSON, one `stats` line reveals two different problems: one failing in 5 ms and one timing out at 3,000 ms. The customer saw the same message for both.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">a few kilobytes of logs, a few Logs Insights queries and one custom metric. Well under a cent, and the free tier covers most of it.</Cost>
+
+You'll create a log group, send it structured log lines, turn the errors into a metric, ask the logs questions with Logs Insights, and set retention. About 30 minutes.
+
+You need the AWS CLI with a working login in your terminal. [Set up your Mac](/lessons/mac-setup/) covers it. Check the region selector in the console says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create the log group">
+
+<ConsolePath path="CloudWatch > Log groups > Create log group" />
+
+In newer versions of the console, **Log groups** sits under **Logs**, and may be called **Log Management**.
+
+| Field | Enter |
+|---|---|
+| Log group name | `/quickcart/orders` |
+| Retention setting | **Never expire** — leave the default for now. You'll change it in the last step |
+| Log class | **Standard** |
+
+Leave everything else empty and choose **Create**.
+
+<See>
+
+`/quickcart/orders` in the list, with **Retention: Never expire** and **Stored bytes: 0**.
+
+</See>
+
+</Step>
+
+<Step title="Create a log stream">
+
+Normally the agent creates streams for you. Here you're sending lines by hand, so you make one.
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/orders > Log streams > Create log stream" />
+
+| Field | Enter |
+|---|---|
+| Log stream name | `lab-1` |
+
+Choose **Create**.
+
+<See>
+
+`lab-1` in the list of log streams, with no events yet.
+
+</See>
+
+</Step>
+
+<Step title="Create the metric filter before any logs arrive">
+
+A metric filter only counts lines that arrive after it exists, so create it first.
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/orders > Metric filters > Create metric filter" />
+
+| Field | Enter |
+|---|---|
+| Filter pattern | `{ $.level = "ERROR" }` |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Filter name | `quickcart-app-errors` |
+| Metric namespace | `QuickCart/App` |
+| Metric name | `AppErrorCount` |
+| Metric value | `1` |
+| Default value | `0` |
+| Unit | leave empty |
+
+Choose **Next**, then **Create metric filter**.
+
+<See>
+
+The filter listed on the **Metric filters** tab, showing the pattern and `QuickCart/App / AppErrorCount`.
+
+</See>
+
+</Step>
+
+<Step title="Write the log lines to a file">
+
+The console has no way to send log lines by hand, so this step and the next use the CLI.
+
+First, get the current time. CloudWatch refuses log events more than 14 days old or more than 2 hours in the future, so the timestamps must be close to now.
+
+```sh
+date +%s
+```
+
+| Part | What it means |
+|---|---|
+| `date` | print the date and time |
+| `+%s` | in this format: seconds since 1 January 1970, which is how computers count time |
+
+```output
+1790349400
+```
+
+Yours will be a different, larger number. CloudWatch wants **milliseconds**, so add three zeros to the end of yours: `1790349400` becomes `1790349400000`.
+
+In a new folder, create `events.json`. Replace every highlighted `1790349400000` with your own number. Most editors can do this with find and replace.
+
+```json title="events.json" ph="1790349400000"
+[
+  {"timestamp": 1790349400000, "message": "{\"level\":\"INFO\",\"route\":\"/orders\",\"status\":200,\"latency_ms\":41,\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"INFO\",\"route\":\"/orders\",\"status\":200,\"latency_ms\":38,\"instance_id\":\"i-0bb22\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":6,\"error_type\":\"ProgrammingError\",\"instance_id\":\"i-0aa11\",\"detail\":\"Table 'quickcart.orders' doesn't exist\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":5,\"error_type\":\"ProgrammingError\",\"instance_id\":\"i-0bb22\",\"detail\":\"Table 'quickcart.orders' doesn't exist\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"INFO\",\"route\":\"/orders\",\"status\":200,\"latency_ms\":44,\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0aa11\",\"detail\":\"Can't connect to MySQL server on 'quickcart-db' (timed out)\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3003,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0bb22\",\"detail\":\"Can't connect to MySQL server on 'quickcart-db' (timed out)\"}"},
+  {"timestamp": 1790349400000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3005,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0aa11\",\"detail\":\"Can't connect to MySQL server on 'quickcart-db' (timed out)\"}"}
+]
+```
+
+| Part | What it means |
+|---|---|
+| `[` and `]` | a list of log events |
+| `timestamp` | when the event happened, in milliseconds |
+| `message` | the log line itself. Here each line is JSON, written inside a string, so its own quotes are escaped as `\"` |
+
+Eight events: three normal requests, two failures from a missing table, and three timeouts to the database. They're the kind of lines QuickCart's app writes.
+
+</Step>
+
+<Step title="Send them to CloudWatch">
+
+From the folder that holds `events.json`:
+
+```sh
+aws logs put-log-events --region us-east-1 --log-group-name /quickcart/orders --log-stream-name lab-1 --log-events file://events.json
+```
+
+| Part | What it means |
+|---|---|
+| `aws logs put-log-events` | send log events to CloudWatch Logs |
+| `--region us-east-1` | the region the log group is in |
+| `--log-group-name /quickcart/orders` | which log group |
+| `--log-stream-name lab-1` | which stream in that group |
+| `--log-events file://events.json` | read the events from this file. `file://` tells the CLI it's a file, not the events themselves |
+
+<See>
+
+A short JSON reply. It may include a `nextSequenceToken`, which you can ignore — CloudWatch no longer needs it. If the reply includes `rejectedLogEventsInfo`, some events were refused: see the mistake below.
+
+</See>
+
+Open **CloudWatch → Log groups → /quickcart/orders → lab-1** to see the eight lines. Choose one to expand it: CloudWatch shows the JSON fields laid out.
+
+<Mistake title="the timestamps are too old">
+
+If you forgot to replace the example timestamps, or waited too long, the reply says:
+
+```output title="The CLI prints"
+{
+    "rejectedLogEventsInfo": {
+        "tooOldLogEventEndIndex": 8
+    }
+}
+```
+
+**Why:** CloudWatch refuses events older than 14 days, or older than the log group's retention. `tooOldLogEventEndIndex` marks where the refused events end, counting from the start of the file; your number may differ.
+
+**The fix:** run `date +%s` again, put the new number (plus three zeros) into every timestamp, and send the file again.
+
+</Mistake>
+
+<Mistake title="the stream doesn't exist">
+
+```output title="The CLI prints"
+An error occurred (ResourceNotFoundException) when calling the PutLogEvents operation: The specified log stream does not exist.
+```
+
+**Why:** the stream name in the command doesn't match one in the log group — often a typo, or the wrong region.
+
+**The fix:** check the stream is called exactly `lab-1` in `/quickcart/orders`, in us-east-1.
+
+</Mistake>
+
+</Step>
+
+<Step title="Ask the logs questions">
+
+<ConsolePath path="CloudWatch > Logs Insights" />
+
+If the page offers a choice of query language, choose **Logs Insights QL**. In **Select log groups**, choose `/quickcart/orders`. Set the time range to **3h**, so it includes your timestamps.
+
+Paste this query and choose **Run query**:
+
+```sql title="Logs Insights query"
+fields @timestamp, level, error_type, latency_ms, instance_id
+| sort @timestamp desc
+| limit 20
+```
+
+| Part | What it means |
+|---|---|
+| `fields @timestamp, level, error_type, latency_ms, instance_id` | show these fields as columns. All but `@timestamp` come from your JSON |
+| `\| sort @timestamp desc` | newest first |
+| `\| limit 20` | at most 20 rows |
+
+<See>
+
+Eight rows with the fields in their own columns. `error_type` is empty for the three normal requests.
+
+</See>
+
+Now count the errors by type:
+
+```sql title="Logs Insights query"
+filter level = "ERROR"
+| stats count() as errors, avg(latency_ms) as avg_ms by error_type
+```
+
+| Part | What it means |
+|---|---|
+| `filter level = "ERROR"` | keep only the error lines |
+| `\| stats count() as errors` | count them, in a column called `errors` |
+| `avg(latency_ms) as avg_ms` | and average their `latency_ms`, in a column called `avg_ms` |
+| `by error_type` | one row for each different `error_type` |
+
+```output title="Logs Insights shows"
+error_type          errors   avg_ms
+OperationalError    3        3004
+ProgrammingError    2        5.5
+```
+
+The rows may come in the other order. **This is the question plain-text logs couldn't answer.** Two different problems: one fails instantly with a clear message, the other waits 3 seconds for a database that never answers — the sign of a network block, not a code bug.
+
+<Note title="If the query finds nothing">
+
+The results table stays empty. Almost always, that's the time range: your events carry the timestamp you typed, and the query only looks inside the range you chose. Widen it to **1d** and run the query again.
+
+</Note>
+
+</Step>
+
+<Step title="See the metric the filter made">
+
+<ConsolePath path="CloudWatch > Metrics > All metrics > Browse > QuickCart/App > Metrics with no dimensions" />
+
+Tick **AppErrorCount**. On the **Graphed metrics** tab, set **Statistic** to **Sum** and **Period** to **1 minute**.
+
+<See>
+
+One point at **5** — the five error lines — at the minute of your timestamp. The namespace can take a few minutes to appear the first time. This metric is what the [next lesson](/lessons/alarms/) puts an alarm on.
+
+</See>
+
+</Step>
+
+<Step title="Set retention">
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/orders > Actions > Edit retention setting(s)" />
+
+| Field | Enter |
+|---|---|
+| Expire events after | **1 week** |
+
+Choose **Save**.
+
+<See>
+
+**Retention: 1 week** in the log group list. For a real app, 30 days is a common choice for application logs; audit logs are often kept much longer, by law.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/orders > Actions > Delete log group(s)" />
+
+Choose **Delete**. This deletes the stream, its events and the metric filter with it.
+
+<See>
+
+The log group is gone from the list. The `AppErrorCount` metric may stay visible for a while, but it receives no new data. You can't delete a metric by hand; CloudWatch removes it after it has had no data for 15 months, and it costs nothing while nothing is sent to it.
+
+</See>
+
+If you're going straight on to [Alarms that actually fire](/lessons/alarms/), you can keep the log group instead — that lab starts by building the same thing.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term or query | In one line |
+|---|---|
+| Log group | A set of log streams for one app, where retention is set |
+| Log stream | The lines from one source, such as one server |
+| Retention | Defaults to Never expire. Always set it |
+| CloudWatch agent | Ships log files and memory and disk metrics from a server |
+| Structured log | One JSON object per line, so every detail is a field |
+| Metric | Namespace, name, dimensions; read with a statistic over a period |
+| `Sum` / `Average` / `p95` | Counts / levels like CPU / response times |
+| Metric filter | `{ $.level = "ERROR" }` → a metric. Only counts lines after it exists |
+| Default value `0` | Lets "no errors" look different from "no data" |
+| `filter level = "ERROR"` | Only error lines |
+| `stats count() by error_type` | Count per type |
+| `stats count() by bin(1m)` | Count per minute: when did it start and stop? |
+| `@timestamp`, `@message` | CloudWatch's own fields: the time, and the whole raw line |
+
+</Cheat>
+
+</Part>

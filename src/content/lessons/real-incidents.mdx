@@ -1,0 +1,401 @@
+---
+time: 45 minutes
+level: Intermediate
+before: [where-to-look-first, runbooks]
+cost: free
+quiz:
+  - q: What does "blameless" mean in a blameless postmortem?
+    answer: 1
+    options:
+      - t: Nobody is ever responsible for anything
+        why: People still own the actions that come out of it. Blameless is about how you find causes, not about avoiding responsibility.
+      - t: It asks what made the mistake possible, and assumes people acted sensibly with what they knew at the time
+        why: If people expect to be punished, they hide what they did, and the real cause stays hidden. Asking what made the mistake easy leads to fixes that stop the next person making it.
+      - t: The postmortem doesn't mention what anyone did
+        why: It describes exactly what people did and when. It just doesn't treat that as the end of the investigation.
+      - t: Only managers may read it
+        why: Postmortems are usually shared widely, so everyone learns from them.
+  - q: New servers kept failing health checks, and Session Manager couldn't connect either. What was the cause?
+    answer: 3
+    options:
+      - t: A bug in the app's health check endpoint
+        why: The health check worked once the servers could boot properly. The app was never reached.
+      - t: The load balancer was in the wrong subnet
+        why: The load balancer was fine. It was the servers that couldn't finish booting.
+      - t: The servers had too little memory
+        why: The system log showed connections timing out, not memory errors.
+      - t: The app's security group had no outbound rule, so the booting servers couldn't reach anything
+        why: Replies to incoming connections are allowed automatically, but connections a server starts need an outbound rule. A booting server starts many — package updates, the Session Manager agent — and all of them timed out.
+  - q: Two incidents both showed customers database_unavailable. What told them apart?
+    answer: 0
+    options:
+      - t: The error_type and latency_ms fields in the structured logs
+        why: One was OperationalError at about 3,000 ms — a connection blocked by a firewall. The other was ProgrammingError in a few ms — a missing table. The response was identical.
+      - t: The HTTP status code
+        why: Both were 500. That's why the status code alone couldn't help.
+      - t: The time of day
+        why: When something happens rarely explains what happened.
+      - t: Which customer reported it
+        why: Every customer saw exactly the same message.
+  - q: A load test reported every request as 404. What is the lesson?
+    answer: 2
+    options:
+      - t: The load balancer can't handle load
+        why: A 404 means the server answered quickly — it just didn't have the page asked for.
+      - t: Load testing is unreliable
+        why: The tool worked perfectly. It asked for exactly what it was told to.
+      - t: When numbers look wrong, check the test before blaming the system
+        why: A missing space made the tool request a page called /10. The system was fine; the test was wrong.
+      - t: Use a different load-testing tool
+        why: Any tool would have done the same with the same typo.
+  - q: Which is a good postmortem action item?
+    answer: 1
+    options:
+      - t: "Be more careful with security groups."
+        why: It's a wish, not an action. There's nothing to do, no owner and no way to know it's done.
+      - t: "Add a check to the pipeline that fails if the app security group has no outbound rules. Owner: Maya. Due: next Friday."
+        why: It's specific, it changes the system rather than asking people to try harder, and it has an owner and a date.
+      - t: "Leo to re-read the networking lesson."
+        why: That blames one person and changes nothing for the next person who makes the same mistake.
+      - t: "Investigate further."
+        why: Investigate what, by when, and who? An action item needs to be finishable.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the meeting after">
+
+After the long rollback, the team met to talk about it. It went badly. Someone asked who had shipped the broken release. Someone else asked why Noor hadn't called Sam sooner. Noor said very little.
+
+Two weeks later, there was another incident. Afterwards, it turned out that Leo had changed a setting by hand an hour before it started. He hadn't mentioned it during the incident. After the last meeting, he wasn't going to be the next person in the spotlight. Nobody learned anything, and the same thing happened again a month later.
+
+</Story>
+
+<Case>
+
+On 31 January 2017, an engineer at GitLab, working late to deal with a database problem, ran a delete command on the wrong server and removed most of the production database. Then the team discovered that none of their several backup methods had been working as they expected. About six hours of data was lost.
+
+GitLab published a detailed postmortem, and streamed part of the recovery live. The write-up focused on why the backups had silently failed and how the system let one command do so much damage, not on the engineer. It's still widely cited as an example of learning from an incident in the open.
+
+</Case>
+
+Incidents are expensive. The only way to get something back for the cost is to learn from them — which only works if people can say what really happened.
+
+</Part>
+
+<Part id="idea">
+
+This course's projects were built for real, and things broke along the way. Every failure below actually happened during those builds. Names are left out; the details are real. Almost none of them were code: they were a missing rule, a port number, a typo. **That's where most outages come from.**
+
+### What went wrong while building the course
+
+#### 1. New servers never became healthy
+
+| Stage | What happened |
+|---|---|
+| Symptom | The auto scaling group launched servers, every one failed its health checks, and the group replaced them in a loop |
+| Investigation | Session Manager couldn't connect either, so there was no way in. The instance's system log (**Actions → Monitor and troubleshoot → Get system log**) showed the package update hanging, and the Session Manager agent timing out while connecting on port 443 |
+| Cause | The app's security group had **no outbound rules**. Replies to incoming requests are allowed automatically, but connections the server *starts* need an outbound rule — and a booting server starts lots of them |
+| Fix | Add an outbound rule. The next servers booted and became healthy |
+| Lesson | Timed out means the network. When you can't get in, read the system log: AWS fetches it without any network access to the server |
+| Covered in | [Security groups](/lessons/security-groups/) |
+
+#### 2. The same error, two different causes
+
+| Stage | What happened |
+|---|---|
+| Symptom | Customers got `{"error":"database_unavailable"}` from the orders page. It happened twice, a day apart |
+| Investigation | The response was identical both times. Only the structured logs differed: the first time `error_type` was `OperationalError` at about 3,000 ms; the second time `ProgrammingError` in a few ms |
+| Cause | First, the database's security group had lost its rule for port 3306. Second, the `orders` table didn't exist in the new database |
+| Fix | Put the rule back; run the missing migration |
+| Lesson | A friendly error message hides the cause. Log the real error type and timing as separate fields |
+| Covered in | [Logs and metrics](/lessons/logs-and-metrics/) |
+
+#### 3. The health check that kept the site up
+
+| Stage | What happened |
+|---|---|
+| Symptom | With the database unreachable, the orders page returned 500 — but the health check path kept returning 200 |
+| Investigation | Every server stayed in the load balancer, so pages that didn't need the database still worked |
+| Cause | Not a failure: a design decision proving itself. The health check was deliberately **shallow**: it only checks the app is running, not the database |
+| Fix | None needed. A **deep** health check would have failed every server at once, and turned a database problem into a total outage |
+| Lesson | Health checks decide who gets traffic. Don't let one dependency's failure remove every server |
+| Covered in | [Load balancers](/lessons/load-balancers/) |
+
+#### 4. The alarm test that proved the whole chain
+
+| Stage | What happened |
+|---|---|
+| Symptom | The database's security group rule was removed on purpose, as a test |
+| Investigation | Within a couple of minutes the error alarm went to ALARM, and the email arrived |
+| Cause | Not a failure: this is what an alarm that works looks like. The common failure here is the opposite: an SNS email subscription left **Pending confirmation**, so the alarm fires and nobody hears |
+| Fix | None needed. The subscription had been confirmed and checked |
+| Lesson | An alarm you haven't seen fire is a guess. Test it for real |
+| Covered in | [Alarms that actually fire](/lessons/alarms/) |
+
+#### 5. Container tasks restarting, "Request timed out"
+
+| Stage | What happened |
+|---|---|
+| Symptom | The container service never settled: tasks started, failed their health checks and were replaced. The deployment circuit breaker rolled the release back |
+| Investigation | The app's own logs showed it started and was listening on 8080. The target health reason was `Request timed out` — so the traffic never arrived |
+| Cause | Two stacked mistakes. First, the tasks had the load balancer's security group attached instead of the app's. After fixing that, the app's security group rule turned out to allow port **0** instead of **8080** |
+| Fix | Attach the app's group; allow 8080 from the load balancer's group. Tasks were healthy in about 20 seconds |
+| Lesson | After each fix, test again: one fix can uncover the next problem |
+| Covered in | [Security groups](/lessons/security-groups/), [ECS on Fargate](/lessons/ecs-fargate/) |
+
+#### 6. The load balancer wouldn't accept the default VPC
+
+| Stage | What happened |
+|---|---|
+| Symptom | Creating an internet-facing load balancer, the console wouldn't let the default VPC be used |
+| Investigation | The VPC had no internet gateway attached — it had been removed at some point |
+| Cause | An internet-facing load balancer needs its subnets to route to an internet gateway |
+| Fix | Create an internet gateway, attach it, and add a `0.0.0.0/0` route to it |
+| Lesson | Reachable from the internet always comes down to one route |
+| Covered in | [Routes, gateways and NAT](/lessons/routing/) |
+
+#### 7. The image scan said "not found"
+
+| Stage | What happened |
+|---|---|
+| Symptom | After pushing `v1` to ECR, the repository showed an **Image Index** with extra untagged rows, and the scan column had no result for the tagged row |
+| Investigation | Docker Desktop's builder had pushed a list — the real image plus build information — rather than one image |
+| Cause | The tagged row was the list, which isn't scanned. The actual image was one of the untagged rows |
+| Fix | Look at the untagged image's scan. Next time, build with `--provenance=false` so only the image is pushed |
+| Lesson | Read what the console is actually showing you before deciding something is broken |
+| Covered in | [Storing images: ECR](/lessons/ecr/) |
+
+#### 8. The load test said every request failed
+
+| Stage | What happened |
+|---|---|
+| Symptom | During a release under load, the load-testing script reported every single request as 404 |
+| Investigation | A 404 is an instant answer from a healthy server. The script's own command was checked |
+| Cause | A missing space in the command joined two options, so the tool requested a page called `/10` instead of the home page |
+| Fix | Add the space. The real result was zero failed requests |
+| Lesson | When numbers look wrong, check the test before blaming the system |
+| Covered in | [Releases without downtime](/lessons/zero-downtime-releases/) |
+
+#### 9. A placeholder in the manifest
+
+| Stage | What happened |
+|---|---|
+| Symptom | A Kubernetes manifest was ready to apply, but still contained the documentation account number `123456789012` |
+| Investigation | A search of the file for the placeholder, before applying, found it |
+| Cause | The account box in the guide was empty when the file was copied, so the placeholder was never replaced |
+| Fix | Fill in the value, copy again, and search the file again |
+| Lesson | Check a file before applying it. A search takes seconds; a failed deploy takes much longer |
+| Covered in | [Kubernetes and EKS](/lessons/kubernetes-and-eks/) |
+
+#### 10. The Kubernetes console said "Unauthorized"
+
+| Stage | What happened |
+|---|---|
+| Symptom | The EKS console showed **Unauthorized** when viewing the cluster's workloads |
+| Investigation | `kubectl`, run as the identity that created the cluster, could see everything |
+| Cause | Access to a cluster's contents is separate from access to the AWS account. The cluster only trusted the identity that created it |
+| Fix | Use that identity, or grant the console user access to the cluster |
+| Lesson | Being allowed in AWS doesn't mean being allowed in Kubernetes |
+| Covered in | [Kubernetes and EKS](/lessons/kubernetes-and-eks/) |
+
+### Writing a blameless postmortem
+
+A **postmortem** is a short written account of an incident: what happened, why, and what will change. It's written within a few days, while memories are fresh, and shared widely.
+
+**Blameless** means it assumes everyone acted sensibly with what they knew at the time, and asks what made the mistake possible. Not because nobody is responsible, but because blame stops people telling you what really happened — as Leo showed.
+
+<Key>Ask what made the mistake easy, not who made it.</Key>
+
+| Blaming | Blameless |
+|---|---|
+| Leo forgot the outbound rule | The security group form allowed a group with no outbound rules, and nothing checked for it |
+| Noor took too long to escalate | The runbook had no escalation time, so there was no signal to call for help |
+| Someone deleted the rule | The rule was removed at 14:18 by a console session. Changes to the database's security group weren't reviewed or alerted on |
+| Be more careful | Add a check that fails the pipeline when the app's security group has no outbound rules |
+
+### The sections of a postmortem
+
+| Section | What goes in it |
+|---|---|
+| Summary | Two or three sentences a manager could read |
+| Impact | Who was affected, how, and for how long — with numbers |
+| Timeline | What happened, minute by minute, in UTC: first symptom, alarm, each step of the investigation, fix, recovery |
+| Detection | How we found out. Could we have found out sooner? |
+| Causes | The direct cause, and the conditions that let it happen. Usually several |
+| What went well | Things to keep doing |
+| What went badly | Things that slowed us down |
+| Where we got lucky | Things that could have made it worse |
+| Action items | Specific changes, each with an owner and a date |
+
+A simple way to get from the direct cause to the conditions behind it is to keep asking **why?** "The servers couldn't boot." Why? "They couldn't make outbound connections." Why? "The security group had no outbound rules." Why? "It was made by hand, and nothing checks it." Stop when you reach something you can change.
+
+</Part>
+
+<Part id="see">
+
+Replay three of the incidents above, one event at a time. Watch which phase each event belongs to, and notice the dead ends.
+
+<IncidentReplay />
+
+**What to notice:** every replay has at least one moment where the obvious next step led nowhere. That's normal, and a good postmortem timeline includes it: the dead ends show where better tools, logs or runbooks would have saved time.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">you'll write a document. Nothing is created in AWS.</Cost>
+
+You'll write a blameless postmortem for incident 1, *new servers never became healthy*, using a template. About 30 minutes.
+
+<Steps>
+
+<Step title="Copy the template">
+
+Create `postmortems/servers-never-healthy.md` and copy this in:
+
+```text title="postmortems/servers-never-healthy.md"
+# Postmortem: <title>
+
+Status: draft
+Date of incident: <date>
+Author: <you>
+
+## Summary
+<Two or three sentences: what broke, for how long, and what fixed it.>
+
+## Impact
+<Who was affected, how, and for how long. Use numbers.>
+
+## Timeline (UTC)
+| Time | What happened |
+|---|---|
+| <hh:mm> | <first symptom> |
+| <hh:mm> | <alarm or report> |
+| <hh:mm> | <each investigation step, including dead ends> |
+| <hh:mm> | <cause found> |
+| <hh:mm> | <fix applied> |
+| <hh:mm> | <recovery confirmed> |
+
+## Detection
+<How did we find out? How could we have found out sooner?>
+
+## Causes
+Direct cause: <the one thing that broke>
+Contributing conditions:
+- <what made it possible>
+- <what made it slow to find>
+
+## What went well
+- <keep doing>
+
+## What went badly
+- <slowed us down>
+
+## Where we got lucky
+- <could have been worse>
+
+## Action items
+| Action | Owner | Due |
+|---|---|---|
+| <specific change to the system> | <name> | <date> |
+```
+
+</Step>
+
+<Step title="Fill in the timeline">
+
+Use the replay above: choose **Servers never healthy** and step through it. Copy each event into the timeline, including the dead end.
+
+<See>
+
+Six rows, from the first failed health check to the servers becoming healthy, with the Session Manager dead end in the middle.
+
+</See>
+
+</Step>
+
+<Step title="Write the summary and impact">
+
+For impact, imagine this happened in production at 10:00: say what customers experienced and for how long. If there were other healthy servers still serving, say so — "no customer impact, because the existing servers kept serving" is a real and useful impact statement.
+
+</Step>
+
+<Step title="Find the causes, with five whys">
+
+Start from "the new servers never became healthy" and ask **why?** until you reach something you can change. Write the direct cause, then at least two contributing conditions.
+
+<See>
+
+Something like: the direct cause is the missing outbound rule. Contributing conditions: the security group was made by hand with nothing to check it; Session Manager depends on the same outbound access, so the usual way in failed too; nobody on the team knew about the system log.
+
+</See>
+
+</Step>
+
+<Step title="Write action items that change the system">
+
+Write at least three. Each must be specific, have an owner and a due date, and change the system rather than asking people to be more careful. Some ideas:
+
+| Action | Why it helps |
+|---|---|
+| Define the security group in Terraform, reviewed in a pull request | A missing rule is visible in review |
+| Add "Get system log" to the unhealthy-hosts runbook, as step 2 | The next person knows where to look |
+| Alarm when the auto scaling group launches more than N servers in 15 minutes | A replacement loop gets noticed quickly |
+
+</Step>
+
+<Step title="Do a blameless pass">
+
+Read the whole document looking for any sentence that names a person as the cause. Rewrite each one to say what made the mistake possible, as in the table in [the idea](#idea). Change **Status** to `ready for review`.
+
+<See>
+
+No sentence says who got it wrong. Every cause points at something that can be changed.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing was created in AWS, so there's nothing to delete. Keep the postmortem in your repository, next to your runbooks. A folder of postmortems is how a team remembers what it has learned.
+
+<See>
+
+One postmortem, ready for review, with at least three action items that each have an owner and a date.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Pattern or practice | In one line |
+|---|---|
+| Most outages | Small settings — a rule, a port, a route, a typo — not code |
+| No outbound rule | Replies are allowed; connections the server starts are not |
+| Same message, different causes | Log `error_type` and `latency_ms` as fields |
+| Shallow health check | Keeps servers in service when a dependency fails |
+| Two stacked causes | After each fix, test again |
+| Numbers look wrong | Check the test before the system |
+| Postmortem | Summary, impact, timeline, detection, causes, went well, went badly, lucky, actions |
+| Blameless | What made the mistake possible — not who made it |
+| Five whys | Keep asking why until you reach something you can change |
+| Action item | Specific, changes the system, has an owner and a date |
+
+</Cheat>
+
+</Part>

@@ -1,0 +1,104 @@
+---
+/*
+ * Real incidents: a replayable incident timeline.
+ * Teaches: detect → investigate → cause → fix → learn, dead ends included.
+ */
+import { INCIDENTS, phasesHtml, beatsHtml, sayHtml } from "../../scripts/incident-replay-viz";
+const firstKey = "egress";
+const inc = INCIDENTS[firstKey];
+const first = sayHtml(inc, 0);
+---
+<div class="viz" data-track="ship" data-viz="incident-replay">
+  <div class="viz-controls">
+    <span class="lbl" id="ir-lbl">Incident</span>
+    <div class="seg wide" role="group" aria-labelledby="ir-lbl">
+      {Object.entries(INCIDENTS).map(([k, x]) => <button type="button" data-i={k} aria-pressed={String(k === firstKey)}>{x.label}</button>)}
+    </div>
+    <button class="btn line" type="button" data-a="play">Play</button>
+    <button class="btn" type="button" data-a="next">Next event</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <div class="ir-body">
+    <ol class="ir-phases" aria-label="Incident phases reached" set:html={phasesHtml(inc, 0)} />
+    <ol class="ir-beats" set:html={beatsHtml(inc, 0)} />
+  </div>
+  <div class="viz-say" aria-live="polite" set:html={first.html} />
+</div>
+
+<style is:global>
+  [data-viz="incident-replay"] .ir-body { padding: 14px 16px 8px; }
+  [data-viz="incident-replay"] .ir-phases { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  [data-viz="incident-replay"] .ir-ph { flex: 1 1 auto; text-align: center; font-size: 13px; font-weight: 700; padding: 6px 8px; border-radius: 7px; background: var(--sunk); color: var(--ink-3); border: 2px solid transparent; }
+  [data-viz="incident-replay"] .ir-ph.on { background: color-mix(in srgb, var(--line) 16%, var(--surface)); color: var(--ink); }
+  [data-viz="incident-replay"] .ir-ph.cur { border-color: var(--line); }
+  [data-viz="incident-replay"] .ir-beats { list-style: none; margin: 0; padding: 0 0 0 16px; border-left: 3px solid var(--rule); }
+  [data-viz="incident-replay"] .ir-b { position: relative; padding: 4px 0 10px 8px; }
+  [data-viz="incident-replay"] .ir-b::before { content: ""; position: absolute; left: -24px; top: 8px; width: 13px; height: 13px; border-radius: 50%; background: var(--surface); border: 3px solid var(--rule-2); }
+  [data-viz="incident-replay"] .ir-b.vis::before { background: var(--line); border-color: var(--line); }
+  [data-viz="incident-replay"] .ir-b.vis.dead::before { background: var(--surface); border-color: var(--bad); }
+  [data-viz="incident-replay"] .ir-b.vis.p-learn::before { background: var(--ok); border-color: var(--ok); }
+  [data-viz="incident-replay"] .ir-more p { color: var(--ink-2); font-style: italic; }
+  [data-viz="incident-replay"] .ir-t { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); margin-right: 8px; }
+  [data-viz="incident-replay"] .ir-p { font-size: 13px; font-weight: 800; color: var(--ink-2); }
+  [data-viz="incident-replay"] .ir-b.dead .ir-p { color: var(--bad); }
+  [data-viz="incident-replay"] .ir-b p { margin: 2px 0 0; font-size: 14.5px; }
+</style>
+
+<script>
+  import { INCIDENTS, phasesHtml, beatsHtml, sayHtml } from "../../scripts/incident-replay-viz";
+  import { press, reduced } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="incident-replay"]').forEach((root) => {
+      if (!once(root)) return;
+      const phases = root.querySelector<HTMLElement>(".ir-phases")!;
+      const beats = root.querySelector<HTMLElement>(".ir-beats")!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const play = root.querySelector<HTMLButtonElement>('[data-a="play"]')!;
+      const nextBtn = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+      const iBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-i]")];
+      let key = "egress";
+      let shown = 0;
+      let timer: ReturnType<typeof setInterval> | null = null;
+
+      function render() {
+        const inc = INCIDENTS[key];
+        press(iBtns, (b) => b.dataset.i === key);
+        phases.innerHTML = phasesHtml(inc, shown);
+        beats.innerHTML = beatsHtml(inc, shown);
+        const s = sayHtml(inc, shown);
+        say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+        say.innerHTML = s.html;
+        const atEnd = shown >= inc.beats.length;
+        nextBtn.disabled = atEnd;
+        play.disabled = atEnd;
+      }
+      function stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+        play.textContent = "Play";
+      }
+      function step() {
+        if (shown < INCIDENTS[key].beats.length) { shown++; render(); }
+        if (shown >= INCIDENTS[key].beats.length) stop();
+      }
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.i) { stop(); key = b.dataset.i; shown = 0; render(); }
+        else if (b.dataset.a === "next") { stop(); step(); }
+        else if (b.dataset.a === "reset") { stop(); shown = 0; render(); }
+        else if (b.dataset.a === "play") {
+          if (timer) { stop(); return; }
+          play.textContent = "Pause";
+          step();
+          timer = setInterval(step, reduced() ? 3200 : 2400);
+        }
+      });
+      stops.push(stop);
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

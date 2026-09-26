@@ -1,0 +1,45 @@
+---
+/*
+ * Terraform plan: code vs state vs AWS.
+ * Teaches: what the next plan does when the code, AWS or the state changes.
+ */
+import { THREEWAY, threeWayCols, threeWayPlan, threeWaySay } from "../../scripts/tf-state-viz";
+const first = THREEWAY.sync;
+---
+<div class="viz" data-track="code" data-viz="tf-threeway">
+  <div class="viz-controls">
+    <span class="lbl" id="tw-lbl">What happens</span>
+    <div class="seg wide" role="group" aria-labelledby="tw-lbl">
+      {Object.entries(THREEWAY).map(([k, s], i) => (
+        <button type="button" data-s={k} aria-pressed={String(i === 0)}>{s.label}</button>
+      ))}
+    </div>
+  </div>
+  <div class="tw" set:html={threeWayCols(first)} />
+  <pre class="plan-out" aria-label="terraform plan output" set:html={threeWayPlan(first)} />
+  <div class="viz-say good" aria-live="polite" set:html={threeWaySay(first)} />
+</div>
+
+<script>
+  import { THREEWAY, threeWayCols, threeWayPlan, threeWaySay } from "../../scripts/tf-state-viz";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-threeway"]').forEach((root) => {
+    if (!once(root)) return;
+    const tw = root.querySelector<HTMLElement>(".tw")!;
+    const plan = root.querySelector<HTMLElement>(".plan-out")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-s]")];
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-s]");
+      if (!b) return;
+      const s = THREEWAY[b.dataset.s!];
+      press(btns, (x) => x === b);
+      tw.innerHTML = threeWayCols(s, true);
+      plan.innerHTML = threeWayPlan(s);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = threeWaySay(s);
+    });
+  }));
+</script>

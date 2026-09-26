@@ -1,0 +1,559 @@
+---
+time: 40 minutes
+level: Beginner
+before: [vpc, iam]
+cost: pennies
+quiz:
+  - q: You fixed a config file by hand on a server. Later, auto scaling replaces that server. What happens to your fix?
+    answer: 2
+    options:
+      - t: It is copied to the new server automatically
+        why: Nothing copies it. The new server is built from the AMI and the user data, and neither knows about your fix.
+      - t: It survives, because the disk is kept
+        why: The disk is kept when you stop or reboot. When an instance is terminated, its root disk is deleted with it by default.
+      - t: It is lost. The new server only has what the AMI and user data give it
+        why: That's why every change has to go into the AMI or the user data. Anything typed by hand lives on one disk and dies with it.
+      - t: AWS asks you before replacing the server
+        why: Auto scaling replaces unhealthy servers on its own. That is the whole point of it.
+  - q: What is user data?
+    answer: 0
+    options:
+      - t: A script the instance runs once, as root, on its first boot
+        why: It's how a plain AMI becomes a QuickCart server without anyone logging in. By default it doesn't run again on later boots.
+      - t: The files your customers upload
+        why: The name is confusing, but it has nothing to do with your app's users.
+      - t: A script that runs every time the instance starts
+        why: Only on the first boot, by default. A reboot or a stop and start doesn't run it again.
+      - t: The login details for the server
+        why: User data is not a secret store. Anyone who can describe the instance can read it, so never put passwords in it.
+  - q: Why does QuickCart use Session Manager instead of SSH keys?
+    answer: 3
+    options:
+      - t: SSH doesn't work on Amazon Linux
+        why: SSH works fine. The problem is everything around it — open ports and keys to look after.
+      - t: Session Manager is faster
+        why: Speed isn't the reason. It's about what you don't have to open or look after.
+      - t: Session Manager gives root access and SSH doesn't
+        why: Both can give you a root shell. The difference is how you get in.
+      - t: No inbound port is open, there are no keys to lose, and access is checked against IAM and logged
+        why: The agent on the server makes an outbound connection to AWS. Who may connect is an IAM question, not "who has the key file".
+  - q: An app on the server has a bug that lets an attacker make it fetch any URL. What stops them reading the server's role credentials from the metadata service?
+    answer: 1
+    options:
+      - t: A security group with no inbound rules
+        why: The request comes from the app itself, on the same machine. The security group never sees it.
+      - t: Requiring IMDSv2, so every metadata request needs a token from a PUT request first
+        why: That kind of bug usually lets an attacker make a simple GET, not the PUT and header that IMDSv2 needs. Requiring tokens closes the door.
+      - t: Putting the server in a private subnet
+        why: The metadata service is on the server itself. The subnet makes no difference.
+      - t: Nothing — any app on the server can always read the credentials
+        why: With IMDSv1, yes. IMDSv2 makes it much harder to trick the app into doing it.
+  - q: You stop an instance and start it again the next day. What has changed?
+    answer: 2
+    options:
+      - t: Everything. It is a brand-new instance
+        why: That's terminate and launch. Stop and start keeps the same instance and the same disk.
+      - t: Nothing at all
+        why: One thing usually changes, and it catches people out.
+      - t: Its public IP address. The ID and the disk stay the same
+        why: The public IP goes back to AWS when you stop. You get a new one when you start. That's one reason nothing should point at a server's IP.
+      - t: Its user data runs again and reinstalls everything
+        why: User data runs only on the first boot, by default.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first server">
+
+QuickCart's first API server was set up by Leo, one evening, by hand. He created an SSH key, saved it on his laptop, opened port 22 to the whole internet, logged in and installed everything by typing commands.
+
+It worked for months. Then the server had to be replaced. Nobody could remember the exact steps, and the only key was on Leo's laptop, which had just been wiped. It took two days to make a new server that behaved like the old one.
+
+</Story>
+
+<Case title="This really happens: stolen credentials from a server's metadata">
+
+In 2019, a large US bank disclosed that an attacker had copied data on around 100 million people. It was widely reported how: a misconfigured web application firewall running on EC2 could be tricked into making requests on the attacker's behalf. The attacker used it to ask the server's **metadata service** for its IAM role credentials, then used those credentials to read data from S3.
+
+The server did exactly what it was built to do. The weakness was that anything able to make a simple web request from that machine could get its keys.
+
+</Case>
+
+So QuickCart wants servers that:
+
+- can be rebuilt from scratch, by a machine, in minutes;
+- need no open login port and no key file on anyone's laptop;
+- get AWS permissions without anyone storing a password or key on them.
+
+</Part>
+
+<Part id="idea">
+
+An **EC2 instance** is a computer you rent from AWS by the second. You choose what it runs, how big it is, and which network it sits in. When you don't need it any more, you delete it and the bill stops.
+
+### What you choose when you launch one
+
+| Choice | What it is | QuickCart's choice |
+|---|---|---|
+| AMI | The starting disk: an operating system, and anything already installed | Amazon Linux 2023 |
+| Instance type | How much CPU and memory | `t3.micro` |
+| Network | Which VPC and subnet it sits in | A private app subnet (the default VPC while learning) |
+| Security group | Its firewall | No inbound rules at all |
+| Key pair | An SSH key for logging in | **None** — Session Manager instead |
+| IAM role | The AWS permissions the server's software gets | A role with Session Manager access |
+| Storage | The disk, an EBS volume | 8 GiB `gp3`, the default |
+| User data | A script that sets the server up on first boot | Installs the web server |
+
+### The AMI: the starting disk
+
+An **AMI** (Amazon Machine Image) is a snapshot of a disk. Every instance starts as a copy of one. AWS publishes AMIs for common operating systems, like Amazon Linux 2023 and Ubuntu, and keeps them patched.
+
+Teams later build their own AMIs with their software already installed. Those are often called **golden images**. They make new servers start faster, because there's less to install at boot.
+
+### The instance type: how big
+
+The name `t3.micro` has three parts:
+
+| Part | Means |
+|---|---|
+| `t` | The **family**. T is general purpose and "burstable" |
+| `3` | The **generation**. Higher is newer, and usually better value |
+| `micro` | The **size** within the family: nano, micro, small, medium, large, xlarge and up |
+
+| Family | Good at | Typical use |
+|---|---|---|
+| T, M | A balance of CPU and memory | Web servers and APIs |
+| C | CPU | Encoding video, heavy calculations |
+| R | Memory | Caches, in-memory data |
+
+**Burstable** means a T instance runs at a low baseline and earns credits while it's quiet. It spends them to run faster during short busy spells. That suits a small web server. It doesn't suit something that works flat out all day: once the credits are gone, it either slows down or charges extra, depending on its credit setting.
+
+Start small and watch the CPU graph. Choosing the smallest type that copes is called **right-sizing**.
+
+### User data: setting up without logging in
+
+**User data** is a script you paste in when you launch. The instance runs it **once, as root, on its first boot**. That's how a plain Amazon Linux AMI becomes a QuickCart server without anyone logging in.
+
+<YouKnow title="You already know this: first launch">
+
+Everyone downloads the same build of your app from the store. The first time it opens, your onboarding code runs once and sets things up. If a user deletes the app and installs it again, anything they set up by hand is gone, and onboarding runs from the start.
+
+The AMI is the build. User data is the first-launch code. Terminating an instance is deleting the app.
+
+</YouKnow>
+
+Its output goes to `/var/log/cloud-init-output.log` on the server. That's the first place to look when a new server doesn't behave.
+
+User data is **not secret**. Anyone who can view the instance's settings can read it. Never put a password in it; [Secrets](/lessons/secrets/) covers where passwords go.
+
+### Reboot, stop and terminate
+
+These three sound similar. They're very different:
+
+| Action | Instance ID | Root disk | Public IP | Compute bill | User data runs again? |
+|---|---|---|---|---|---|
+| **Reboot** | Same | Kept | Same | Continues | No |
+| **Stop**, then start | Same | Kept | **New one** | Stops while stopped; the disk is still billed | No |
+| **Terminate** | Gone | **Deleted** by default | Gone | Stops | — it's gone |
+
+Terminating is permanent. When auto scaling replaces a server, it terminates the old one and launches a new one from the AMI and user data. Anything that was only on the old disk is lost.
+
+<Key>Treat every server as replaceable: everything it needs must come from the AMI and the user data, never from someone typing on it.</Key>
+
+### Getting in without SSH keys: Session Manager
+
+The old way to reach a server is SSH: open port 22, create a **key pair**, and keep the private key file safe on every laptop that needs access. Keys get copied, lost and never rotated, and port 22 is scanned by bots all day.
+
+**Session Manager**, part of AWS Systems Manager, gives you a shell in the browser instead:
+
+| | SSH with a key pair | Session Manager |
+|---|---|---|
+| Inbound port | 22, open to someone | **None** |
+| What proves who you are | Having the key file | Your IAM login |
+| Losing access | Lose the key file | Someone removes your IAM permission |
+| Record of who did what | None by default | Every session can be logged |
+| Works in a private subnet | Only through a jump server | Yes, if it can reach Systems Manager |
+
+It works because a small program on the server, the **SSM agent**, makes an **outbound** connection to AWS and waits for you. Nothing ever connects in. It needs three things:
+
+| Needs | Why | How |
+|---|---|---|
+| The SSM agent | It holds the connection open | Already installed on Amazon Linux 2023 |
+| An IAM role with `AmazonSSMManagedInstanceCore` | So Systems Manager accepts the agent | The instance profile, below |
+| A way out to Systems Manager on port 443 | The agent has to reach AWS | A public IP, a NAT gateway, or VPC endpoints — and an outbound security group rule |
+
+### Roles: AWS permissions without keys
+
+QuickCart's code on the server will need to call AWS: read a file from S3, fetch a password. The wrong way is to paste an access key into a config file. The right way is to give the **server** an **IAM role**.
+
+You attach a role to an instance through an **instance profile**, a small wrapper around the role. When you create a role for EC2 in the console, it creates the instance profile for you, with the same name. From then on, the AWS SDKs and the AWS CLI on the server pick up short-lived credentials automatically, and AWS rotates them for you. [Who can do what: IAM](/lessons/iam/) explains roles in full.
+
+### IMDSv2: protecting those credentials
+
+The credentials come from the **instance metadata service**, a special address every instance can call: `169.254.169.254`. It answers questions like "what's my instance ID?" and "what are my role's credentials?".
+
+| Version | How a request works | The risk |
+|---|---|---|
+| IMDSv1 | Any simple GET gets an answer | A bug that tricks your app into fetching a URL can fetch the credentials — the case above |
+| IMDSv2 | First a `PUT` to get a token, then every GET must send the token | That kind of bug can rarely send a PUT with the right header |
+
+Set **Metadata version** to **V2 only (token required)** on every instance. Amazon Linux 2023 already defaults to it, but saying so explicitly means it doesn't depend on the AMI you pick.
+
+</Part>
+
+<Part id="see">
+
+Launch a server, fix something on it by hand, then reboot, stop, start and terminate it. Watch what happens to its ID, its public IP and its disk.
+
+<Ec2Lifecycle />
+
+**What to notice:** your hand-made fix survived a reboot and a stop, so it felt safe. It only disappeared when the server was replaced — which is exactly what auto scaling does, at 3 a.m., without asking.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">one `t3.micro` for under an hour is about 2 cents in us-east-1, including its public IP address and disk. If your account is eligible for the free tier, it may cost nothing. Prices change, so check the EC2 pricing page if you're unsure.</Cost>
+
+You'll create a role for Session Manager, launch a server that sets itself up with user data, connect to it without any key, and see IMDSv2 refuse a request. About 30 minutes.
+
+Check the region selector at the top right says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create the role for the server">
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+| Field | Enter |
+|---|---|
+| Trusted entity type | **AWS service** |
+| Service or use case | **EC2**, then the **EC2** use case |
+
+Choose **Next**. In the permissions search box, type `AmazonSSMManagedInstanceCore`, tick it, and choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Role name | `quickcart-ec2-ssm` |
+| Description | `Lets QuickCart servers use Session Manager` |
+
+Choose **Create role**.
+
+<See>
+
+`quickcart-ec2-ssm` in the list of roles. Behind the scenes, the console also made an instance profile with the same name. That's what you'll pick when you launch.
+
+</See>
+
+</Step>
+
+<Step title="Create a security group with no way in">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-web-sg` |
+| Description | `QuickCart web server - no inbound access` |
+| VPC | The default VPC |
+| Inbound rules | **None.** Leave the list empty |
+| Outbound rules | Leave the default: **All traffic** to `0.0.0.0/0` |
+
+Choose **Create security group**.
+
+<See>
+
+The group, with **0** inbound rules and **1** outbound rule. Nothing on the internet can start a connection to a server in this group. The server can still reach out, which Session Manager needs.
+
+</See>
+
+<Mistake title="deleting the outbound rule too">
+
+It looks tidier to remove every rule. Then the server boots, but nothing works: package installs hang with no error, the Session Manager tab says the agent is not online, and a load balancer's health checks fail. The console shows something like:
+
+```output title="EC2 > Connect > Session Manager"
+SSM Agent is not online
+The SSM Agent was unable to connect to a Systems Manager endpoint to register itself with the service.
+```
+
+**Why:** security groups let replies back in automatically, but a connection the server **starts** needs an outbound rule. A booting server does little else but start connections: to download packages, and to reach Systems Manager.
+
+**The fix:** add the outbound rule back — all traffic, or at least HTTPS on port 443. Since you can't connect, read the boot messages with **Actions → Monitor and troubleshoot → Get system log**.
+
+</Mistake>
+
+</Step>
+
+<Step title="Launch the instance">
+
+<ConsolePath path="EC2 > Instances > Launch instances" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-web-1` |
+| Application and OS Images | **Amazon Linux**, then **Amazon Linux 2023 AMI**, 64-bit (x86) |
+| Instance type | `t3.micro` |
+| Key pair (login) | **Proceed without a key pair** |
+
+Under **Network settings**, choose **Edit**:
+
+| Field | Enter |
+|---|---|
+| VPC | The default VPC |
+| Subnet | **No preference** |
+| Auto-assign public IP | **Enable** |
+| Firewall (security groups) | **Select existing security group**, then `quickcart-web-sg` |
+
+Leave **Configure storage** at its default: 8 GiB, `gp3`.
+
+Open **Advanced details**:
+
+| Field | Enter |
+|---|---|
+| IAM instance profile | `quickcart-ec2-ssm` |
+| Metadata version | **V2 only (token required)** |
+| User data | The script below |
+
+```sh title="user-data.sh"
+#!/bin/bash
+dnf install -y nginx
+echo "QuickCart web server, set up by user data" > /usr/share/nginx/html/index.html
+systemctl enable --now nginx
+```
+
+| Line | What it does |
+|---|---|
+| `#!/bin/bash` | Run this script with bash. User data must start with a line like this, or it isn't run as a script |
+| `dnf install -y nginx` | Install nginx, a small web server. `dnf` is Amazon Linux's package installer; `-y` answers yes to its question, because nobody is there to type it |
+| `echo "…" > /usr/share/nginx/html/index.html` | Write one line of text into nginx's home page file. `>` sends the text into the file instead of the screen |
+| `systemctl enable --now nginx` | Start nginx now (`--now`), and start it again on every boot (`enable`) |
+
+Why a public IP when nothing can connect in? In the default VPC, it's the server's only way **out** to Systems Manager. In QuickCart's real network the server sits in a private subnet and goes out through a NAT gateway or VPC endpoints instead.
+
+Choose **Launch instance**.
+
+<See>
+
+**Success**, with a link to the instance ID. In **EC2 → Instances**, the state goes from **Pending** to **Running** in under a minute. Wait until **Status check** shows **3/3 checks passed**. That can take two or three minutes.
+
+</See>
+
+</Step>
+
+<Step title="Connect with Session Manager">
+
+<ConsolePath path="EC2 > Instances > quickcart-web-1 > Connect > Session Manager" />
+
+Choose **Connect**. A terminal opens in a new browser tab. No key, no port 22.
+
+If the **Connect** button is greyed out, wait a minute and reload: the agent registers itself shortly after boot.
+
+Check who you are:
+
+```sh
+whoami
+```
+
+| Part | What it means |
+|---|---|
+| `whoami` | print the name of the user you're logged in as |
+
+```output
+ssm-user
+```
+
+Session Manager logs you in as a user called `ssm-user`, which can use `sudo`.
+
+</Step>
+
+<Step title="Check that user data ran">
+
+Read the end of the log that user data writes to:
+
+```sh
+sudo tail -n 3 /var/log/cloud-init-output.log
+```
+
+| Part | What it means |
+|---|---|
+| `sudo` | run as root; this log is only readable by root |
+| `tail` | print the end of a file |
+| `-n 3` | only the last 3 lines |
+| `/var/log/cloud-init-output.log` | where the output of your user data script goes |
+
+<See>
+
+A few lines from the end of the setup, finishing with one that starts `Cloud-init v.` and says `finished at`, with the date and how many seconds the boot took. Your version numbers and times will differ.
+
+</See>
+
+Now ask nginx for its home page, from the server itself:
+
+```sh
+curl localhost
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request and print the answer |
+| `localhost` | this same machine |
+
+```output
+QuickCart web server, set up by user data
+```
+
+Nobody logged in to install nginx. The user data did it.
+
+</Step>
+
+<Step title="See IMDSv2 refuse a request without a token">
+
+Ask the metadata service for the instance's ID the old IMDSv1 way, with no token:
+
+```sh
+curl -s -o /dev/null -w "%{http_code}\n" http://169.254.169.254/latest/meta-data/instance-id
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request |
+| `-s` | silent: don't show a progress bar |
+| `-o /dev/null` | throw the answer's body away |
+| `-w "%{http_code}\n"` | print only the HTTP status code, then a new line |
+| `http://169.254.169.254/latest/meta-data/instance-id` | the metadata service's address, and the question: "what's my instance ID?" |
+
+```output
+401
+```
+
+**401 means Unauthorized.** That's IMDSv2 doing its job: no token, no answer. Now do it properly. First, get a token:
+
+```sh
+curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300"
+```
+
+| Part | What it means |
+|---|---|
+| `curl -X PUT` | send a PUT request, not the usual GET |
+| `http://169.254.169.254/latest/api/token` | the address that hands out tokens |
+| `-H "X-aws-ec2-metadata-token-ttl-seconds: 300"` | a header asking for a token that lasts 300 seconds |
+
+<See>
+
+A long string of letters and numbers. It has no new line at the end, so your next prompt starts straight after it on the same line. That string is the token: select and copy it, without the prompt.
+
+</See>
+
+Then ask again, sending the token. Replace `TOKEN` with the string you copied:
+
+```sh ph="TOKEN"
+curl -H "X-aws-ec2-metadata-token: TOKEN" http://169.254.169.254/latest/meta-data/instance-id
+```
+
+| Part | What it means |
+|---|---|
+| `-H "X-aws-ec2-metadata-token: TOKEN"` | send the token in a header |
+| `http://169.254.169.254/latest/meta-data/instance-id` | the same question as before |
+
+<See>
+
+Your instance ID, starting `i-`, the same one the console shows. The AWS SDKs and CLI do this token dance for you automatically.
+
+</See>
+
+</Step>
+
+<Step title="Use the role, with no keys anywhere">
+
+The AWS CLI is already installed on Amazon Linux 2023. Ask AWS who this server is:
+
+```sh
+aws sts get-caller-identity
+```
+
+| Part | What it means |
+|---|---|
+| `aws sts` | the AWS service that deals with identities and credentials |
+| `get-caller-identity` | "who am I?" It needs no special permission |
+
+<See>
+
+A short JSON answer. The `Arn` line contains `assumed-role/quickcart-ec2-ssm/` followed by the instance ID. The server is acting as the role you gave it. You never typed a key: the CLI fetched short-lived credentials from the metadata service, using a token.
+
+</See>
+
+Close the Session Manager tab when you're done.
+
+</Step>
+
+<Step title="Stop and start it, and watch the IP change">
+
+<ConsolePath path="EC2 > Instances > quickcart-web-1 > Details" />
+
+Write down the **Public IPv4 address**. Then choose **Instance state → Stop instance**, and confirm with **Stop**. When the state reads **Stopped**, choose **Instance state → Start instance**.
+
+<See>
+
+The same instance ID, but a **different** public IPv4 address. Connect with Session Manager again and run `curl localhost`: the page is still there, because the disk was kept.
+
+</See>
+
+That changing address is why nothing should ever point straight at a server. The next lesson, [Load balancers](/lessons/load-balancers/), puts one fixed address in front.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="EC2 > Instances > quickcart-web-1 > Instance state > Terminate instance" />
+
+Newer consoles label it **Terminate (delete) instance**. Confirm it. The instance goes to **Shutting-down**, then **Terminated**, and its disk is deleted with it.
+
+Then delete the security group:
+
+<ConsolePath path="EC2 > Security Groups > quickcart-web-sg > Actions > Delete security groups" />
+
+If it refuses because the group is still in use, wait until the instance shows **Terminated** and try again.
+
+**Keep the `quickcart-ec2-ssm` role.** IAM roles are free, and the next two lessons use it. If you aren't carrying on, delete it in **IAM → Roles**.
+
+<See>
+
+The instance listed as **Terminated** (it disappears from the list after about an hour) and no `quickcart-web-sg` in the security groups. Nothing is left running.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Instance | A computer rented by the second |
+| AMI | The starting disk every instance is copied from |
+| `t3.micro` | Family `t`, generation `3`, size `micro` |
+| User data | A script run once, as root, on first boot. Not secret |
+| `/var/log/cloud-init-output.log` | What your user data printed. Look here first |
+| Reboot | Same ID, same disk, same IP |
+| Stop, then start | Same ID, same disk, **new public IP** |
+| Terminate | Gone, disk and all |
+| Session Manager | A shell with no open port and no key. Needs the agent, a role, and a way out on 443 |
+| Instance profile | How a role is attached to an instance |
+| `AmazonSSMManagedInstanceCore` | The policy Session Manager needs |
+| IMDSv2 | Metadata needs a token first. Set **V2 only** |
+| Golden rule | Never fix a server by hand. Change the AMI or user data |
+
+</Cheat>
+
+</Part>

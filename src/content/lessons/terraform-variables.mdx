@@ -1,0 +1,923 @@
+---
+time: 45 minutes
+level: Beginner
+before: [first-resource]
+cost: free
+quiz:
+  - q: Maya wants dev to keep 5 images and stg to keep 20, from the same code. Where do those two numbers belong?
+    answer: 2
+    options:
+      - t: In two copies of main.tf, one per environment
+        why: Copies drift apart. Within weeks one has a fix the other doesn't. The point of variables is one copy of the code.
+      - t: In a local value
+        why: A local is worked out inside the code, the same way every time. It can't be 5 in one environment and 20 in another unless something outside the code tells it which environment it is.
+      - t: In dev.tfvars and stg.tfvars, setting one variable declared in variables.tf
+        why: The code declares the variable once. Each environment's tfvars file gives it that environment's value. Same code, different values.
+      - t: In the default of the variable
+        why: A variable has only one default. It can't be two numbers at once.
+  - q: terraform.tfvars says images_to_keep = 20. Leo runs `export TF_VAR_images_to_keep=40`, then `terraform plan`. Which value does Terraform use?
+    answer: 0
+    options:
+      - t: 20, from terraform.tfvars
+        why: Right, and it surprises most people. Environment variables are read before terraform.tfvars, so the file overwrites them.
+      - t: 40, from the environment variable
+        why: Environment variables feel like an override, but they come second from the bottom — only the default is weaker.
+      - t: Terraform stops with an error because two values clash
+        why: Terraform never complains about this. It quietly takes the one it reads last.
+      - t: It asks Leo which one he meant
+        why: Terraform only asks when there is no value at all.
+  - q: What does `sensitive = true` on a variable do?
+    answer: 3
+    options:
+      - t: Encrypts the value in the state file
+        why: No. A sensitive value is still stored in state in plain text. Protect the state instead, or keep the value out of it entirely.
+      - t: Stops the value being written to state
+        why: That's what ephemeral variables and write-only arguments are for. sensitive only affects what's printed.
+      - t: Makes the variable required
+        why: Whether a variable is required depends only on whether it has a default.
+      - t: Hides the value in plan and apply output, showing (sensitive value) instead
+        why: Right. It stops the value leaking into terminal logs and pull request comments. It does nothing about the state file.
+  - q: A variable has a validation block that only allows dev, stg or prod. Someone runs plan with environment = "production". When does it fail?
+    answer: 1
+    options:
+      - t: Half-way through apply, when AWS rejects the name
+        why: Validation exists so you never get that far.
+      - t: Straight away, before anything is planned, with your own error message
+        why: Validation runs as soon as Terraform knows the value. Nothing is planned or built, and the message you wrote says exactly what's allowed.
+      - t: Never — validation only prints a warning
+        why: A failed validation is an error. The command stops.
+      - t: Only in the pipeline, not on a laptop
+        why: Validation runs wherever Terraform runs.
+  - q: Why put tags in the provider's default_tags rather than on each resource?
+    answer: 1
+    options:
+      - t: default_tags are free and resource tags cost money
+        why: Tags cost nothing either way.
+      - t: Every resource the provider creates gets them automatically, so a new resource can't be forgotten
+        why: Right. Someone adding a resource next month doesn't have to remember. Resource-level tags are still merged on top when a resource needs its own.
+      - t: Resource tags don't show up in the console
+        why: They do. The difference is who has to remember to add them.
+      - t: AWS requires tags to be set on the provider
+        why: AWS has no idea what a provider is. default_tags is a Terraform feature that copies the tags onto each resource.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the day stg arrived">
+
+Maya's Terraform built QuickCart's image repository for dev. The team wanted a staging environment too, so she copied the folder, renamed it `stg`, and changed `dev` to `stg` wherever she spotted it.
+
+She missed one. The first `apply` in the stg folder tried to create a repository called `quickcart-dev-orders` — which already existed — and AWS refused.
+
+A month later it was quieter and worse. Leo had turned on image scanning in dev. Nobody copied the change to stg, because nobody remembered stg was a separate copy. The two environments now differed in ways nobody had chosen.
+
+</Story>
+
+Copy-and-edit gives you two sets of code that slowly stop matching. The fix is one set of code, with the parts that differ pulled out as **variables**.
+
+<Case title="A very common mistake">
+
+A team pulls its settings into variables, which is right. Then someone puts the database password in `terraform.tfvars` — or as a variable's `default` — and commits it. The password is now in the git history of every clone of the repository, and deleting the line later doesn't remove it. Secret-scanning tools exist largely because this happens so often. Variables make values easy to change; they don't make them secret.
+
+</Case>
+
+This lesson covers the four things that turn one file into code for every environment: variables, the files that set them, locals and outputs.
+
+</Part>
+
+<Part id="idea">
+
+Right now `main.tf` says `name = "quickcart-dev-orders"`. The word `dev` is welded into the code. To build stg you'd have to change the code.
+
+Instead, the code says *the name is the project, a hyphen, the environment, then "-orders"*, and something outside the code says which environment this is.
+
+<Key>Variables are what change between environments. Locals are what you work out from them. Outputs are what you hand back.</Key>
+
+### The four pieces
+
+| Piece | Where it lives | What it's for |
+|---|---|---|
+| **Input variable** | `variable` blocks, usually in `variables.tf` | A value the person running Terraform chooses |
+| **Variable values** | A `.tfvars` file, or the command line | The actual value for this environment |
+| **Local value** | A `locals` block, usually in `locals.tf` | A value worked out once inside the code and reused, like a name prefix |
+| **Output** | `output` blocks, usually in `outputs.tf` | A value Terraform prints after apply, and that other code can read |
+
+The file names are a convention, not a rule. Terraform reads every `.tf` file in the folder as if they were one file.
+
+<YouKnow title="You already know this: build variants">
+
+Your app has one codebase and several builds: debug, staging, release. Each build points at a different API address and turns a few things on or off, but the code is the same. That's done with build configurations or product flavours, not by copying the project.
+
+Variables and `.tfvars` files are Terraform's build variants: one set of code, and one small file of settings per environment.
+
+</YouKnow>
+
+### Declaring variables
+
+Here is the `variables.tf` you'll build in the lab. Every setting inside a `variable` block is optional, but a good one has most of them.
+
+```hcl title="variables.tf"
+variable "project" {
+  description = "Short name put at the start of everything this code creates"
+  type        = string
+  default     = "quickcart"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,20}$", var.project))
+    error_message = "The project must be 2 to 21 lowercase letters, digits or hyphens, starting with a letter."
+  }
+}
+
+variable "environment" {
+  description = "Which environment this is: dev, stg or prod"
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "stg", "prod"], var.environment)
+    error_message = "The environment must be dev, stg or prod."
+  }
+}
+
+variable "region" {
+  description = "The AWS region to build in"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "images_to_keep" {
+  description = "How many images the repository keeps before deleting the oldest"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.images_to_keep >= 1 && var.images_to_keep <= 100
+    error_message = "Keep between 1 and 100 images."
+  }
+}
+
+variable "extra_tags" {
+  description = "Any extra tags to add to every resource"
+  type        = map(string)
+  default     = {}
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "environment"` | Declares a variable. Code reads it as `var.environment` | Using `var.environment` anywhere fails with *Reference to undeclared input variable* | — |
+| `description` | A sentence saying what the value is for. Shown when Terraform asks for a value, and in error messages | Nobody knows what to pass without reading the code | Whenever the meaning changes |
+| `type` | What kind of value is allowed: `string`, `number`, `bool`, `list(string)`, `set(string)`, `map(string)` or `object({...})`. Terraform converts or rejects anything else | Any type is accepted, so `"five"` for a number only fails later, somewhere confusing | Rarely. Changing a type breaks everyone who sets it |
+| `default` | The value used when nobody sets one. **A variable with no default is required** | The variable is required: Terraform asks for it, or fails in a pipeline | Give defaults to things with a sensible usual value. Never default `environment` — it should always be a deliberate choice |
+| `validation` → `condition` | An expression that must be `true` for the value to be accepted. `contains(list, value)` checks membership; `can(regex(...))` checks a pattern | Any value of the right type is accepted, including `production` or `-1` | When the rules change, such as adding a `prod` environment |
+| `validation` → `error_message` | What Terraform says when the condition is false. Write it as a full sentence | Required inside `validation` | To make the message clearer |
+| `sensitive` | Hide the value in plan and apply output (shown in the example below) | The value is printed wherever it appears in a plan | Set it on anything secret |
+| `nullable` | Whether `null` is an accepted value. Defaults to `true` | `null` is allowed and means "use the default" | Set `false` on a variable that must never be empty |
+
+The types that hold several values are worth knowing apart:
+
+| Type | Looks like | Use it for |
+|---|---|---|
+| `list(string)` | `["a", "b", "a"]` — ordered, repeats allowed | Things where order matters |
+| `set(string)` | `["a", "b"]` — no order, no repeats | A group of names, like the queues in [Loops and lifecycle](/lessons/terraform-loops/) |
+| `map(string)` | `{ Owner = "platform-team" }` — keys and values | Tags, or a lookup table |
+| `object({...})` | `{ cpu = 256, memory = 512 }` — named fields, each with its own type | A group of settings that belong together |
+
+### Setting the values
+
+A `.tfvars` file is just a list of `name = value` lines. One per environment:
+
+```hcl title="dev.tfvars"
+environment    = "dev"
+images_to_keep = 5
+```
+
+```hcl title="stg.tfvars"
+environment    = "stg"
+images_to_keep = 20
+
+extra_tags = {
+  Owner = "platform-team"
+}
+```
+
+Anything a file doesn't mention keeps its default. You pick a file with `-var-file=dev.tfvars`.
+
+### When several places set the same variable
+
+There are six ways to set a value, and they can all be used at once. Terraform reads them in a fixed order, and **each one overwrites the one before**. The last one read wins.
+
+| Read | Where the value comes from | Example |
+|---|---|---|
+| 1st — weakest | The `default` in the variable block | `default = 10` |
+| 2nd | An environment variable called `TF_VAR_` plus the variable's name | `export TF_VAR_images_to_keep=15` |
+| 3rd | A file called exactly `terraform.tfvars`, loaded automatically | `images_to_keep = 20` |
+| 4th | `terraform.tfvars.json`, loaded automatically | `{"images_to_keep": 20}` |
+| 5th | Any file ending `.auto.tfvars` or `.auto.tfvars.json`, loaded automatically in alphabetical order | `team.auto.tfvars` |
+| 6th — strongest | `-var` and `-var-file` on the command line, in the order you typed them. The later one wins | `-var-file=stg.tfvars -var images_to_keep=50` |
+
+<Note title="The environment variable surprise">
+
+People expect an environment variable to override everything, because in most tools it does. In Terraform it's second from the bottom. If `terraform.tfvars` sets the same variable, the file wins and your `TF_VAR_` is silently ignored. When a value isn't what you expect, check this first.
+
+</Note>
+
+<Mistake title="a required variable has no value">
+
+```output title="In a pipeline, or with -input=false, Terraform stops with"
+Error: No value for required variable
+
+  on variables.tf line 12:
+  12: variable "environment" {
+
+The root module input variable "environment" is not set, and has no default
+value. Use a -var or -var-file command line argument to provide a value for
+this variable.
+```
+
+**Why:** `environment` has no `default`, so it's required. On your laptop Terraform would stop and ask you to type it; in a pipeline there is nobody to ask.
+
+**The fix:** pass the environment's file: `terraform plan -var-file=dev.tfvars`.
+
+</Mistake>
+
+<Mistake title="a typo in a tfvars file">
+
+```output title="Terraform warns, and carries on"
+Warning: Value for undeclared variable
+
+The root module does not declare a variable named "images_to_kep" but a value
+was found in file "dev.tfvars". If you meant to use this value, add a
+"variable" block to the configuration.
+```
+
+**Why:** the file sets `images_to_kep`, missing an e. Terraform has no variable by that name, so it ignores the line, and `images_to_keep` keeps its default.
+
+**The fix:** correct the spelling. Read warnings, not only errors: this one means a setting you thought you'd made didn't happen.
+
+</Mistake>
+
+### Locals: working things out once
+
+Every name in QuickCart's code starts with the project and the environment, like `quickcart-dev`. Rather than writing `"${var.project}-${var.environment}"` in twenty places, you work it out once:
+
+```hcl title="locals.tf"
+locals {
+  name_prefix = "${var.project}-${var.environment}"
+
+  common_tags = merge(
+    {
+      Project     = var.project
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    },
+    var.extra_tags,
+  )
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `locals` | A block of named values, read in code as `local.name_prefix` (note: `local`, singular) | — | — |
+| `name_prefix` | Joins the project and environment with a hyphen. `${...}` inside a string inserts a value | Every resource builds its own name, and one day two of them do it differently | If your naming standard changes — in one place |
+| `common_tags` | The tags every resource gets. `merge()` combines maps; where both have the same key, the later map wins, so `extra_tags` can add to or override the standard set | Tags are typed out on each resource, and some get forgotten | To add a tag your organisation requires, like a cost centre |
+
+**Variable or local?** If the person running Terraform should choose it, it's a variable. If it follows from other values by a rule, it's a local. A local can't be set from outside, which is the point: nobody can pass in a name that breaks the naming rule.
+
+### Using them, with default tags
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = local.common_tags
+  }
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "${local.name_prefix}-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "orders" {
+  repository = aws_ecr_repository.orders.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep only the newest images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = var.images_to_keep
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version` | Refuse to run on Terraform older than 1.10 | An old Terraform may fail later with a confusing error | When you rely on a newer feature |
+| `required_providers` → `aws` | Use the `hashicorp/aws` plugin, any 6.x version | Terraform picks the newest, which may one day include breaking changes | When you deliberately upgrade a major version |
+| `provider "aws"` → `region` | Build in the region the variable says | Terraform uses the region from your AWS login settings | Set it through `var.region`, not here |
+| `default_tags` → `tags` | Put these tags on **every** resource this provider creates. Terraform shows the result as `tags_all` in the plan | Each resource needs its own `tags`, and new ones get forgotten | Rarely. Change `common_tags` instead |
+| `aws_ecr_repository` `"orders"` → `name` | The repository's name in AWS, built from the prefix: `quickcart-dev-orders` | Required | Changing it **replaces** the repository, as you'll see in the lab |
+| `image_tag_mutability` | `IMMUTABLE`: a tag like `v1` can never point at a different image | Defaults to `MUTABLE` | Rarely. [Storing images: ECR](/lessons/ecr/) explains why |
+| `force_delete` | Let `terraform destroy` delete the repository even if it holds images | Destroy fails while any image is inside | Set to `false` for production |
+| `image_scanning_configuration` → `scan_on_push` | Check each pushed image for known vulnerabilities | No scanning on push | Keep it on |
+| `aws_ecr_lifecycle_policy` → `repository` | Which repository the clean-up rule belongs to. Referring to `aws_ecr_repository.orders.name` also tells Terraform to create the repository first | Required | Never |
+| `policy` | The rule itself, as JSON. `jsonencode()` turns Terraform's map into JSON text, so you don't hand-write quotes and commas | Required | — |
+| `rulePriority` | Rules are applied lowest number first | Required by AWS | When you add more rules |
+| `selection` → `tagStatus`, `countType`, `countNumber` | Which images the rule looks at (`any`), and "more than N images". N comes from `var.images_to_keep` — this is where dev's 5 and stg's 20 end up | Required by AWS | Change the variable, not the code |
+| `action` → `type` | `expire`: delete the images that match | Required by AWS | — |
+
+### Outputs
+
+```hcl title="outputs.tf"
+output "repository_name" {
+  description = "The repository's name in AWS"
+  value       = aws_ecr_repository.orders.name
+}
+
+output "repository_url" {
+  description = "The address to push images to"
+  value       = aws_ecr_repository.orders.repository_url
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `output "repository_url"` | Names a value to print after apply, and to show with `terraform output` | You'd dig the address out of the console | — |
+| `description` | What the value is, for whoever reads it | Nothing breaks; readers guess | Whenever the meaning changes |
+| `value` | What to output. `repository_url` is filled in by AWS after creation | Required | — |
+| `sensitive` | Show `<sensitive>` instead of the value | Printed in full | Required when the value comes from anything sensitive, as the next mistake shows |
+
+Outputs are also how other code reads from this code: a [module](/lessons/terraform-modules/)'s outputs are the only part of it the caller can see.
+
+### Secrets: sensitive, and keeping them out of state
+
+Sometimes a value really is secret, like the webhook address QuickCart's alarms post to. This file isn't part of the lab — it's an example of the pattern:
+
+```hcl title="sensitive-example.tf"
+variable "alerts_webhook_url" {
+  description = "Secret address that alarms post to. Set it with TF_VAR_alerts_webhook_url, never in a file"
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+}
+
+resource "aws_ssm_parameter" "alerts_webhook" {
+  name             = "/${local.name_prefix}/alerts-webhook-url"
+  description      = "Where alarms are sent"
+  type             = "SecureString"
+  value_wo         = var.alerts_webhook_url
+  value_wo_version = 1
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `sensitive = true` | Plans and output show `(sensitive value)` instead of the secret | The secret is printed in every plan — and plans get pasted into pull requests | Always on secrets |
+| `ephemeral = true` | Terraform 1.10 and later: the value is used during the run and **never written to the state or a saved plan**. It can only be passed to places that accept ephemeral values, like write-only arguments | The value is stored in state in plain text, even with `sensitive` | Always on secrets, where the resource supports it. You must set it on every run, including `destroy` |
+| `aws_ssm_parameter` → `name` | Where the secret lives in Parameter Store | Required | — |
+| `description` | A note on what it's for | No description in the console | — |
+| `type` | `SecureString`: stored encrypted by AWS | Required | — |
+| `value_wo` | A **write-only** argument: sent to AWS, never stored in state. Plans show `(write-only attribute)` | You'd use `value`, which is stored in state | — |
+| `value_wo_version` | Terraform can't see a write-only value, so it can't tell when it changes. Raise this number to send a new value | The new secret is never sent | Add 1 each time the secret changes |
+
+<Mistake title="outputting a sensitive value">
+
+```output title="Terraform refuses to plan"
+Error: Output refers to sensitive values
+
+  on outputs.tf line 12:
+  12: output "db_password" {
+
+To reduce the risk of accidentally exporting sensitive data that was intended
+to be only internal, Terraform requires that any root module output
+containing sensitive data be explicitly marked as sensitive, to confirm your
+intent.
+```
+
+**Why:** the output uses a sensitive variable, and printing it would undo the point of marking it.
+
+**The fix:** add `sensitive = true` to the output. Then `terraform output` shows `<sensitive>`. The value can still be read on purpose with `terraform output -raw db_password`, which is why it should be rare.
+
+</Mistake>
+
+<Note title="sensitive is not encryption">
+
+`sensitive` only changes what is **printed**. Without `ephemeral` and a write-only argument, the value is stored in the state file in plain text. That's one reason [Terraform state](/lessons/terraform-state/) must be encrypted and locked down. Better still, let AWS create the secret itself, as in [Secrets](/lessons/secrets/).
+
+</Note>
+
+</Part>
+
+<Part id="see">
+
+A variable can be set in six places at once. Turn sources on and off, and see which value Terraform ends up using. Try the environment variable together with `terraform.tfvars`, and try swapping the order of `-var` and `-var-file`.
+
+<TfPrecedence />
+
+**What to notice:** Terraform never warns you that one value overrode another. It reads the sources in a fixed order and the last one wins. When a value surprises you, walk up this list.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">an empty ECR repository and its clean-up rule. ECR charges for stored images, and this lab stores none.</Cost>
+
+You'll build one set of code, plan it for two environments, watch validation and precedence at work, then apply dev and read its outputs. About 30 minutes.
+
+You need Terraform 1.10 or later and a working AWS login in your terminal. [Set up your Mac](/lessons/mac-setup/) covers both.
+
+<Steps>
+
+<Step title="Make the folder">
+
+```sh
+mkdir quickcart-vars
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-vars` | its name, inside the folder you're in now |
+
+```sh
+cd quickcart-vars
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory — every later command runs in here |
+| `quickcart-vars` | the folder you just made |
+
+</Step>
+
+<Step title="Write the four files">
+
+Create these four files in the folder. Each one is explained line by line in [the idea](#idea), above.
+
+```hcl title="variables.tf"
+variable "project" {
+  description = "Short name put at the start of everything this code creates"
+  type        = string
+  default     = "quickcart"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{1,20}$", var.project))
+    error_message = "The project must be 2 to 21 lowercase letters, digits or hyphens, starting with a letter."
+  }
+}
+
+variable "environment" {
+  description = "Which environment this is: dev, stg or prod"
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "stg", "prod"], var.environment)
+    error_message = "The environment must be dev, stg or prod."
+  }
+}
+
+variable "region" {
+  description = "The AWS region to build in"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "images_to_keep" {
+  description = "How many images the repository keeps before deleting the oldest"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.images_to_keep >= 1 && var.images_to_keep <= 100
+    error_message = "Keep between 1 and 100 images."
+  }
+}
+
+variable "extra_tags" {
+  description = "Any extra tags to add to every resource"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="locals.tf"
+locals {
+  name_prefix = "${var.project}-${var.environment}"
+
+  common_tags = merge(
+    {
+      Project     = var.project
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    },
+    var.extra_tags,
+  )
+}
+```
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = local.common_tags
+  }
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "${local.name_prefix}-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "orders" {
+  repository = aws_ecr_repository.orders.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep only the newest images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = var.images_to_keep
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+}
+```
+
+```hcl title="outputs.tf"
+output "repository_name" {
+  description = "The repository's name in AWS"
+  value       = aws_ecr_repository.orders.name
+}
+
+output "repository_url" {
+  description = "The address to push images to"
+  value       = aws_ecr_repository.orders.repository_url
+}
+```
+
+</Step>
+
+<Step title="Write one values file per environment">
+
+```hcl title="dev.tfvars"
+environment    = "dev"
+images_to_keep = 5
+```
+
+```hcl title="stg.tfvars"
+environment    = "stg"
+images_to_keep = 20
+
+extra_tags = {
+  Owner = "platform-team"
+}
+```
+
+Then set up the folder:
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | download the AWS provider and prepare this folder |
+
+```output
+Terraform has been successfully initialized!
+```
+
+</Step>
+
+<Step title="See validation catch a bad value">
+
+```sh
+terraform plan -var environment=production
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | work out what would change, without changing anything |
+| `-var environment=production` | set one variable on the command line, to a value the validation doesn't allow |
+
+```output title="Terraform stops before planning anything"
+Planning failed. Terraform encountered an error while generating this plan.
+
+
+Error: Invalid value for variable
+
+  on variables.tf line 12:
+  12: variable "environment" {
+    ├────────────────
+    │ var.environment is "production"
+
+The environment must be dev, stg or prod.
+
+This was checked by the validation rule at variables.tf:16,3-13.
+```
+
+Your own error message, before anything touched AWS. The line numbers point at your file.
+
+</Step>
+
+<Step title="Plan stg, without building it">
+
+```sh
+terraform plan -var-file=stg.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | work out what would change |
+| `-var-file=stg.tfvars` | read the variable values from stg's file |
+
+```output title="The important part of the plan"
+  # aws_ecr_lifecycle_policy.orders will be created
+  + resource "aws_ecr_lifecycle_policy" "orders" {
+      + id          = (known after apply)
+      + policy      = jsonencode(
+            {
+              + rules = [
+                  + {
+                      + action       = {
+                          + type = "expire"
+                        }
+                      + description  = "Keep only the newest images"
+                      + rulePriority = 1
+                      + selection    = {
+                          + countNumber = 20
+                          + countType   = "imageCountMoreThan"
+                          + tagStatus   = "any"
+                        }
+                    },
+                ]
+            }
+        )
+      + region      = "us-east-1"
+      + registry_id = (known after apply)
+      + repository  = "quickcart-stg-orders"
+    }
+
+  # aws_ecr_repository.orders will be created
+  + resource "aws_ecr_repository" "orders" {
+      + arn                  = (known after apply)
+      + force_delete         = true
+      + id                   = (known after apply)
+      + image_tag_mutability = "IMMUTABLE"
+      + name                 = "quickcart-stg-orders"
+      + region               = "us-east-1"
+      + registry_id          = (known after apply)
+      + repository_url       = (known after apply)
+      + tags_all             = {
+          + "Environment" = "stg"
+          + "ManagedBy"   = "terraform"
+          + "Owner"       = "platform-team"
+          + "Project"     = "quickcart"
+        }
+
+      + image_scanning_configuration {
+          + scan_on_push = true
+        }
+    }
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + repository_name = "quickcart-stg-orders"
+  + repository_url  = (known after apply)
+```
+
+Check three things: the name is `quickcart-stg-orders`, `countNumber` is 20, and `tags_all` has stg's extra `Owner` tag. None of that is written in `main.tf`. It all came from `stg.tfvars`.
+
+You don't apply this. In a real project each environment keeps its own state, which [Environments and regions](/lessons/environments-and-regions/) sets up.
+
+</Step>
+
+<Step title="Apply dev and read the outputs">
+
+```sh
+terraform apply -var-file=dev.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan, show the plan, and carry it out once you type `yes` |
+| `-var-file=dev.tfvars` | use dev's values |
+
+Check the plan says `quickcart-dev-orders` and `countNumber = 5`, then type `yes`.
+
+```output
+aws_ecr_repository.orders: Creating...
+aws_ecr_repository.orders: Creation complete after 1s [id=quickcart-dev-orders]
+aws_ecr_lifecycle_policy.orders: Creating...
+aws_ecr_lifecycle_policy.orders: Creation complete after 0s [id=quickcart-dev-orders]
+
+Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+repository_name = "quickcart-dev-orders"
+repository_url = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-orders"
+```
+
+Your account number appears in place of `111122223333`. To print one output on its own, without quotes — handy in scripts:
+
+```sh
+terraform output -raw repository_url
+```
+
+| Part | What it means |
+|---|---|
+| `terraform output` | show the outputs saved in the state, without planning anything |
+| `-raw` | print just the value, with no quotes or name |
+| `repository_url` | which output |
+
+```output
+111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-dev-orders
+```
+
+In the console, open **ECR → Private registry → Repositories → quickcart-dev-orders**. Its **Tags** show `Project`, `Environment` and `ManagedBy`, even though the resource block has no `tags` line. That's `default_tags`.
+
+</Step>
+
+<Step title="Watch precedence decide">
+
+First, a command-line value beats the file:
+
+```sh
+terraform plan -var-file=dev.tfvars -var images_to_keep=3
+```
+
+| Part | What it means |
+|---|---|
+| `-var-file=dev.tfvars` | dev's values, including `images_to_keep = 5` |
+| `-var images_to_keep=3` | one more value, typed later on the same line, so it wins |
+
+```output
+  # aws_ecr_lifecycle_policy.orders must be replaced
+-/+ resource "aws_ecr_lifecycle_policy" "orders" {
+      ~ id          = "quickcart-dev-orders" -> (known after apply)
+      ~ policy      = jsonencode(
+          ~ {
+              ~ rules = [
+                  ~ {
+                      ~ selection    = {
+                          ~ countNumber = 5 -> 3
+                            # (2 unchanged attributes hidden)
+                        }
+                        # (3 unchanged attributes hidden)
+                    },
+                ]
+            } # forces replacement
+        )
+      ~ registry_id = "111122223333" -> (known after apply)
+        # (2 unchanged attributes hidden)
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+```
+
+`countNumber = 5 -> 3`: the command line won. `-/+` means AWS can't edit a lifecycle policy in place, so Terraform replaces it — harmless for a policy. Don't apply it.
+
+Now an environment variable, which you might expect to win:
+
+```sh
+TF_VAR_images_to_keep=40 terraform plan -var-file=dev.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `TF_VAR_images_to_keep=40` | set an environment variable for this one command only |
+| `terraform plan` | plan as usual |
+| `-var-file=dev.tfvars` | dev's file, which also sets `images_to_keep` |
+
+```output
+No changes. Your infrastructure matches the configuration.
+```
+
+The environment variable said 40. The file said 5 and was read later, so 5 won and nothing changed. That's the surprise from the [precedence table](#idea).
+
+</Step>
+
+<Step title="See a rename replace the repository">
+
+Ask what would happen if this same state were pointed at stg's values:
+
+```sh
+terraform plan -var-file=stg.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `-var-file=stg.tfvars` | stg's values, against the state that holds dev's repository |
+
+```output title="The key lines"
+  # aws_ecr_repository.orders must be replaced
+-/+ resource "aws_ecr_repository" "orders" {
+      ~ name                 = "quickcart-dev-orders" -> "quickcart-stg-orders" # forces replacement
+
+Plan: 2 to add, 0 to change, 2 to destroy.
+```
+
+Terraform would **destroy dev's repository** to build stg's. One folder, one state, two environments means each apply replaces the other. Don't apply it. That's why each environment gets its own state — the subject of [Environments and regions](/lessons/environments-and-regions/).
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+```sh
+terraform destroy -var-file=dev.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything in the state, and carry it out once you type `yes` |
+| `-var-file=dev.tfvars` | the same values you applied with. `environment` is required, so destroy needs it too |
+
+Type `yes`.
+
+```output
+Destroy complete! Resources: 2 destroyed.
+```
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Thing | What it does |
+|---|---|
+| `variable "x" { type, default, description }` | Declare an input. No default means required |
+| `validation { condition, error_message }` | Reject bad values before anything is planned |
+| `sensitive = true` | Hide the value in output. It's still in state |
+| `ephemeral = true` | Keep a variable out of state and plan files (1.10+) |
+| `locals { name_prefix = "${var.project}-${var.environment}" }` | Work a value out once; read it as `local.name_prefix` |
+| `default_tags { tags = local.common_tags }` | Tag every resource the provider creates |
+| `output "x" { value, description }` | Print a value after apply; how modules hand values back |
+| `-var-file=dev.tfvars` | Use one environment's values |
+| `-var name=value` | Set one value on the command line |
+| `TF_VAR_name` | Set a value from the environment — weaker than any tfvars file |
+| Precedence, weakest first | default → `TF_VAR_` → `terraform.tfvars` → `*.auto.tfvars` → `-var` / `-var-file` (later wins) |
+| `terraform output -raw x` | Print one output, bare |
+
+</Cheat>
+
+</Part>

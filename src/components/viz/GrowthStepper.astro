@@ -1,0 +1,156 @@
+---
+/*
+ * Roadmap: QuickCart grows from a laptop to millions of users.
+ * Teaches: every module exists because a real problem appears at a certain size.
+ */
+import { MODULES, moduleHref } from "../../data/curriculum";
+
+interface Stage { users: string; name: string; problem: string; mod: string }
+const STAGES: Stage[] = [
+  { users: "1 user", name: "A laptop", mod: "00",
+    problem: "QuickCart runs on Maya's laptop. It works, but only while the laptop is open, and only Maya can use it." },
+  { users: "50 users", name: "Friends and family", mod: "01",
+    problem: "Every release is a big bang: a month of changes copied over by hand. When something breaks, nobody knows which change did it." },
+  { users: "500 users", name: "Off the laptop", mod: "02",
+    problem: "The app needs a computer that is always on. The team needs to rent one, and decide who is allowed to touch it." },
+  { users: "2,000 users", name: "A real network", mod: "03",
+    problem: "The database sits on the same public server as the API. Anyone on the internet can try to connect to it." },
+  { users: "5,000 users", name: "Launch day", mod: "04",
+    problem: "A food blogger mentions QuickCart. At 7pm the one server runs out of memory and every order fails." },
+  { users: "20,000 users", name: "Money is involved", mod: "05",
+    problem: "Orders must never be lost. The database password is in the code, and the menu photos fill the server's disk." },
+  { users: "50,000 users", name: "Nobody noticed", mod: "06",
+    problem: "Checkout failed for an hour on Saturday. The team found out from angry reviews, not from their own systems." },
+  { users: "80,000 users", name: "Works on my laptop", mod: "07",
+    problem: "A release works on Leo's laptop and breaks on the server, because the server has a different version of a library." },
+  { users: "150,000 users", name: "Friday releases", mod: "08",
+    problem: "Every release drops a few hundred requests while servers restart. The team stops releasing on Fridays." },
+  { users: "500,000 users", name: "A second country", mod: "09",
+    problem: "Opening in a second country means rebuilding everything in another region. It takes a week of clicking, and the copy is slightly different." },
+  { users: "1 million users", name: "Twelve releases a day", mod: "10",
+    problem: "Releases need a person awake at 2am typing commands. Twelve times a day, that person makes a mistake." },
+  { users: "Millions of users", name: "3am", mod: "11",
+    problem: "Something will break. Checkout is down, and the person on call has to know where to look first." },
+];
+const mods = STAGES.map((s) => MODULES.find((m) => m.id === s.mod)!);
+---
+<div class="viz" data-track="start" data-viz="growth">
+  <div class="viz-controls">
+    <button class="btn" type="button" data-act="back" disabled>Back</button>
+    <button class="btn line" type="button" data-act="next">Grow QuickCart</button>
+    <button class="btn" type="button" data-act="reset">Start again</button>
+    <span class="gs-count" aria-hidden="true"><b data-n="num">1</b> of {STAGES.length}</span>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole route</p>
+  <div class="viz-stage">
+    <div class="gs-scroll"><ol class="gs-route" aria-label="QuickCart's growth, stage by stage">
+      {STAGES.map((s, i) => (
+        <li data-track={mods[i].track} class:list={["gs-stop", { here: i === 0 }]}>
+          <button type="button" data-go={i} aria-label={`Stage ${i + 1}: ${s.name}, ${s.users}`} aria-current={i === 0 ? "step" : undefined}>
+            <span class="gs-dot" aria-hidden="true"></span>
+            <span class="gs-u">{s.users}</span>
+          </button>
+        </li>
+      ))}
+    </ol></div>
+    {STAGES.map((s, i) => (
+      <div class="gs-panel" data-track={mods[i].track} data-panel={i} hidden={i !== 0}>
+        <div class="gs-users"><span>{s.users}</span><b>{s.name}</b></div>
+        <div class="gs-grid">
+          <div>
+            <p class="gs-h">What goes wrong</p>
+            <p>{s.problem}</p>
+          </div>
+          <div>
+            <p class="gs-h">What fixes it</p>
+            <p><a class="gs-mod" href={moduleHref(mods[i])}><span class="gs-id">{mods[i].id}</span>{mods[i].title}</a></p>
+            <p class="gs-sub">{mods[i].lessons.map((l) => <span>{l.title}</span>)}</p>
+          </div>
+        </div>
+      </div>
+    ))}
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Stage 1 of {STAGES.length}: {STAGES[0].name}</span>This is where every app starts. Choose <b>Grow QuickCart</b> to add users and see what breaks next.</div>
+</div>
+
+<style is:global>
+  [data-viz="growth"] .gs-count { margin-left: auto; font-size: 14px; color: var(--ink-2); }
+  [data-viz="growth"] .gs-scroll { overflow-x: auto; }
+  [data-viz="growth"] .gs-route { list-style: none; margin: 8px 0 14px; padding: 0 4px; display: grid; grid-template-columns: repeat(12, minmax(56px, 1fr)); min-width: 700px; position: relative; }
+  [data-viz="growth"] .gs-route::before { content: ""; position: absolute; left: 32px; right: 32px; top: 17px; height: 4px; background: var(--rule); border-radius: 2px; }
+  [data-viz="growth"] .gs-stop { position: relative; text-align: center; }
+  [data-viz="growth"] .gs-stop button { background: none; border: 0; padding: 4px 2px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; color: var(--ink-3); font: inherit; }
+  [data-viz="growth"] .gs-dot { width: 22px; height: 22px; border-radius: 50%; background: var(--surface); border: 4px solid var(--rule-2); transition: transform .2s, background .2s, border-color .2s; position: relative; z-index: 1; }
+  [data-viz="growth"] .gs-stop.past .gs-dot { border-color: var(--line); background: var(--line); }
+  [data-viz="growth"] .gs-stop.here .gs-dot { border-color: var(--line); background: var(--surface); transform: scale(1.25); box-shadow: 0 0 0 4px color-mix(in srgb, var(--line) 22%, transparent); }
+  [data-viz="growth"] .gs-u { font-size: 11.5px; font-weight: 700; line-height: 1.2; }
+  [data-viz="growth"] .gs-stop.here .gs-u { color: var(--ink); }
+  [data-viz="growth"] .gs-panel { border: 1px solid var(--rule); border-left: 6px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--bg); margin-bottom: 10px; }
+  [data-viz="growth"] .gs-users { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 10px; }
+  [data-viz="growth"] .gs-users span { font-size: 26px; font-weight: 900; letter-spacing: -.02em; line-height: 1.1; }
+  [data-viz="growth"] .gs-users b { font-size: 16px; color: var(--ink-2); }
+  [data-viz="growth"] .gs-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; }
+  [data-viz="growth"] .gs-grid .gs-h { font-size: 14px !important; font-weight: 800; margin: 0 0 4px; color: var(--ink-2); }
+  [data-viz="growth"] .gs-grid p { margin: 0 0 6px; font-size: 15px; }
+  [data-viz="growth"] .gs-mod { display: inline-flex; align-items: center; gap: 8px; font-weight: 800; color: var(--ink); text-decoration: none; }
+  [data-viz="growth"] .gs-mod:hover { text-decoration: underline; }
+  [data-viz="growth"] .gs-id { background: var(--line); color: var(--on-line); font-size: 12.5px; padding: 2px 7px; border-radius: 6px; }
+  [data-viz="growth"] .gs-sub { font-size: 13.5px !important; color: var(--ink-2); }
+  [data-viz="growth"] .gs-sub span + span::before { content: "·"; margin: 0 6px; }
+  [data-viz="growth"] .gs-panel.pop { animation: gs-pop .25s ease-out; }
+  @keyframes gs-pop { from { opacity: .4; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { [data-viz="growth"] .gs-panel.pop { animation: none; } [data-viz="growth"] .gs-dot { transition: none; } }
+  @media (max-width: 640px) { [data-viz="growth"] .gs-grid { grid-template-columns: 1fr; gap: 8px; } }
+</style>
+
+<script>
+  import { tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="growth"]').forEach((root) => {
+    if (!once(root)) return;
+    const stops = [...root.querySelectorAll<HTMLElement>(".gs-stop")];
+    const panels = [...root.querySelectorAll<HTMLElement>(".gs-panel")];
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const num = root.querySelector<HTMLElement>('[data-n="num"]')!;
+    const back = root.querySelector<HTMLButtonElement>('[data-act="back"]')!;
+    const next = root.querySelector<HTMLButtonElement>('[data-act="next"]')!;
+    const last = stops.length - 1;
+    let i = 0;
+
+    function show(n: number) {
+      i = Math.max(0, Math.min(last, n));
+      stops.forEach((s, k) => {
+        s.classList.toggle("here", k === i);
+        s.classList.toggle("past", k < i);
+        const b = s.querySelector("button")!;
+        if (k === i) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
+      });
+      panels.forEach((p, k) => { p.hidden = k !== i; p.classList.toggle("pop", k === i); });
+      num.textContent = String(i + 1);
+      /* keep the current stop in view when the route scrolls sideways */
+      const sc = root.querySelector<HTMLElement>(".gs-scroll")!;
+      const st = stops[i];
+      if (sc.scrollWidth > sc.clientWidth) sc.scrollLeft = st.offsetLeft - sc.clientWidth / 2 + st.offsetWidth / 2;
+      back.disabled = i === 0;
+      next.disabled = i === last;
+      const p = panels[i];
+      const name = p.querySelector(".gs-users b")!.textContent;
+      const users = p.querySelector(".gs-users span")!.textContent;
+      const problem = p.querySelector(".gs-grid .gs-h + p")!.textContent;
+      const mod = p.querySelector(".gs-mod")!.textContent!.replace(/^(\d\d)/, "$1 ");
+      const end = i === last ? " That is the end of the route: QuickCart now has everything this course teaches." : "";
+      tell(say, `Stage ${i + 1} of ${last + 1}: ${name}`,
+        `<b>${users}.</b> ${problem} The fix is module <b>${mod}</b>.${end}`, i === last ? "good" : "");
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.go) show(Number(b.dataset.go));
+      else if (b.dataset.act === "next") show(i + 1);
+      else if (b.dataset.act === "back") show(i - 1);
+      else if (b.dataset.act === "reset") show(0);
+    });
+  }));
+</script>

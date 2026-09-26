@@ -1,0 +1,575 @@
+---
+time: 40 minutes
+level: Beginner
+before: [logs-and-metrics]
+cost: pennies
+quiz:
+  - q: An alarm uses "3 out of 3" datapoints with a 1-minute period. Errors spike for one minute, then stop. What happens?
+    answer: 2
+    options:
+      - t: It fires straight away
+        why: That would be "1 out of 1". With 3 out of 3, one bad minute isn't enough.
+      - t: It fires after three minutes
+        why: Only if all three of the last three minutes were bad. Here only one was.
+      - t: It stays OK
+        why: It needs three bad minutes in a row. A one-minute blip never gets there, which is the point — nobody is woken up for something that fixed itself.
+      - t: It goes to INSUFFICIENT_DATA
+        why: There was data every minute. INSUFFICIENT_DATA means there wasn't enough data to decide.
+  - q: An alarm on an error-count metric sits in INSUFFICIENT_DATA every night. What is the most likely fix?
+    answer: 1
+    options:
+      - t: Lower the threshold
+        why: The threshold only matters when there's data to compare. The problem is that there's none.
+      - t: Treat missing data as good (not breaching)
+        why: The metric only reports when something happens. At night there are no errors, so there's no data. For an error count, no data means no errors.
+      - t: Treat missing data as bad (breaching)
+        why: That would make the alarm fire every quiet night.
+      - t: Delete the alarm and create it again
+        why: A new alarm with the same settings behaves the same way.
+  - q: The alarm shows ALARM in the console, but no email ever arrives. What should you check first?
+    answer: 0
+    options:
+      - t: Whether the email subscription to the SNS topic is Confirmed
+        why: An unconfirmed subscription receives nothing. It's the most common reason alarms "don't work". The console shows Pending confirmation until someone clicks the link in the email.
+      - t: Whether the threshold is too high
+        why: The alarm already fired, so the threshold did its job. The message got lost after that.
+      - t: Whether the metric has data
+        why: It must have, or the alarm couldn't be in ALARM.
+      - t: Whether CloudWatch is down
+        why: Possible, but very unlikely. Check the things you control first.
+  - q: What does aws cloudwatch set-alarm-state prove?
+    answer: 3
+    options:
+      - t: That the threshold is right
+        why: It skips the threshold entirely. It just sets the state.
+      - t: That the metric is being published
+        why: It doesn't look at the metric at all.
+      - t: That the alarm will fire during a real outage
+        why: Only a real trigger proves that. set-alarm-state proves everything after the decision works.
+      - t: That the notification path works — the SNS topic, the subscription and the email
+        why: Setting the state to ALARM runs the alarm's actions, so it tests everything from the alarm to your inbox. Then trigger it for real to test the metric and threshold too.
+  - q: The team gets 40 alarm emails a week and most need no action. What is the right response?
+    answer: 1
+    options:
+      - t: Send them to a separate folder so they don't get in the way
+        why: That's how real alarms get missed. The folder fills up and nobody reads it.
+      - t: Delete or retune each alarm that fired without needing action, until every alarm means "do something now"
+        why: An alarm that needs no action trains people to ignore alarms. Tune the threshold, the datapoints or the missing-data setting — or remove it.
+      - t: Add more alarms so nothing is missed
+        why: More noise makes it harder to see the one that matters.
+      - t: Lower every threshold so problems are caught earlier
+        why: Lower thresholds fire more often, which makes the noise worse.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the quiet outage">
+
+QuickCart had fourteen alarms. Most of them fired most nights: CPU above 50% during the nightly report, a spike of errors during each deploy. Everyone set up an email rule, and the alarm emails went into a folder.
+
+Then checkout started failing on a Saturday afternoon. The 5xx alarm fired, correctly. Its email went into the folder with the other two hundred. Customers noticed after ten minutes. The team noticed after forty, when someone checked the app store reviews.
+
+The following week, Priya created a new alarm for failed payments. It never sent anything — its email subscription had never been confirmed. Nobody found out until the next incident.
+
+</Story>
+
+<Case>
+
+In late 2013, attackers stole payment card data from the US retailer Target. It was widely reported afterwards that the company's security tools had raised alerts about the attack while it was happening, and that those alerts weren't acted on in time.
+
+The tools worked. The alert fired. It just didn't lead to anyone doing anything. An alarm is only useful if a person trusts it enough to act.
+
+</Case>
+
+So an alarm has two jobs, and both have to be proved:
+
+- **Fire** when something is really wrong — and only then.
+- **Reach a person** who will act on it.
+
+</Part>
+
+<Part id="idea">
+
+An **alarm** watches one metric, compares it with a threshold every period, and does something when the answer changes. Every CloudWatch alarm is in one of three states:
+
+| State | Means | What you'd see |
+|---|---|---|
+| `OK` | The metric is on the right side of the threshold | Nothing. Quiet is good |
+| `ALARM` | The metric crossed the threshold for long enough | A notification, if you set one up |
+| `INSUFFICIENT_DATA` | Not enough data to decide | Every new alarm starts here. It's a problem if it stays here |
+
+### The five decisions in every alarm
+
+| Decision | QuickCart's error alarm | Why it matters |
+|---|---|---|
+| Metric, statistic and period | `AppErrorCount`, `Sum`, 1 minute | What is being measured, and in what slices |
+| Threshold | Greater than 5 | Where "fine" ends |
+| Datapoints to alarm | 1 out of 1 | How long it has to be bad before anyone is told |
+| Missing data | Treat as good | What a silent minute means |
+| Action | Email the `quickcart-alerts` topic | Who is told, and how |
+
+### Thresholds need reasons
+
+A threshold picked because it's a round number fires at the wrong times. Every threshold should answer "why this number?" These are the alarms QuickCart ended up with:
+
+| Alarm | Condition | Why this threshold |
+|---|---|---|
+| `quickcart-unhealthy-hosts` | `UnHealthyHostCount` ≥ 1, 2 of 2 minutes | Any unhealthy server is worth knowing about. Two minutes avoids firing during a normal deploy |
+| `quickcart-alb-5xx` | `HTTPCode_ELB_5XX_Count` Sum > 5, 1 of 1 | 5xx from the load balancer itself means there's no healthy server to send to. These should be zero |
+| `quickcart-target-5xx` | `HTTPCode_Target_5XX_Count` Sum > 10, 2 of 2 | Errors from the app. A little higher, because the app returns 500 when the database has trouble |
+| `quickcart-latency-p95` | `TargetResponseTime` p95 > 1 second, 3 of 3 | A percentile, not an average: an average hides a slow minority |
+| `quickcart-cpu-high` | `CPUUtilization` Average > 70%, 2 of 2 | Auto scaling aims for 50%. Staying above 70% means scaling isn't keeping up |
+| `quickcart-db-connections` | `DatabaseConnections` Maximum > 40, 2 of 2 | The smallest database sizes allow only a few dozen connections. 40 leaves time to act before it's full |
+| `quickcart-db-storage` | `FreeStorageSpace` Minimum under 2 GB, 1 of 1 at 5 minutes | A full disk stops the database hard, and recovery is slow |
+| `quickcart-app-errors` | `AppErrorCount` Sum > 5, 1 of 1 | The app's own view of its errors, from the log metric filter |
+
+### "M out of N": how long before it fires
+
+Two settings work together:
+
+| Setting | Means |
+|---|---|
+| Evaluation periods (**N**) | How many of the most recent periods to look at |
+| Datapoints to alarm (**M**) | How many of those must be bad to fire |
+
+| Setting | Fires when | Good for |
+|---|---|---|
+| 1 out of 1 | The latest minute is bad | Things that should never happen, like load balancer 5xx |
+| 2 out of 3 | Two of the last three minutes are bad | Most things: ignores a single blip, still quick |
+| 3 out of 3 | Three minutes in a row are bad | Noisy metrics, like CPU or latency |
+
+Asking for more datapoints makes the alarm slower, but calmer. When an alarm keeps switching between `OK` and `ALARM`, it's **flapping**, and the fix is usually more datapoints or a better threshold.
+
+### Missing data is a decision too
+
+Some metrics only report when something happens. The load balancer's 5xx count, and a metric filter without a default value, publish nothing in a quiet minute. You choose what that silence means:
+
+| Treat missing data as | Silence counts as | Use for |
+|---|---|---|
+| **missing** (the default) | Nothing — the alarm may go to `INSUFFICIENT_DATA` | Metrics that always report, like CPU |
+| **good** (not breaching) | Fine | Error counts: no data means no errors |
+| **bad** (breaching) | A problem | Heartbeats: a metric that must always report, so silence means something died |
+| **ignore** | Keep whatever state it was already in | Rarely. It can keep a stale `ALARM` for a long time |
+
+<Mistake title="leaving missing data on the default for an error count">
+
+```output title="The alarm list shows"
+quickcart-alb-5xx     Insufficient data
+```
+
+**Why:** on a quiet night the load balancer has no 5xx to report, so it reports nothing. With the default, the alarm has no data to judge and sits in `INSUFFICIENT_DATA` — and a real problem might not move it out quickly.
+
+**The fix:** edit the alarm, open **Additional configuration**, and set **Missing data treatment** to **Treat missing data as good (not breaching threshold)**.
+
+</Mistake>
+
+### Getting it to a person: SNS
+
+An alarm doesn't send email itself. It publishes a message to an **SNS topic**, and the topic delivers it to everyone subscribed.
+
+| Piece | What it is | QuickCart's |
+|---|---|---|
+| Topic | A named channel that messages are sent to | `quickcart-alerts` |
+| Subscription | One destination for that topic: an email address, a phone, a chat tool, another system | The on-call email address |
+| Confirmation | Email subscriptions must be confirmed by clicking a link. Until then, nothing is delivered | Checked: **Confirmed** |
+
+One topic can feed many alarms, and many subscribers. Change who gets alerts in one place.
+
+<Mistake title="the subscription was never confirmed">
+
+```output title="SNS → Subscriptions shows"
+Protocol   Endpoint                Status
+EMAIL      oncall@example.com      Pending confirmation
+```
+
+**Why:** SNS sends a confirmation email when you subscribe an address, so nobody can sign someone else up. Until the link is clicked, messages to that address are dropped silently. This is the most common reason people say their alarms don't work.
+
+**The fix:** find the email from AWS Notifications (check spam), choose **Confirm subscription**, and check the status changes to **Confirmed**.
+
+</Mistake>
+
+### Prove it fires
+
+<Key>An alarm you've never seen fire is a guess. Force it red, and watch the notification arrive.</Key>
+
+There are two ways to test an alarm, and they test different things:
+
+| Test | How | What it proves |
+|---|---|---|
+| Force the state | `aws cloudwatch set-alarm-state`. The console has no button for this | Everything after the decision: the topic, the subscription, the email |
+| Cause the real thing | Make the metric cross the threshold: send error logs, stop a server, remove a rule | The metric, the threshold and the datapoints too — the whole chain |
+
+Do both. The forced test is quick and safe. The real one is the only proof that the alarm would fire during an actual incident. In QuickCart's build, removing the database's security group rule made the app return 500s, and the error alarm fired within two minutes: that's the evidence it works.
+
+### Alarm fatigue
+
+When alarms fire and nothing needs doing, people learn to ignore them. Then they ignore the real one.
+
+<YouKnow title="You already know this: notification fatigue">
+
+If your app sends too many push notifications, users turn notifications off entirely, including the ones that matter. Alarms work the same way on your team. Each one that fires for no reason uses up some of the trust the next one needs.
+
+</YouKnow>
+
+| Rule | In practice |
+|---|---|
+| Every alarm needs an action | If the answer to "what would I do?" is "nothing", it's not an alarm. Put it on a dashboard |
+| Page for customer pain, ticket for everything else | Checkout failing wakes someone. A disk at 70% can wait for the morning |
+| Link every alarm to a [runbook](/lessons/runbooks/) | Put the link in the alarm's description, so the person woken up knows the first step |
+| Review what fired | Every alarm that fired without needing action gets retuned or deleted |
+
+### Composite alarms
+
+When one thing breaks, several alarms often fire together: target 5xx, app errors and latency, all for one database problem. A **composite alarm** combines other alarms with a rule, and notifies once:
+
+```output title="A composite alarm rule"
+ALARM("quickcart-target-5xx") AND ALARM("quickcart-app-errors")
+```
+
+The individual alarms keep their states for the dashboard, but only the composite one sends the notification. Composite alarms cost a little more than a normal alarm. Start with a few well-tuned alarms and add composite ones when you see the same group firing together.
+
+</Part>
+
+<Part id="see">
+
+Here's one metric — errors per minute — and an alarm on it. Pick what the metric does, then change the threshold, the datapoints and the missing-data setting. Watch the state row underneath, and count how many notifications would be sent.
+
+<AlarmSim />
+
+**What to notice:** with **1 of 1**, the one-minute blip wakes someone up. With **2 of 3** it doesn't, and the real outage still fires, just a minute later. On the quiet night, the only thing that changes the result is what missing data means.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">one alarm (about $0.10 a month, charged by the hour, and the free tier covers ten), an SNS topic whose first 1,000 emails a month are free, and a few kilobytes of logs.</Cost>
+
+You'll build an error alarm on a log metric, send it to your email, force it to fire, then make it fire for real. About 30 minutes.
+
+You need the AWS CLI with a working login, and the console's region set to **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create the log group, stream and metric filter">
+
+If you kept `/quickcart/orders` and its metric filter from [Logs and metrics](/lessons/logs-and-metrics/), skip to the next step.
+
+<ConsolePath path="CloudWatch > Log groups > Create log group" />
+
+| Field | Enter |
+|---|---|
+| Log group name | `/quickcart/orders` |
+| Retention setting | **1 week** |
+
+Choose **Create**. Open the new group, and on **Log streams** choose **Create log stream**:
+
+| Field | Enter |
+|---|---|
+| Log stream name | `lab-1` |
+
+Then on **Metric filters**, choose **Create metric filter**:
+
+| Field | Enter |
+|---|---|
+| Filter pattern | `{ $.level = "ERROR" }` |
+| Filter name | `quickcart-app-errors` |
+| Metric namespace | `QuickCart/App` |
+| Metric name | `AppErrorCount` |
+| Metric value | `1` |
+| Default value | `0` |
+
+Choose **Next** between the pages, then **Create metric filter**.
+
+<See>
+
+The log group with one stream, `lab-1`, and one metric filter.
+
+</See>
+
+</Step>
+
+<Step title="Create the SNS topic">
+
+<ConsolePath path="Simple Notification Service > Topics > Create topic" />
+
+| Field | Enter |
+|---|---|
+| Type | **Standard** |
+| Name | `quickcart-alerts` |
+
+Leave the rest and choose **Create topic**.
+
+<See>
+
+The topic's page, with its ARN: `arn:aws:sns:us-east-1:111122223333:quickcart-alerts`, with your own account number.
+
+</See>
+
+</Step>
+
+<Step title="Subscribe your email, and confirm it">
+
+On the topic's page, choose **Create subscription**.
+
+| Field | Enter |
+|---|---|
+| Topic ARN | already filled in |
+| Protocol | **Email** |
+| Endpoint | your own email address |
+
+Choose **Create subscription**. Then open your email, find the message from **AWS Notifications** — it may be in spam — and choose **Confirm subscription**.
+
+<See>
+
+Back in **SNS → Subscriptions**, refresh: the status is **Confirmed**. If it still says **Pending confirmation**, nothing will reach you. Don't go on until it says Confirmed.
+
+</See>
+
+</Step>
+
+<Step title="Send some normal traffic, so the metric exists">
+
+The console can only put an alarm on a metric that has data. Normal log lines make the metric filter publish its default value, 0.
+
+The console has no way to send log lines by hand, so this uses the CLI. First get the current time:
+
+```sh
+date +%s
+```
+
+| Part | What it means |
+|---|---|
+| `date` | print the date and time |
+| `+%s` | as seconds since 1 January 1970 |
+
+```output
+1790349700
+```
+
+Yours will be larger. Add three zeros to turn it into milliseconds. Create `normal.json`, putting your number in place of the highlighted one:
+
+```json title="normal.json" ph="1790349700000"
+[
+  {"timestamp": 1790349700000, "message": "{\"level\":\"INFO\",\"route\":\"/orders\",\"status\":200,\"latency_ms\":41,\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790349700000, "message": "{\"level\":\"INFO\",\"route\":\"/orders\",\"status\":200,\"latency_ms\":38,\"instance_id\":\"i-0bb22\"}"}
+]
+```
+
+From the same folder, send it:
+
+```sh
+aws logs put-log-events --region us-east-1 --log-group-name /quickcart/orders --log-stream-name lab-1 --log-events file://normal.json
+```
+
+| Part | What it means |
+|---|---|
+| `aws logs put-log-events` | send log events to CloudWatch Logs |
+| `--region us-east-1` | the region the log group is in |
+| `--log-group-name /quickcart/orders` | which log group |
+| `--log-stream-name lab-1` | which stream |
+| `--log-events file://normal.json` | read the events from this file |
+
+<See>
+
+A short JSON reply, without `rejectedLogEventsInfo`. Wait two or three minutes before the next step, so the metric appears.
+
+</See>
+
+</Step>
+
+<Step title="Create the alarm">
+
+<ConsolePath path="CloudWatch > Alarms > All alarms > Create alarm" />
+
+Choose **Select metric**, then **QuickCart/App → Metrics with no dimensions**, tick **AppErrorCount**, and choose **Select metric**.
+
+| Field | Enter |
+|---|---|
+| Statistic | **Sum** |
+| Period | **1 minute** |
+| Threshold type | **Static** |
+| Whenever AppErrorCount is | **Greater** |
+| than | `5` |
+
+Open **Additional configuration**:
+
+| Field | Enter |
+|---|---|
+| Datapoints to alarm | `1` out of `1` |
+| Missing data treatment | **Treat missing data as good (not breaching threshold)** |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Alarm state trigger | **In alarm** |
+| Send a notification to the following SNS topic | **Select an existing SNS topic**, then `quickcart-alerts` |
+
+Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Alarm name | `quickcart-app-errors` |
+| Alarm description | `More than 5 app errors in a minute. Runbook: https://example.com/runbooks/checkout-5xx` |
+
+Choose **Next**, check the summary, and choose **Create alarm**.
+
+<See>
+
+`quickcart-app-errors` in the list. It starts as **Insufficient data**, and within a minute or two changes to **OK**.
+
+</See>
+
+<Note title="If QuickCart/App isn't in the list">
+
+The metric only exists once the metric filter has published a value, and that can take a few minutes after the first log lines arrive. If you created the filter after sending the lines, it never saw them. Wait a few minutes and refresh. If it still isn't there, check the metric filter exists, get a fresh time with `date +%s`, update `normal.json`, and send it again.
+
+</Note>
+
+</Step>
+
+<Step title="Force it to fire">
+
+The console has no way to set an alarm's state, so this uses the CLI:
+
+```sh
+aws cloudwatch set-alarm-state --region us-east-1 --alarm-name quickcart-app-errors --state-value ALARM --state-reason "Testing the notification path"
+```
+
+| Part | What it means |
+|---|---|
+| `aws cloudwatch set-alarm-state` | change an alarm's state by hand, for testing |
+| `--region us-east-1` | where the alarm is |
+| `--alarm-name quickcart-app-errors` | which alarm |
+| `--state-value ALARM` | the state to put it in |
+| `--state-reason "Testing the notification path"` | a note that shows in the alarm's history, so others know it was a test |
+
+It prints nothing when it works.
+
+<See>
+
+Within a minute, an email with the subject `ALARM: "quickcart-app-errors" in US East (N. Virginia)`. In the console the alarm shows **In alarm**, then goes back to **OK** at its next evaluation, about a minute later, because the metric itself is fine.
+
+</See>
+
+<Mistake title="the alarm name doesn't match">
+
+```output title="The CLI prints"
+An error occurred (ResourceNotFound) when calling the SetAlarmState operation: Alarm quickcart-app-error not found
+```
+
+**Why:** alarm names must match exactly — here an `s` is missing. It also happens if the CLI is pointed at a different region from the alarm.
+
+**The fix:** copy the name from the alarm list, and keep `--region us-east-1`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Make it fire for real">
+
+Now make the metric itself cross the threshold: eight error lines in one minute is more than 5. Run `date +%s` again for a fresh time — the alarm only looks at the last minute or so, so the timestamp must be now. Create `errors.json` with your new number:
+
+```json title="errors.json" ph="1790350000000"
+[
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0bb22\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0bb22\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0bb22\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0aa11\"}"},
+  {"timestamp": 1790350000000, "message": "{\"level\":\"ERROR\",\"route\":\"/orders\",\"status\":500,\"latency_ms\":3004,\"error_type\":\"OperationalError\",\"instance_id\":\"i-0bb22\"}"}
+]
+```
+
+Send it straight away:
+
+```sh
+aws logs put-log-events --region us-east-1 --log-group-name /quickcart/orders --log-stream-name lab-1 --log-events file://errors.json
+```
+
+| Part | What it means |
+|---|---|
+| `aws logs put-log-events` | send log events to CloudWatch Logs |
+| `--region us-east-1` | the region the log group is in |
+| `--log-group-name /quickcart/orders` | which log group |
+| `--log-stream-name lab-1` | which stream |
+| `--log-events file://errors.json` | read the eight error lines from this file |
+
+<See>
+
+Within about two or three minutes, the alarm goes to **In alarm** and a second email arrives. This time the email's reason names the real datapoint — something like `Threshold Crossed: 1 out of the last 1 datapoints [8.0 (25/09/26 15:26:00)] was greater than the threshold (5.0)`, with your own time. A few minutes later, with no more errors, the alarm returns to **OK**.
+
+</See>
+
+If nothing happens after five minutes, the timestamp was probably too old by the time you sent it. Run `date +%s`, update the file and send it again.
+
+</Step>
+
+<Step title="Read the alarm's history">
+
+<ConsolePath path="CloudWatch > Alarms > All alarms > quickcart-app-errors > History" />
+
+<See>
+
+Each state change with its time and reason: the forced one says `Testing the notification path`; the real one names the datapoint that crossed the threshold. Each **Action** row shows the notification being sent to `quickcart-alerts`. This history is your evidence the alarm works.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Delete the alarm:
+
+<ConsolePath path="CloudWatch > Alarms > All alarms > quickcart-app-errors > Actions > Delete" />
+
+Delete the topic, which removes its subscription too:
+
+<ConsolePath path="Simple Notification Service > Topics > quickcart-alerts > Delete" />
+
+Type `delete me` when asked, and choose **Delete**. Then delete the log group:
+
+<ConsolePath path="CloudWatch > Log groups > /quickcart/orders > Actions > Delete log group(s)" />
+
+<See>
+
+No alarms, no `quickcart-alerts` topic and no `/quickcart/orders` log group left. The subscription may linger for a short time in the list as it's removed.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term or setting | In one line |
+|---|---|
+| `OK` / `ALARM` / `INSUFFICIENT_DATA` | Fine / crossed the threshold long enough / can't tell |
+| Threshold | Where "fine" ends. Write down why you chose it |
+| M out of N | M bad datapoints in the last N periods fires it |
+| Flapping | Switching between OK and ALARM. Needs more datapoints or a better threshold |
+| Missing data: good | Error counts. No data means no errors |
+| Missing data: bad | Heartbeats. Silence means something died |
+| SNS topic | Where alarms send notifications. Subscriptions deliver them |
+| Pending confirmation | Nothing is delivered until the email link is clicked |
+| `set-alarm-state --state-value ALARM` | Tests the notification path. CLI only |
+| Real trigger | The only proof it fires in an incident |
+| Composite alarm | Several alarms, one rule, one notification |
+| Alarm fatigue | Every alarm must mean "do something now" |
+
+</Cheat>
+
+</Part>

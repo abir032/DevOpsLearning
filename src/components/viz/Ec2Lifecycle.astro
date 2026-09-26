@@ -1,0 +1,219 @@
+---
+/*
+ * EC2: what survives reboot, stop and terminate.
+ * Teaches: only what comes from the AMI and user data survives replacement.
+ * A fix typed by hand lives on one disk, and dies with it.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="ec2-life">
+  <div class="viz-controls">
+    <button class="btn line" type="button" data-act="launch">Launch from the AMI</button>
+    <button class="btn" type="button" data-act="hand" disabled>Fix something by hand</button>
+    <button class="btn" type="button" data-act="reboot" disabled>Reboot</button>
+    <button class="btn" type="button" data-act="stop" disabled>Stop</button>
+    <button class="btn" type="button" data-act="start" disabled>Start</button>
+    <button class="btn" type="button" data-act="terminate" disabled>Terminate</button>
+  </div>
+  <div class="viz-stage el-stage">
+    <div class="el-grid">
+      <section class="el-card" aria-label="The instance">
+        <h3 class="el-h">The instance</h3>
+        <dl class="el-dl">
+          <dt>State</dt><dd><span class="el-pill" data-n="state">not launched</span></dd>
+          <dt>Instance ID</dt><dd data-n="id">none</dd>
+          <dt>Public IP</dt><dd data-n="ip">none</dd>
+          <dt>Compute bill</dt><dd data-n="bill">nothing</dd>
+          <dt>Disk bill</dt><dd data-n="dbill">nothing</dd>
+        </dl>
+      </section>
+      <section class="el-card" aria-label="The root disk">
+        <h3 class="el-h">Its disk</h3>
+        <ul class="el-disk" data-n="disk"><li class="el-empty">No disk yet</li></ul>
+      </section>
+      <section class="el-card el-logcard" aria-label="What happened">
+        <h3 class="el-h">What happened</h3>
+        <ol class="el-log" data-n="log"><li class="el-empty">Nothing yet</li></ol>
+      </section>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Choose <b>Launch from the AMI</b> to start a server.</div>
+</div>
+
+<style is:global>
+  [data-viz="ec2-life"] .el-stage { padding: 14px 16px; }
+  [data-viz="ec2-life"] .el-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.1fr); gap: 12px; }
+  [data-viz="ec2-life"] .el-card { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+  [data-viz="ec2-life"] .el-h { margin: 0 0 8px; font-size: 15px; font-weight: 800; }
+  [data-viz="ec2-life"] .el-dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin: 0; font-size: 13.5px; }
+  [data-viz="ec2-life"] .el-dl dt { color: var(--ink-3); font-weight: 700; }
+  [data-viz="ec2-life"] .el-dl dd { margin: 0; overflow-wrap: anywhere; }
+  [data-viz="ec2-life"] .el-dl dd.chg { color: var(--warn); font-weight: 700; }
+  [data-viz="ec2-life"] .el-pill { display: inline-block; font-size: 12.5px; font-weight: 700; padding: 1px 9px; border-radius: 999px; background: var(--sunk); color: var(--ink-2); }
+  [data-viz="ec2-life"] .el-pill.running { background: var(--ok-bg); color: var(--ok); }
+  [data-viz="ec2-life"] .el-pill.stopped, [data-viz="ec2-life"] .el-pill.busy { background: var(--warn-bg); color: var(--warn); }
+  [data-viz="ec2-life"] .el-pill.terminated { background: var(--bad-bg); color: var(--bad); }
+  [data-viz="ec2-life"] .el-disk, [data-viz="ec2-life"] .el-log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+  [data-viz="ec2-life"] .el-disk li { border: 1px solid var(--rule); border-left: 4px solid var(--line); border-radius: 7px; padding: 6px 9px; background: var(--surface); }
+  [data-viz="ec2-life"] .el-disk li small { display: block; color: var(--ink-3); font-size: 12px; }
+  [data-viz="ec2-life"] .el-disk li.hand { border-left-color: var(--warn); }
+  [data-viz="ec2-life"] .el-disk li.gone { border-left-color: var(--bad); background: var(--bad-bg); text-decoration: line-through; }
+  [data-viz="ec2-life"] .el-disk li.gone small { text-decoration: none; }
+  [data-viz="ec2-life"] .el-log { counter-reset: el; }
+  [data-viz="ec2-life"] .el-log li { color: var(--ink-2); }
+  [data-viz="ec2-life"] .el-log li:last-child { color: var(--ink); font-weight: 700; }
+  [data-viz="ec2-life"] .el-empty { color: var(--ink-3); font-style: italic; border: 0 !important; background: none !important; padding: 2px 0 !important; }
+  @media (max-width: 760px) {
+    [data-viz="ec2-life"] .el-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { beat, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type St = "none" | "pending" | "running" | "stopping" | "stopped" | "terminated";
+  interface Layer { t: string; from: string; kind: "ami" | "ud" | "hand"; gone?: boolean }
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="ec2-life"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const btn = (a: string) => root.querySelector<HTMLButtonElement>(`[data-act="${a}"]`)!;
+      let st: St = "none";
+      let id = "none";
+      let ip = "none";
+      let disk: Layer[] = [];
+      const log: string[] = [];
+      let launches = 0;
+      let busy = false;
+      let run = 0;
+      let changed: string[] = [];
+
+      const hex = () => Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
+      const newId = () => "i-0" + hex();
+      const newIp = () => "203.0.113." + (10 + Math.floor(Math.random() * 230));
+
+      function render() {
+        const pill = q<HTMLElement>("state");
+        const label = { none: "not launched", pending: "pending", running: "running", stopping: "stopping", stopped: "stopped", terminated: "terminated" }[st];
+        pill.textContent = label;
+        pill.className = "el-pill " + (st === "pending" || st === "stopping" ? "busy" : st);
+        const set = (n: string, v: string) => {
+          const el = q<HTMLElement>(n);
+          el.textContent = v;
+          el.classList.toggle("chg", changed.includes(n));
+        };
+        set("id", id);
+        set("ip", ip);
+        set("bill", st === "running" || st === "pending" ? "per second, while running" : "nothing");
+        set("dbill", disk.some((l) => !l.gone) ? "yes, per GB each month" : "nothing");
+        const d = q<HTMLElement>("disk");
+        d.innerHTML = disk.length
+          ? disk.map((l) => `<li class="${l.kind}${l.gone ? " gone" : ""}">${l.t}<small>${l.gone ? "deleted with the instance" : l.from}</small></li>`).join("")
+          : '<li class="el-empty">No disk yet</li>';
+        const lg = q<HTMLElement>("log");
+        lg.innerHTML = log.length ? log.slice(-5).map((x) => `<li>${x}</li>`).join("") : '<li class="el-empty">Nothing yet</li>';
+        const alive = st === "running";
+        btn("launch").disabled = busy || !(st === "none" || st === "terminated");
+        btn("hand").disabled = busy || !alive || disk.some((l) => l.kind === "hand" && !l.gone);
+        btn("reboot").disabled = busy || !alive;
+        btn("stop").disabled = busy || !alive;
+        btn("start").disabled = busy || st !== "stopped";
+        btn("terminate").disabled = busy || !(alive || st === "stopped");
+      }
+
+      async function transit(mid: St, end: St, ms = 700) {
+        const me = ++run;
+        busy = true; st = mid; render();
+        await beat(ms);
+        if (me !== run) return false;
+        busy = false; st = end;
+        return true;
+      }
+
+      async function launch() {
+        const again = launches > 0;
+        changed = [];
+        tell(say, "Launching", "AWS copies the <b>AMI</b> onto a fresh disk and boots it on a <code>t3.micro</code>.");
+        id = newId(); ip = newIp();
+        disk = [{ t: "Amazon Linux 2023", from: "from the AMI", kind: "ami" }];
+        if (!(await transit("pending", "pending", 600))) return;
+        disk.push({ t: "nginx and the QuickCart page", from: "from user data, on first boot", kind: "ud" });
+        if (!(await transit("pending", "running", 600))) return;
+        launches++;
+        changed = again ? ["id", "ip"] : [];
+        log.push(again ? "Launched a replacement" : "Launched");
+        render();
+        if (again) {
+          tell(say, "A replacement is running", "A brand-new instance with a <b>new ID and a new IP</b>. It has everything from the AMI and the user data. <b>Your hand-made fix is not here.</b> Nobody wrote it down, so nothing could put it back.", "bad");
+        } else {
+          tell(say, "Running", "The instance booted from the AMI, then ran its <b>user data</b> script once, which installed nginx. Now try <b>Fix something by hand</b>.", "good");
+        }
+      }
+
+      function hand() {
+        changed = [];
+        disk.push({ t: "A config fix", from: "typed by hand in a session", kind: "hand" });
+        log.push("Changed a file by hand");
+        render();
+        tell(say, "Fixed by hand", "You connected with Session Manager and edited a file. It works. But the fix lives <b>only on this disk</b>. The AMI and the user data know nothing about it.");
+      }
+
+      async function reboot() {
+        changed = [];
+        tell(say, "Rebooting", "The operating system restarts on the same machine.");
+        if (!(await transit("stopping", "running", 700))) return;
+        log.push("Rebooted");
+        render();
+        tell(say, "Rebooted", "Same ID, same IP, same disk. Your fix survived. <b>User data did not run again</b>: by default it runs only on the first boot.", "good");
+      }
+
+      async function stop() {
+        changed = [];
+        tell(say, "Stopping", "The instance shuts down.");
+        if (!(await transit("stopping", "stopped", 700))) return;
+        ip = "none"; changed = ["ip"];
+        log.push("Stopped");
+        render();
+        tell(say, "Stopped", "You stop paying for compute, but <b>the disk is kept and still billed</b>. The public IP has been given back to AWS. Now <b>Start</b> it again.");
+      }
+
+      async function start() {
+        changed = [];
+        tell(say, "Starting", "AWS finds room on a host and boots the same disk.");
+        if (!(await transit("pending", "running", 700))) return;
+        ip = newIp(); changed = ["ip"];
+        log.push("Started again");
+        render();
+        tell(say, "Running again", "Same ID and same disk, so your fix is still there. But the <b>public IP is different</b>. Anything that saved the old address is now pointing at nothing.");
+      }
+
+      async function terminate() {
+        changed = [];
+        tell(say, "Terminating", "The instance is being deleted.");
+        if (!(await transit("stopping", "terminated", 700))) return;
+        disk = disk.map((l) => ({ ...l, gone: true }));
+        ip = "none"; changed = ["ip"];
+        log.push("Terminated");
+        render();
+        tell(say, "Terminated", "The instance is gone for good, and its root disk was <b>deleted with it</b>. Everything on it went too, including your fix. Now <b>Launch from the AMI</b> again, as auto scaling would.", "bad");
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-act]");
+        if (!b || b.disabled) return;
+        const a = b.dataset.act;
+        if (a === "launch") launch();
+        else if (a === "hand") hand();
+        else if (a === "reboot") reboot();
+        else if (a === "stop") stop();
+        else if (a === "start") start();
+        else if (a === "terminate") terminate();
+      });
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

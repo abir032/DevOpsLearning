@@ -1,0 +1,598 @@
+---
+time: 35 minutes
+level: Beginner
+before: [dockerfile]
+cost: pennies
+quiz:
+  - q: QuickCart's servers run on AWS. Why can't they just use the image that was built on Maya's laptop?
+    answer: 2
+    options:
+      - t: Images built on a laptop are too big for AWS
+        why: Size has nothing to do with where it was built. The same Dockerfile makes the same size of image anywhere.
+      - t: AWS only runs images built by AWS
+        why: AWS runs any image it can download. That's exactly the problem — it can't download one that only exists on a laptop.
+      - t: The image only exists on the laptop. The servers need to download it from somewhere they can reach, like ECR
+        why: An image is a file on one machine until it's pushed to a registry. ECR is a registry inside your AWS account that ECS and EKS can pull from.
+      - t: Laptop images don't have a tag
+        why: They do. Tags are added when you build or with docker tag, on any machine.
+  - q: In an immutable repository, Leo pushes a fix with the tag v1, which already exists. What happens?
+    answer: 1
+    options:
+      - t: v1 now points at the fix
+        why: That's what a mutable repository would do, silently. Preventing it is the whole point of immutable tags.
+      - t: The push is refused, and Leo must use a new tag such as v2
+        why: ECR answers "tag invalid … cannot be overwritten because the repository is immutable". v1 keeps meaning exactly one build, forever.
+      - t: ECR keeps both, and v1 means whichever is newer
+        why: A tag points at exactly one image. There is no "newest of two" rule.
+      - t: The old v1 is deleted
+        why: Nothing is deleted. The push fails and the repository doesn't change.
+  - q: Why does the ECR login command use a pipe, with --password-stdin?
+    answer: 0
+    options:
+      - t: So the password goes straight from AWS into Docker, and never appears in your command history or on screen
+        why: The pipe passes the output of the first command as the input of the second. --password-stdin tells docker login to read it from there instead of from a flag you'd type.
+      - t: Because ECR passwords are too long to type
+        why: They are long, but that isn't the reason. You could paste it. The reason is keeping it out of history and the process list.
+      - t: So the login lasts forever
+        why: It doesn't. The token lasts 12 hours, however you pass it.
+      - t: Docker can't log in to AWS any other way
+        why: It could take --password on the command line, but that leaves the secret where others can read it. Docker itself warns you not to.
+  - q: What is the difference between a tag and a digest?
+    answer: 3
+    options:
+      - t: There is none — they are two names for the same thing
+        why: A tag is a label someone chose. A digest is calculated from the image's contents. Only one of them can move.
+      - t: A tag is longer and more precise
+        why: The other way round. The digest is the long sha256 string, and it identifies one exact image.
+      - t: Digests are only used on Docker Hub
+        why: Every registry, including ECR, identifies images by digest.
+      - t: A tag is a label that could be moved to another image; a digest is a fingerprint of the contents and can never change
+        why: If even one byte of the image changes, the digest changes. Pulling by digest always gives exactly the same image.
+  - q: The repository keeps every image ever pushed. What stops it growing forever?
+    answer: 1
+    options:
+      - t: ECR deletes old images automatically after 30 days
+        why: It doesn't. Without a rule, ECR keeps every image and bills you for its storage.
+      - t: A lifecycle policy, with rules like "keep the newest 20 version tags" and "expire untagged images after 7 days"
+        why: Lifecycle rules run automatically and expire images that match. Keep enough history to roll back to.
+      - t: Scan on push
+        why: Scanning looks for known security problems. It never deletes anything.
+      - t: Making tags immutable
+        why: Immutable tags stop overwrites. They don't remove anything.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first release on AWS">
+
+Maya has QuickCart's order service working in a container on her laptop. The servers on AWS need the same image. But it only exists on her laptop.
+
+The team puts it on a public image site under `quickcart/order-service:v1`. A week later, Leo fixes a bug. He builds, tags the fix `v1` again, and pushes. Nobody notices that `v1` now means different code.
+
+Then the fix turns out to have a bug of its own. Priya rolls back to `v1`, the version everyone knows was good. **The bug stays.** `v1` is the fix now. The good build is still in the registry, but nobody knows how to ask for it.
+
+</Story>
+
+<Case title="This really happened">
+
+In 2018, security researchers reported a group of images on Docker Hub, all published by one account, that contained hidden cryptocurrency miners. They looked like ordinary, useful images. They had been pulled millions of times before they were taken down.
+
+Anyone who runs an image runs whatever is inside it. That's why teams keep their own images in a private registry they control, and check what they pull.
+
+</Case>
+
+So QuickCart needs a place for images that:
+
+- only QuickCart can push to, and AWS can pull from;
+- never lets `v1` quietly change meaning;
+- checks each image for known security problems.
+
+That place is **ECR**.
+
+</Part>
+
+<Part id="idea">
+
+A **registry** is a server that stores images, so that any machine allowed to reach it can download them. **ECR**, Elastic Container Registry, is AWS's registry. It lives inside your AWS account, it's private by default, and ECS and EKS can pull from it without any extra setup.
+
+### The words
+
+| Word | What it is | Example |
+|---|---|---|
+| Registry | The whole store. In ECR, you get one per account per region | `111122223333.dkr.ecr.us-east-1.amazonaws.com` |
+| Repository | One app's images, inside the registry | `quickcart-orders` |
+| Tag | A label on one image in a repository | `v1` |
+| Digest | A fingerprint worked out from the image's contents | `sha256:7c4e9a1f…` (64 characters long) |
+| Image URI | The full name you give Docker or ECS | `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1` |
+
+The image URI is just the registry, the repository and the tag joined together. Docker reads the part before the first `/` to know **which server** to talk to. That's why a local image called `order-service:v1` has to be given its full ECR name before you can push it.
+
+### Tags move. Digests don't.
+
+A **tag** is a name a person chose. In an ordinary registry, you can push a different image with the same tag, and the tag simply moves to it. The old image loses its name.
+
+A **digest** is calculated from the image's bytes. Change one byte and the digest changes. So a digest always means exactly one image.
+
+| You ask for | You get |
+|---|---|
+| `quickcart-orders:v1` | whatever `v1` points to **right now** |
+| `quickcart-orders@sha256:7c4e9a1f…` | exactly that image, forever |
+| `quickcart-orders:latest` | whatever was last pushed with the tag `latest` — not necessarily the newest build. Avoid it |
+
+### Immutable tags
+
+ECR can make a repository's tags **immutable**. Once `v1` exists, ECR refuses any push that would move it. Every tag then means one build forever, and a rollback to `v1` is always exact.
+
+<YouKnow title="You already know this: build numbers in the app stores">
+
+App Store Connect and Google Play won't accept a second upload with a build number they've already seen. You have to bump it. That's annoying for about a day, and then it's the reason you can always say exactly which build a tester had.
+
+An immutable ECR repository does the same with tags. Want to ship a fix? It's `v2`.
+
+</YouKnow>
+
+<Key>Make tags immutable, so every version name means exactly one build, forever.</Key>
+
+### Scanning
+
+ECR can scan each image for **known vulnerabilities** — published security problems in the software inside it, such as an old version of a system library.
+
+| Setting | What it checks | Cost |
+|---|---|---|
+| **Basic scanning** | The operating system packages in the image, when it's pushed | Free |
+| **Enhanced scanning** | Also your language libraries (like Flask), again whenever new problems are published | Paid, through Amazon Inspector |
+
+**Scan on push** means each image is scanned as soon as it arrives. Results are grouped by severity: Critical, High, Medium, Low and Informational. A scan doesn't block anything by itself. It tells you, and your pipeline decides what to do about it — the [continuous integration lesson](/lessons/continuous-integration/) does that.
+
+### Lifecycle policies
+
+ECR keeps every image you push, and storage is billed per GB. A **lifecycle policy** is a set of rules that expire old images automatically. QuickCart uses two:
+
+| Rule | Why |
+|---|---|
+| Expire untagged images 7 days after they were pushed | Nothing refers to them by name, and they pile up quietly |
+| Keep only the newest 20 images whose tag starts with `v` | Enough history to roll back, without keeping every build forever |
+
+### Logging in is different
+
+Docker needs a username and password for a private registry. ECR doesn't use a fixed password. Instead, the AWS CLI asks AWS for a **temporary password that lasts 12 hours**, using the login you already have in your terminal. You hand that password to Docker, and Docker remembers it until it expires.
+
+The console has no way to push an image, so logging in and pushing are the parts of this lesson that happen in the terminal.
+
+</Part>
+
+<Part id="see">
+
+Follow the tag `v1` through five steps: push a build, deploy it, push a fix with the same tag, lose a task, then roll back. Play it with **Mutable** tags first, then again with **Immutable**.
+
+<TagTimeline />
+
+**What to notice:** with mutable tags, nothing failed and nothing warned. Every push, every task start and the rollback all "worked". The only sign of trouble was two tasks running different code under one name — and nobody was looking at digests.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">ECR storage is about $0.10 per GB each month in us-east-1, and this image is under 100 MB. Basic scanning is free. Prices change, so check the ECR pricing page if you want the exact number.</Cost>
+
+You'll create a private repository with immutable tags, push QuickCart's order service to it, watch ECR refuse an overwrite, and add a lifecycle policy. About 25 minutes.
+
+You need Docker Desktop running, the AWS CLI with a working login ([Set up your Mac](/lessons/mac-setup/)), and the `order-service` folder from [Writing a Dockerfile](/lessons/dockerfile/): `app.py`, `requirements.txt` and `Dockerfile`.
+
+Open a terminal in that folder:
+
+```sh
+cd order-service
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory — every command below runs in here |
+| `order-service` | the folder with the app and its Dockerfile |
+
+<Steps>
+
+<Step title="Create the repository">
+
+Check the region selector at the top right of the console says **N. Virginia (us-east-1)**.
+
+<ConsolePath path="Amazon ECR > Private registry > Repositories > Create repository" />
+
+| Field | Enter |
+|---|---|
+| Repository name | `quickcart-orders` |
+| Image tag mutability | **Immutable** |
+| Encryption configuration | **AES-256** — the default |
+
+If the page has an **Image scan settings** section, turn **Scan on push** on. Then choose **Create**.
+
+Newer versions of the console set scanning for the whole registry instead. If there's no scan setting on this page, go to <ConsolePath path="Amazon ECR > Private registry > Settings > Scanning" /> and choose **Basic scanning**, with a **scan on push** filter of `*`, so every repository is scanned when an image arrives.
+
+<See>
+
+`quickcart-orders` in the list, with **Tag immutability: Immutable**. The **URI** column shows `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders`, with your own account ID at the start. Copy it — you'll use it in every command below.
+
+</See>
+
+</Step>
+
+<Step title="Log Docker in to ECR">
+
+This is the one step in the lesson with a pipe. It can't be done in the console. Replace `111122223333` with **your** account ID — it's the number at the start of the URI you just copied.
+
+```sh ph="111122223333"
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `aws ecr get-login-password` | ask AWS for a temporary ECR password, using your terminal's AWS login. It prints the password and nothing else |
+| `--region us-east-1` | for the registry in this region. Each region has its own registry |
+| `\|` | a **pipe**: instead of printing the password on screen, pass it straight in as the input of the next command |
+| `docker login` | log Docker in to a registry and remember the password |
+| `--username AWS` | ECR's username is always the word `AWS` |
+| `--password-stdin` | read the password from the pipe. So it never appears on screen, in your command history, or in the list of running processes, where `--password` would put it |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | the registry to log in to: your account ID, `dkr.ecr`, then the region |
+
+```output
+Login Succeeded
+```
+
+The login lasts **12 hours**. After that, run this command again. Docker may also print a warning about where it stores the password; that's normal.
+
+<Mistake title="pushing without logging in, or after 12 hours">
+
+```output title="docker push stops with one of these"
+no basic auth credentials
+```
+
+```output
+Your authorization token has expired. Reauthenticate and try again.
+```
+
+**Why:** the first means Docker has no password for this registry at all. The second means the 12 hours are up.
+
+**The fix:** run the login command above again, then push again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Build the image for AWS">
+
+```sh
+docker build --platform linux/amd64 --provenance=false -t order-service:v1 .
+```
+
+| Part | What it means |
+|---|---|
+| `docker build` | build an image from the Dockerfile in this folder |
+| `--platform linux/amd64` | build for Intel and AMD processors, which is what this course's Fargate tasks use. A Mac with an Apple chip would otherwise build for ARM |
+| `--provenance=false` | don't attach a build record to the image. Without this, Docker Desktop pushes an **image index** — a list holding your image plus a record — and ECR shows it as extra untagged rows |
+| `-t order-service:v1` | name the image `order-service`, tag `v1` |
+| `.` | use the files in this folder |
+
+```output title="The last lines look like"
+ => exporting to image
+ => => naming to docker.io/library/order-service:v1
+```
+
+The exact lines vary with your Docker version. The name at the end is what matters.
+
+<Note title="The warning you may see later on a Mac">
+
+If you run this image on an Apple-chip Mac, Docker warns that its platform doesn't match your machine. That's correct — you built it for AWS. Docker can still run it, more slowly, by translating it.
+
+</Note>
+
+</Step>
+
+<Step title="Give it its ECR name">
+
+Docker pushes an image to whatever server is named at the start of the image's name. So give it a second name that starts with your registry:
+
+```sh ph="111122223333"
+docker tag order-service:v1 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give an existing image another name. Nothing is copied |
+| `order-service:v1` | the image you just built |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | your registry: where it will be pushed |
+| `/quickcart-orders` | the repository inside it |
+| `:v1` | the tag |
+
+It prints nothing when it works.
+
+</Step>
+
+<Step title="Push it">
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload an image to the registry named at the start of its name |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | the registry to upload to, read from the start of the name |
+| `/quickcart-orders:v1` | the repository and tag inside it |
+
+```output title="You should see lines like these"
+The push refers to repository [111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders]
+5f70bf18a086: Pushed
+e3c9b0a7d41f: Pushed
+v1: digest: sha256:7c4e9a1fb03d6e2a8f5c1b9d0e7a3f6c2b8d4e1a9f0c7b3e6d2a5f8c1e4b7d0a size: 1994
+```
+
+There's one `Pushed` line per layer, and your IDs, digest and size will differ. The last line is the one to keep: that **digest** is the image's fingerprint.
+
+<Mistake title="the repository name doesn't match">
+
+```output title="The push fails with"
+name unknown: The repository with name 'quickcart-order' does not exist in the registry with id '111122223333'
+```
+
+**Why:** ECR doesn't create repositories when you push. The name in your tag must match a repository that already exists — here, `quickcart-order` is missing its `s`.
+
+**The fix:** tag the image again with the exact repository name from the console, and push that name.
+
+</Mistake>
+
+</Step>
+
+<Step title="Look at the image and its scan">
+
+<ConsolePath path="Amazon ECR > Private registry > Repositories > quickcart-orders" />
+
+<See>
+
+One row: tag **v1**, artifact type **Image**, a push time, a size of around 50 MB, and the same digest that `docker push` printed. After a minute, the vulnerability column fills in. Choose the digest or the tag to see the findings, grouped by severity.
+
+</See>
+
+A slim base image usually has a few Low or Medium findings and ideally no Critical ones. Findings in the base image are fixed by rebuilding on a newer base image, not by changing your code.
+
+</Step>
+
+<Step title="Try to overwrite v1">
+
+Leo's quick fix: the same app, built again with a different version label.
+
+```sh
+docker build --platform linux/amd64 --provenance=false --build-arg APP_VERSION=v1-fix -t order-service:v1-fix .
+```
+
+| Part | What it means |
+|---|---|
+| `docker build` | build the image again |
+| `--platform linux/amd64` | for AWS's processors, as before |
+| `--provenance=false` | one plain image, as before |
+| `--build-arg APP_VERSION=v1-fix` | stamp it with a different version, so it's a different image with a different digest |
+| `-t order-service:v1-fix` | its local name |
+| `.` | this folder |
+
+Now give it the name `v1` in ECR — the mistake from the story:
+
+```sh ph="111122223333"
+docker tag order-service:v1-fix 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give an image another name |
+| `order-service:v1-fix` | the new build |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | your registry |
+| `/quickcart-orders:v1` | the tag that already exists in ECR |
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | try to upload it as `v1` |
+
+```output title="ECR refuses"
+tag invalid: The image tag 'v1' already exists in the 'quickcart-orders' repository and cannot be overwritten because the repository is immutable.
+```
+
+**That refusal is the point.** On a mutable repository this push would have worked, silently.
+
+</Step>
+
+<Step title="Push the fix properly, as v2">
+
+```sh ph="111122223333"
+docker tag order-service:v1-fix 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give the fix a new, unused tag |
+| `quickcart-orders:v2` | the next version |
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload it as `v2` |
+
+```output title="Most layers are already there"
+The push refers to repository [111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders]
+5f70bf18a086: Layer already exists
+```
+
+Only the layers that changed are uploaded. The repository now shows two tags, `v1` and `v2`, with two different digests.
+
+</Step>
+
+<Step title="Pull by digest">
+
+In the console, copy the full digest of `v1` — it starts with `sha256:`. Then ask for the image by that fingerprint instead of by its tag:
+
+```sh ph="111122223333,DIGEST"
+docker pull 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders@DIGEST
+```
+
+| Part | What it means |
+|---|---|
+| `docker pull` | download an image |
+| `quickcart-orders` | from this repository |
+| `@` | followed by a digest, instead of `:` followed by a tag |
+| `DIGEST` | replace this with the digest you copied, including `sha256:` |
+
+<See>
+
+Docker reports the digest and that the image is downloaded or already up to date. Whatever happens to any tag in future, this exact address always gives this exact image.
+
+</See>
+
+</Step>
+
+<Step title="Add a lifecycle policy">
+
+<ConsolePath path="Amazon ECR > Private registry > Repositories > quickcart-orders > Lifecycle policy > Create rule" />
+
+Create the first rule:
+
+| Field | Enter |
+|---|---|
+| Rule priority | `1` |
+| Rule description | `Expire untagged images after 7 days` |
+| Image status | **Untagged** |
+| Match criteria | **Since image pushed** |
+| Count number | `7`, unit **days** |
+
+Save it, choose **Create rule** again, and create the second:
+
+| Field | Enter |
+|---|---|
+| Rule priority | `2` |
+| Rule description | `Keep the newest 20 version tags` |
+| Image status | **Tagged (prefix matching)** |
+| Tag prefixes | `v` |
+| Match criteria | **Image count more than** |
+| Count number | `20` |
+
+Save it. Behind the form, ECR stores the rules as JSON. You can see it on the repository's lifecycle policy page, and this is what you would write in Terraform later:
+
+```json title="lifecycle-policy.json"
+{
+  "rules": [
+    {
+      "rulePriority": 1,
+      "description": "Expire untagged images after 7 days",
+      "selection": {
+        "tagStatus": "untagged",
+        "countType": "sinceImagePushed",
+        "countUnit": "days",
+        "countNumber": 7
+      },
+      "action": { "type": "expire" }
+    },
+    {
+      "rulePriority": 2,
+      "description": "Keep the newest 20 version tags",
+      "selection": {
+        "tagStatus": "tagged",
+        "tagPrefixList": ["v"],
+        "countType": "imageCountMoreThan",
+        "countNumber": 20
+      },
+      "action": { "type": "expire" }
+    }
+  ]
+}
+```
+
+| Setting | What it does |
+|---|---|
+| `rulePriority` | the order rules are checked in. Lower numbers first, and each must be different |
+| `description` | a note for people. ECR ignores it |
+| `tagStatus` | which images the rule looks at: `untagged`, `tagged` (then give prefixes or patterns) or `any` |
+| `tagPrefixList` | with `tagged`: only images with a tag starting with one of these |
+| `countType` | `sinceImagePushed` means "older than"; `imageCountMoreThan` means "more than this many" |
+| `countUnit` and `countNumber` | how many days, or how many images |
+| `action` | what to do with matching images. `expire` is the only choice, and it deletes them |
+
+<See>
+
+Two rules on the lifecycle policy page. Nothing is deleted yet: you have only two images, both tagged and both new. ECR applies the rules on its own schedule, usually within a day.
+
+</See>
+
+<Mistake title="a rule that deletes the image you are running">
+
+A rule like "keep only the 3 newest images" feels tidy. Then a busy week pushes 3 builds, and the version in production is expired. The running tasks keep going, but the next time one is replaced, it fails to pull its image.
+
+**The fix:** keep generous history — enough to cover every version you might run or roll back to — and use the console's **Test rules** option to preview what a policy would expire before you save it.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+**If you're going on to [ECS on Fargate](/lessons/ecs-fargate/)**, keep the repository and the `v1` image. The next lesson runs them, and its clean-up deletes the repository. It costs pennies in the meantime.
+
+Otherwise, delete the repository and every image in it:
+
+<ConsolePath path="Amazon ECR > Private registry > Repositories > tick quickcart-orders > Delete" />
+
+Type `delete` to confirm, and choose **Delete**.
+
+Then remove the local copies from your Mac. Each name you gave an image is removed separately:
+
+```sh ph="111122223333"
+docker image rm order-service:v1 order-service:v1-fix 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker image rm` | remove images from this machine. It doesn't touch ECR |
+| `order-service:v1` and `order-service:v1-fix` | the two local names |
+| the two `quickcart-orders` names | the ECR names you added with `docker tag` |
+
+<See>
+
+One `Untagged:` line per name, then `Deleted:` lines once the last name for an image is gone. The repository is gone from the ECR console.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command or setting | What it does |
+|---|---|
+| `aws ecr get-login-password --region us-east-1 \| docker login --username AWS --password-stdin REGISTRY` | Log Docker in to ECR for 12 hours |
+| Registry address | `ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com` |
+| `docker build --platform linux/amd64 --provenance=false -t name:v1 .` | Build one plain image for AWS's processors |
+| `docker tag name:v1 REGISTRY/repo:v1` | Give the image its ECR name |
+| `docker push REGISTRY/repo:v1` | Upload it |
+| `repo@sha256:…` | Pull one exact image by its digest |
+| Immutable tags | A tag can never be moved to another image |
+| Scan on push | Check every image for known vulnerabilities when it arrives |
+| Lifecycle policy | Expire old or untagged images automatically |
+| `no basic auth credentials` | Not logged in. Run the login again |
+| `name unknown` | The repository doesn't exist, or the name is misspelled |
+
+</Cheat>
+
+</Part>

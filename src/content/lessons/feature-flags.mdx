@@ -1,0 +1,537 @@
+---
+time: 35 minutes
+level: Beginner
+before: [release-strategies]
+cost: free
+quiz:
+  - q: What does a feature flag separate?
+    answer: 1
+    options:
+      - t: Frontend code from backend code
+        why: Flags can live on either side. That's not what they separate.
+      - t: Deploying code from releasing the feature to users
+        why: Right. The code goes out switched off with a normal deploy. Later, changing the flag, not deploying, decides who sees it.
+      - t: Test environments from production
+        why: Environments are separated by where things run, not by flags.
+      - t: Old users from new users
+        why: A flag can target any group, but its purpose is to separate deploy from release.
+  - q: The new checkout is at 10% and customer 9 has it. You raise the rollout to 50%. Does customer 9 still have it?
+    answer: 3
+    options:
+      - t: Maybe, because each request picks randomly
+        why: Random picking would make the feature flicker on and off for the same person. Good flag systems avoid that.
+      - t: No, because a new 50% of customers is chosen
+        why: A new random group each time would take the feature away from people who already had it.
+      - t: Only if they reinstall the app
+        why: The decision is made on the server from their ID. Reinstalling changes nothing.
+      - t: Yes. Each customer's ID always maps to the same bucket, so raising the percentage only adds people
+        why: Right. Customer 9 is in bucket 6, which is under 10 and under 50. Nobody who had the feature loses it as the rollout grows.
+  - q: The new checkout starts failing at 3am. What's the fastest safe fix, if it's behind a flag?
+    answer: 0
+    options:
+      - t: Turn the flag off, the kill switch, then investigate
+        why: Right. Everyone goes back to the old checkout on the next request, with no build, deploy or app store review.
+      - t: Roll back the deploy
+        why: That works for server code, but it's slower, and it removes every other change in that deploy too.
+      - t: Submit a new app version with the feature removed
+        why: App store review can take days. Customers see errors the whole time.
+      - t: Raise the rollout to 100% so the bug is easier to see
+        why: That would spread the errors to every customer.
+  - q: What is flag debt?
+    answer: 2
+    options:
+      - t: The money a flag service costs each month
+        why: Some services cost money, but that's not what the term means.
+      - t: Flags that are switched off
+        why: A flag that's off during a rollout is doing its job. Debt is what's left after the job is done.
+      - t: Old flags left in the code after their feature fully shipped or was dropped, each one a hidden branch of behaviour
+        why: Right. Every flag doubles the ways the code can behave. Leave them in and nobody knows which paths are live, and a reused or forgotten flag can switch on code nobody meant to run.
+      - t: When two flags have the same name
+        why: That's a dangerous mistake, and a cause of debt, but the term means the pile of old flags in general.
+  - q: Your code can't read the flag settings, because the file is broken or the flag service is down. What should isOn return?
+    answer: 1
+    options:
+      - t: True, so the feature keeps working
+        why: The feature might be half-built or broken. Switching everything on by accident is the dangerous direction.
+      - t: False, the safe default, so everything behind a flag stays off
+        why: Right. The old, tested behaviour runs. The lab's code does exactly this.
+      - t: It should crash the app, so someone notices
+        why: A broken settings file shouldn't take checkout down. Log it loudly, and fall back safely.
+      - t: A random answer
+        why: That would make every customer's experience unpredictable.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the new checkout">
+
+The team is rebuilding checkout. It takes six weeks, so Ana works on a separate branch. By the time it's finished, the main branch has moved on so far that merging takes two days.
+
+The new checkout ships on a Thursday, to everyone at once. By Thursday evening, customers paying with one kind of card can't finish an order. The fix needs a new build of the server, and a new version of the mobile app. The app store review takes a day and a half.
+
+For a day and a half, some customers can't pay, and there's nothing the team can do but wait.
+
+</Story>
+
+<Case title="This really happened: a forgotten flag">
+
+In August 2012, a US stock-trading firm deployed new trading software to its eight servers. The deploy missed one of them, which kept the old code. The new release reused the name of an old flag. On the seven updated servers, the flag turned on the new feature. On the eighth, it woke up code that had been unused for years.
+
+That server sent millions of orders nobody intended. In about 45 minutes the firm lost more than 400 million dollars, and it was taken over by another company soon after. A dead feature and its flag had been left in the code long after anyone needed them.
+
+</Case>
+
+QuickCart needs two things: a way to ship the new checkout without switching it on, and a way to switch it off in seconds. Feature flags give both. The case above shows what happens when you forget to clean them up.
+
+</Part>
+
+<Part id="idea">
+
+A **feature flag** is an `if` in your code whose answer comes from a setting instead of being written in the code:
+
+```js title="checkout.mjs"
+import { isOn } from "./flags.mjs";
+
+export function checkoutScreen(userId) {
+  if (isOn("newCheckout", userId)) {
+    return "new checkout";
+  }
+  return "old checkout";
+}
+```
+
+Both checkouts are deployed. The setting decides, for each customer, which one runs, and you can change the setting without deploying anything.
+
+<YouKnow title="You already know this: feature flags">
+
+If you've used Firebase Remote Config, or any tool that changes an app's behaviour without a store release, you've used feature flags. They're exactly the same thing on a server, and just as useful there.
+
+</YouKnow>
+
+### Deploy is not release
+
+The [lifecycle lesson](/lessons/devops-lifecycle/) split **deploy**, putting code on servers, from **release**, letting users have it. Flags are what make that split real:
+
+| Without a flag | With a flag |
+|---|---|
+| The feature is live the moment the code is deployed | The code is deployed switched off. Nobody sees it |
+| Unfinished work waits on a long branch, and merging hurts | Unfinished work is merged every day, switched off |
+| Turning it off means a new deploy, or a new app version | Turning it off is changing a setting. It takes seconds |
+| Everyone gets it at once | You choose who gets it, and how many |
+
+<Key>A flag separates deploying code from releasing a feature. The code ships switched off, and a setting, not a deploy, decides who sees it.</Key>
+
+### What flags are used for
+
+| Kind | What it does | QuickCart example |
+|---|---|---|
+| **Release flag** | Hides unfinished or new work until it's ready | The new checkout, merged daily for six weeks |
+| **Percentage rollout** | Gives a feature to a growing share of customers | 10%, then 50%, then everyone, watching errors each time |
+| **Kill switch** | Turns something off instantly when it misbehaves | Switching the new checkout off at 3am |
+| **Targeting** | Gives a feature to chosen people | The QuickCart team first, before any customer |
+
+A percentage rollout is a [canary release](/lessons/release-strategies/) done with a flag instead of with servers.
+
+### How a percentage stays fair
+
+To put 10% of customers in, the code turns each customer's ID into a number from 0 to 99, called a **bucket**, using a hash: a calculation that always gives the same answer for the same input. Customers with a bucket under 10 get the feature.
+
+The same customer always gets the same bucket. So they see the same checkout every time they open the app, and raising the rollout from 10% to 50% only adds people. Nobody has the feature taken away.
+
+### Where the setting lives
+
+| Where | Changing it needs | Good for |
+|---|---|---|
+| A value written in the code | A deploy | Nothing. That's not really a flag |
+| A file the app reads while it runs | Editing the file on every server | Learning how flags work, as in the lab |
+| A flag service, such as AWS AppConfig or a similar product | A click or an API call. Every server picks it up within seconds | Real use |
+
+Whatever holds the setting, the code must decide what happens when it **can't read it**. The answer is always **off**: the old, tested behaviour.
+
+### Flag debt
+
+Every flag doubles the number of ways the code can behave. Two flags make four combinations; ten make over a thousand. Once a feature has fully shipped, or been dropped, its flag is just a hidden branch that nobody tests.
+
+| Rule | Why |
+|---|---|
+| Every flag has an owner and a removal date | Someone is responsible for cleaning it up |
+| Remove the flag, and the losing code path, soon after full rollout | Fewer hidden branches, less to test |
+| Never reuse an old flag's name | A reused name can switch on code nobody meant to run: the case above |
+
+</Part>
+
+<Part id="see">
+
+The new checkout is deployed, switched off. Raise the rollout and watch which customers get it. Then give it a bug, and use the kill switch.
+
+<FlagPanel />
+
+**What to notice:** the **deploys needed** counter never moves. Every change here, the rollout, the bug and the rescue, happened by changing a setting. And customers who had the new checkout at 10% still had it at 50%.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything runs on your laptop.</Cost>
+
+You'll build a tiny feature flag system in about 20 lines of JavaScript: a settings file, a percentage rollout that keeps customers in their bucket, a kill switch, and a safe default when the settings are broken. About 20 minutes.
+
+<Steps>
+
+<Step title="Install Node.js">
+
+The code runs on Node.js, which runs JavaScript outside a browser. If `node --version` already prints a version, skip this step.
+
+```sh
+brew install node
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | download and install a tool |
+| `node` | Node.js |
+
+```sh
+node --version
+```
+
+| Part | What it means |
+|---|---|
+| `node --version` | print which version of Node.js is installed |
+
+```output
+v26.10.0
+```
+
+Any version from 20 upwards works. Yours may differ.
+
+</Step>
+
+<Step title="Make a folder">
+
+```sh
+mkdir quickcart-flags
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-flags` | its name |
+
+```sh
+cd quickcart-flags
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | move into a directory |
+| `quickcart-flags` | the folder you just made |
+
+</Step>
+
+<Step title="Write the flag settings">
+
+In your editor, create `flags.json` in that folder:
+
+```json title="flags.json"
+{
+  "newCheckout": {
+    "enabled": true,
+    "percent": 10
+  }
+}
+```
+
+| Setting | What it does |
+|---|---|
+| `newCheckout` | the flag's name. The code asks for it by this name |
+| `enabled` | the kill switch. `false` turns the feature off for everyone, whatever the percentage |
+| `percent` | how many customers, out of 100, get the feature |
+
+</Step>
+
+<Step title="Write the flag code">
+
+Create `flags.mjs` next to it:
+
+```js title="flags.mjs"
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+
+// Read the flag settings. If the file is missing or broken, use no flags,
+// so every feature behind a flag is simply off.
+function loadFlags() {
+  try {
+    return JSON.parse(readFileSync("flags.json", "utf8"));
+  } catch (err) {
+    console.error("Could not read flags.json, so every flag is off: " + err.message);
+    return {};
+  }
+}
+
+// Turn a user ID into a number from 0 to 99. The same user always gets
+// the same number, so they stay in as the percentage grows.
+export function bucket(flagName, userId) {
+  const hash = createHash("sha256").update(flagName + ":" + userId).digest();
+  return hash.readUInt32BE(0) % 100;
+}
+
+export function isOn(flagName, userId) {
+  const flag = loadFlags()[flagName];
+  if (!flag || !flag.enabled) return false;
+  return bucket(flagName, userId) < flag.percent;
+}
+```
+
+| Part | What it does |
+|---|---|
+| `loadFlags()` | reads `flags.json` every time a flag is checked, so a change to the file takes effect straight away, with no restart |
+| `try` and `catch` | if the file can't be read or isn't valid JSON, log a warning and return no flags. **Everything falls back to off** |
+| `createHash("sha256")` | a hash: scrambles the text into a number, the same way every time |
+| `flagName + ":" + userId` | hash the flag name with the user, so each flag picks a different 10% of customers |
+| `readUInt32BE(0) % 100` | take the first four bytes as a whole number, and keep the remainder after dividing by 100: a bucket from 0 to 99 |
+| `if (!flag \|\| !flag.enabled) return false` | an unknown flag, or one with the kill switch on, is off |
+| `bucket(flagName, userId) < flag.percent` | on for customers whose bucket is under the percentage |
+
+</Step>
+
+<Step title="Write a script to try it">
+
+Create `try.mjs`. It asks the flag about 20 customers:
+
+```js title="try.mjs"
+import { bucket, isOn } from "./flags.mjs";
+
+let count = 0;
+for (let i = 1; i <= 20; i++) {
+  const user = "user-" + i;
+  const on = isOn("newCheckout", user);
+  if (on) count++;
+  const what = on ? "NEW checkout" : "old checkout";
+  console.log(user.padEnd(8) + " bucket " + String(bucket("newCheckout", user)).padStart(2) + "  " + what);
+}
+console.log(count + " of 20 users see the new checkout");
+```
+
+| Part | What it does |
+|---|---|
+| `for (let i = 1; i <= 20; i++)` | repeat for customers 1 to 20 |
+| `isOn("newCheckout", user)` | ask the flag whether this customer gets the new checkout |
+| `padEnd` and `padStart` | add spaces so the columns line up |
+
+</Step>
+
+<Step title="Run it at 10%">
+
+```sh
+node try.mjs
+```
+
+| Part | What it means |
+|---|---|
+| `node` | run a JavaScript file with Node.js |
+| `try.mjs` | the file to run |
+
+```output
+user-1   bucket 58  old checkout
+user-2   bucket 14  old checkout
+user-3   bucket 73  old checkout
+user-4   bucket 10  old checkout
+user-5   bucket 14  old checkout
+user-6   bucket 57  old checkout
+user-7   bucket 48  old checkout
+user-8   bucket 86  old checkout
+user-9   bucket  6  NEW checkout
+user-10  bucket 41  old checkout
+user-11  bucket 68  old checkout
+user-12  bucket 94  old checkout
+user-13  bucket 75  old checkout
+user-14  bucket 18  old checkout
+user-15  bucket 37  old checkout
+user-16  bucket 10  old checkout
+user-17  bucket 20  old checkout
+user-18  bucket  0  NEW checkout
+user-19  bucket 17  old checkout
+user-20  bucket 73  old checkout
+2 of 20 users see the new checkout
+```
+
+You'll see exactly these buckets: the hash always gives the same answer. Customers 9 and 18 have buckets under 10, so they get the new checkout. With only 20 customers, 10% won't be exactly 2 every time; over thousands, it evens out.
+
+Run it again. Nothing changes: each customer gets the same answer every time.
+
+</Step>
+
+<Step title="Roll out to 50%">
+
+In `flags.json`, change `"percent": 10` to `"percent": 50` and save. Run the script again:
+
+```sh
+node try.mjs
+```
+
+| Part | What it means |
+|---|---|
+| `node try.mjs` | run the script again, with the new setting |
+
+```output
+user-1   bucket 58  old checkout
+user-2   bucket 14  NEW checkout
+user-3   bucket 73  old checkout
+user-4   bucket 10  NEW checkout
+user-5   bucket 14  NEW checkout
+user-6   bucket 57  old checkout
+user-7   bucket 48  NEW checkout
+user-8   bucket 86  old checkout
+user-9   bucket  6  NEW checkout
+user-10  bucket 41  NEW checkout
+user-11  bucket 68  old checkout
+user-12  bucket 94  old checkout
+user-13  bucket 75  old checkout
+user-14  bucket 18  NEW checkout
+user-15  bucket 37  NEW checkout
+user-16  bucket 10  NEW checkout
+user-17  bucket 20  NEW checkout
+user-18  bucket  0  NEW checkout
+user-19  bucket 17  NEW checkout
+user-20  bucket 73  old checkout
+12 of 20 users see the new checkout
+```
+
+Customers 9 and 18 still have it. Ten more joined. Nobody lost it. You changed a setting; you didn't change or redeploy any code.
+
+</Step>
+
+<Step title="Pull the kill switch">
+
+In `flags.json`, change `"enabled": true` to `"enabled": false`. Leave `percent` at 50. Save, and run the script:
+
+```sh
+node try.mjs
+```
+
+| Part | What it means |
+|---|---|
+| `node try.mjs` | run the script with the kill switch on |
+
+```output title="The last line"
+0 of 20 users see the new checkout
+```
+
+Every line above it says `old checkout`. The percentage is still 50, but the kill switch wins. In a real service, this happens on the very next request.
+
+</Step>
+
+<Step title="Break the settings file on purpose">
+
+Set `enabled` back to `true`, and add a comma after `50`, so the file ends like this. That comma makes it invalid JSON:
+
+```text title="flags.json, broken"
+    "percent": 50,
+  }
+}
+```
+
+Run the script:
+
+```sh
+node try.mjs
+```
+
+| Part | What it means |
+|---|---|
+| `node try.mjs` | run the script with a broken settings file |
+
+```output title="Each check prints a warning, then the old checkout"
+Could not read flags.json, so every flag is off: Expected double-quoted property name in JSON at position 63 (line 5 column 3)
+user-1   bucket 58  old checkout
+```
+
+The wording of the error may differ with your version of Node.js. The script prints the warning once for every customer, and ends with `0 of 20 users see the new checkout`.
+
+<Mistake title="a flag check that crashes the app">
+
+If `loadFlags` had no `try` and `catch`, the same broken file would stop the whole script:
+
+```output title="Without the fallback, Node stops with"
+SyntaxError: Expected double-quoted property name in JSON at position 63 (line 5 column 3)
+```
+
+**Why:** `JSON.parse` throws an error on invalid JSON, and nothing caught it. In a server, a typo in a settings file would take checkout down.
+
+**The fix:** always catch the error, log it loudly, and fall back to **off**. That's what the lab's code does. Real flag services also check a setting is valid before they publish it.
+
+</Mistake>
+
+Remove the comma again when you're done.
+
+</Step>
+
+<Step title="Plan the flag's removal">
+
+A flag is temporary. Once the new checkout is at 100% and has been fine for a week or two, you would:
+
+| Delete | Where |
+|---|---|
+| The `if (isOn("newCheckout", userId))` check | Wherever the code asks for the flag |
+| The old checkout code | The branch of the `if` that no longer runs |
+| The `newCheckout` entry | `flags.json`, or the flag service |
+
+Write the removal date down now, next to the flag. That's how flag debt is avoided.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Move out of the folder and delete it:
+
+```sh
+cd ..
+```
+
+| Part | What it means |
+|---|---|
+| `cd ..` | move up one level, out of `quickcart-flags` |
+
+```sh
+rm -r quickcart-flags
+```
+
+| Part | What it means |
+|---|---|
+| `rm -r` | remove a folder and everything in it, straight away, with no bin |
+| `quickcart-flags` | the folder to remove. Check the name before you press Return |
+
+Keep Node.js installed. Nothing was created on AWS.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Idea | In one line |
+|---|---|
+| Feature flag | An `if` whose answer comes from a setting, not the code |
+| Deploy vs release | Deploy puts code on servers; the flag decides who gets the feature |
+| Percentage rollout | A canary done with a flag. Buckets keep customers in as it grows |
+| Bucket | A hash of the customer's ID, from 0 to 99. Same customer, same bucket |
+| Kill switch | Off for everyone, on the next request, with no deploy |
+| Safe default | Can't read the settings? Everything is off |
+| Flag debt | Old flags left in the code. Remove them soon after full rollout |
+| Never | Reuse an old flag's name |
+| Real flag services | Such as AWS AppConfig: change a flag with a click, every server follows |
+
+</Cheat>
+
+</Part>

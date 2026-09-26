@@ -1,0 +1,196 @@
+---
+/*
+ * Continuous integration: a commit moving through the pipeline.
+ * Teaches: each stage is a gate. A commit that fails one stops there, the
+ * later stages never run, and the pull request can't be merged.
+ */
+const STAGES = [
+  { id: "checkout", name: "Checkout", time: "5 s", x: 70 },
+  { id: "lint", name: "Lint", time: "15 s", x: 175 },
+  { id: "test", name: "Unit tests", time: "1 min", x: 280 },
+  { id: "build", name: "Build image", time: "2 min", x: 385 },
+  { id: "scan", name: "Scan image", time: "40 s", x: 490 },
+  { id: "plan", name: "Terraform plan", time: "30 s", x: 595 },
+];
+---
+<div class="viz" data-track="auto" data-viz="ci-gates">
+  <div class="viz-controls">
+    <span class="lbl" id="cg-lbl">The commit has</span>
+    <div class="seg" role="group" aria-labelledby="cg-lbl">
+      <button type="button" data-bug="none" aria-pressed="true">No problems</button>
+      <button type="button" data-bug="lint" aria-pressed="false">A Dockerfile mistake</button>
+      <button type="button" data-bug="test" aria-pressed="false">A failing test</button>
+      <button type="button" data-bug="scan" aria-pressed="false">A critical vulnerability</button>
+    </div>
+    <button class="btn line" type="button" data-a="push">Push a commit</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole pipeline</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 250" role="img" aria-labelledby="cg-title">
+      <title id="cg-title">A pull request's pipeline: a commit passes through checkout, lint, unit tests, build image, scan image and Terraform plan. At the end, the pull request can be merged only if every stage passed.</title>
+      <text class="vz-label" x="20" y="30">Pull request #42: every push runs every stage, in order</text>
+      <line class="cg-track" x1="30" y1="110" x2="700" y2="110" />
+      <line class="cg-done" data-n="progress" x1="30" y1="110" x2="30" y2="110" />
+      <rect data-n="dev" class="vz-node" x="8" y="148" width="92" height="44" rx="8" />
+      <text class="vz-t" x="54" y="168" text-anchor="middle">Developer</text>
+      <text class="vz-s" x="54" y="183" text-anchor="middle">git push</text>
+      {STAGES.map((s) => (
+        <g data-stage={s.id}>
+          <circle class="cg-stop" cx={s.x} cy="110" r="13" />
+          <text class="cg-mark" x={s.x} y="115" text-anchor="middle"></text>
+          <text class="vz-t" x={s.x} y="80" text-anchor="middle">{s.name}</text>
+          <text class="vz-s cg-state" x={s.x} y="146" text-anchor="middle">{s.time}</text>
+        </g>
+      ))}
+      <rect data-n="gate" class="cg-gate" x="660" y="160" width="112" height="56" rx="10" />
+      <text data-n="gate-t" class="vz-t" x="716" y="184" text-anchor="middle">Merge</text>
+      <text data-n="gate-s" class="vz-s" x="716" y="201" text-anchor="middle">waiting for checks</text>
+      <path class="vz-wire" d="M700 110 L716 110 L716 160" />
+      <circle data-n="dot" class="vz-dot cg-dot" r="8" cx="30" cy="110" opacity="0" />
+      <text data-n="clock" class="vz-s" x="20" y="238">Time since push: 0 s</text>
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Pick what's in the commit, then choose <b>Push a commit</b>.</div>
+</div>
+
+<style is:global>
+  [data-viz="ci-gates"] .cg-track { stroke: var(--rule-2); stroke-width: 6; stroke-linecap: round; }
+  [data-viz="ci-gates"] .cg-done { stroke: var(--auto); stroke-width: 6; stroke-linecap: round; }
+  [data-viz="ci-gates"] .cg-stop { fill: var(--surface); stroke: var(--auto); stroke-width: 4; }
+  [data-viz="ci-gates"] .ok .cg-stop { fill: var(--ok); stroke: var(--ok); }
+  [data-viz="ci-gates"] .fail .cg-stop { fill: var(--bad); stroke: var(--bad); }
+  [data-viz="ci-gates"] .skip .cg-stop { fill: var(--sunk); stroke: var(--rule-2); stroke-dasharray: 3 3; }
+  [data-viz="ci-gates"] .skip .vz-t { fill: var(--ink-3); }
+  [data-viz="ci-gates"] .run .cg-stop { fill: color-mix(in srgb, var(--auto) 30%, var(--surface)); }
+  [data-viz="ci-gates"] .cg-mark { font-family: var(--font); font-weight: 800; font-size: 14px; fill: var(--surface); }
+  [data-viz="ci-gates"] .fail .cg-state { fill: var(--bad); font-weight: 700; }
+  [data-viz="ci-gates"] .ok .cg-state { fill: var(--ok); font-weight: 700; }
+  [data-viz="ci-gates"] .cg-gate { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.5; }
+  [data-viz="ci-gates"] .cg-gate.open { fill: var(--ok-bg); stroke: var(--ok); stroke-width: 2.5; }
+  [data-viz="ci-gates"] .cg-gate.shut { fill: var(--bad-bg); stroke: var(--bad); stroke-width: 2.5; }
+  [data-viz="ci-gates"] .vz-node.lit { stroke: var(--auto); fill: color-mix(in srgb, var(--auto) 12%, var(--surface)); }
+  [data-viz="ci-gates"] .cg-dot { fill: var(--auto); stroke: var(--surface); stroke-width: 2; }
+</style>
+
+<script>
+  import { beat, moveDot, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Bug = "none" | "lint" | "test" | "scan";
+  const X: Record<string, number> = { checkout: 70, lint: 175, test: 280, build: 385, scan: 490, plan: 595 };
+  const ORDER = ["checkout", "lint", "test", "build", "scan", "plan"];
+  const SECS: Record<string, number> = { checkout: 5, lint: 15, test: 60, build: 120, scan: 40, plan: 30 };
+  const PASS: Record<string, string> = {
+    checkout: "Jenkins checks out the exact commit that was pushed, on a clean agent. Not your laptop, with its local changes.",
+    lint: "<b>Lint</b> passes: hadolint finds nothing wrong in the Dockerfile, and <code>terraform fmt -check</code> finds the code formatted.",
+    test: "<b>Unit tests</b> pass: every test in the suite ran and none failed.",
+    build: "<b>Build image</b> passes: the container image is built from this commit.",
+    scan: "<b>Scan image</b> passes: Trivy found no critical vulnerabilities in the image's packages.",
+    plan: "<b>Terraform plan</b> passes. The plan is posted on the pull request, so reviewers see exactly what would change in AWS.",
+  };
+  const FAIL: Record<string, string> = {
+    lint: "<b>Lint fails</b>: hadolint reports <code>DL3007 Using latest is prone to errors</code>. The commit stops here, 20 seconds after the push. Cheap checks go first, so mistakes like this are caught in seconds.",
+    test: "<b>Unit tests fail</b>: <code>orderTotal adds the delivery fee</code> expected 1250 but got 1000. The commit stops here. No image is built from code that doesn't work.",
+    scan: "<b>Scan fails</b>: Trivy finds a <b>CRITICAL</b> vulnerability in a package inside the image. The code is fine, but the image isn't safe to ship. The commit stops here.",
+  };
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="ci-gates"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const dot = q<SVGCircleElement>("dot");
+    const progress = q<SVGLineElement>("progress");
+    const gate = q<SVGRectElement>("gate");
+    const gateT = q<SVGTextElement>("gate-t");
+    const gateS = q<SVGTextElement>("gate-s");
+    const clock = q<SVGTextElement>("clock");
+    const dev = q<SVGRectElement>("dev");
+    const bugBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-bug]")];
+    const pushBtn = root.querySelector<HTMLButtonElement>('[data-a="push"]')!;
+    let bug: Bug = "none";
+    let run = 0;
+
+    const g = (id: string) => root.querySelector<SVGGElement>(`[data-stage="${id}"]`)!;
+    function mark(id: string, cls: string, state: string, sign = "") {
+      const el = g(id);
+      el.setAttribute("class", cls);
+      el.querySelector(".cg-state")!.textContent = state;
+      el.querySelector(".cg-mark")!.textContent = sign;
+    }
+    function clear() {
+      ORDER.forEach((id) => mark(id, "", SECS[id] >= 60 ? `${SECS[id] / 60} min` : `${SECS[id]} s`));
+      progress.setAttribute("x2", "30");
+      dot.setAttribute("opacity", "0");
+      dot.setAttribute("cx", "30");
+      gate.setAttribute("class", "cg-gate");
+      gateT.textContent = "Merge";
+      gateS.textContent = "waiting for checks";
+      clock.textContent = "Time since push: 0 s";
+      dev.classList.remove("lit");
+    }
+    const fmt = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${s % 60 ? (s % 60) + " s" : ""}`.trim() : `${s} s`);
+
+    async function push() {
+      const me = ++run;
+      const live = () => me === run;
+      clear();
+      pushBtn.disabled = true;
+      bugBtns.forEach((b) => (b.disabled = true));
+      dev.classList.add("lit");
+      tell(say, "Push", "A developer pushes a commit to pull request #42. GitHub tells Jenkins, and Jenkins starts a build of that exact commit.");
+      await beat(700); if (!live()) return;
+      let t = 0;
+      let last = 30;
+      for (const id of ORDER) {
+        g(id).setAttribute("class", "run");
+        await moveDot(dot, [[last, 110], [X[id], 110]], 300); if (!live()) return;
+        last = X[id];
+        progress.setAttribute("x2", String(X[id]));
+        t += SECS[id];
+        clock.textContent = `Time since push: ${fmt(t)}`;
+        const i = ORDER.indexOf(id);
+        if (bug === id) {
+          mark(id, "fail", "failed", "✕");
+          ORDER.slice(i + 1).forEach((rest) => mark(rest, "skip", "not run"));
+          gate.setAttribute("class", "cg-gate shut");
+          gateT.textContent = "Merge blocked";
+          gateS.textContent = "a check failed";
+          tell(say, `Stopped at ${g(id).querySelector(".vz-t")!.textContent}`, FAIL[id] + ` The stages after it <b>never run</b>, and GitHub marks the check red, so the pull request <b>can't be merged</b>. Feedback took ${fmt(t)}.`, "bad");
+          finish();
+          return;
+        }
+        mark(id, "ok", "passed", "✓");
+        tell(say, `Step ${i + 1} of ${ORDER.length}`, PASS[id]);
+        await beat(650); if (!live()) return;
+      }
+      await moveDot(dot, [[last, 110], [716, 110], [716, 160]], 300); if (!live()) return;
+      gate.setAttribute("class", "cg-gate open");
+      gateT.textContent = "Merge allowed";
+      gateS.textContent = "all checks passed";
+      tell(say, "All checks passed", `Every gate passed in ${fmt(t)}. GitHub shows a green check and the pull request <b>can be merged</b> once someone approves it.`, "good");
+      finish();
+    }
+    function finish() {
+      pushBtn.disabled = false;
+      bugBtns.forEach((b) => (b.disabled = false));
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.bug) {
+        bug = b.dataset.bug as Bug;
+        press(bugBtns, (x) => x === b);
+        clear();
+        tell(say, "Ready", bug === "none"
+          ? "This commit is fine. Choose <b>Push a commit</b> and watch it pass every gate."
+          : "This commit has a problem. Push it and see which gate stops it.");
+      } else if (b.dataset.a === "push") push();
+      else if (b.dataset.a === "reset") {
+        run++; clear(); finish();
+        tell(say, "Ready", "Pick what's in the commit, then choose <b>Push a commit</b>.");
+      }
+    });
+  }));
+</script>

@@ -1,0 +1,218 @@
+---
+/*
+ * Continuous delivery: one image digest promoted through dev, stg and prod.
+ * Teaches: build once and promote the same digest; an approval gate before
+ * prod; rollback is redeploying the previous digest, not rebuilding.
+ */
+const ENVS = [
+  { id: "dev", name: "dev" },
+  { id: "stg", name: "stg" },
+  { id: "prod", name: "prod" },
+];
+---
+<div class="viz" data-track="auto" data-viz="cd-promote">
+  <div class="viz-controls">
+    <span class="lbl" id="cp-lbl">Each environment gets</span>
+    <div class="seg" role="group" aria-labelledby="cp-lbl">
+      <button type="button" data-mode="once" aria-pressed="true">The same image</button>
+      <button type="button" data-mode="rebuild" aria-pressed="false">A fresh build</button>
+    </div>
+    <button class="btn line" type="button" data-a="build">Build a new version</button>
+    <button class="btn" type="button" data-a="promote" disabled>Promote</button>
+    <button class="btn" type="button" data-a="approve" disabled>Approve</button>
+    <button class="btn" type="button" data-a="timeout" disabled>Let it time out</button>
+    <button class="btn" type="button" data-a="rollback">Roll back prod</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see every environment</p>
+  <div class="viz-stage">
+    <div class="cp-grid">
+      <section class="cp-col cp-reg" aria-label="Image registry">
+        <h3 class="cp-h">Registry</h3>
+        <p class="cp-sub">every image ever built</p>
+        <ol class="cp-builds" data-n="reg"></ol>
+      </section>
+      {ENVS.map((e) => (
+        <section class="cp-col cp-env" data-env={e.id} aria-label={`${e.name} environment`}>
+          <h3 class="cp-h">{e.name}</h3>
+          <p class="cp-sub cp-state">running</p>
+          <div class="cp-card"></div>
+        </section>
+      ))}
+    </div>
+    <p class="cp-hist" data-n="hist"></p>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Every environment runs <b>v41</b>. Choose <b>Build a new version</b>.</div>
+</div>
+
+<style is:global>
+  [data-viz="cd-promote"] .cp-grid { display: grid; grid-template-columns: 1.1fr 1fr 1fr 1fr; gap: 12px; min-width: 660px; padding: 6px 2px 4px; }
+  [data-viz="cd-promote"] .cp-h { margin: 0; font-size: 15px; }
+  [data-viz="cd-promote"] .cp-sub { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); min-height: 1.4em; }
+  [data-viz="cd-promote"] .cp-builds { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  [data-viz="cd-promote"] .cp-builds li, [data-viz="cd-promote"] .cp-card { border: 1.5px solid var(--rule-2); border-radius: 8px; padding: 6px 9px; background: var(--surface); font-size: 13px; }
+  [data-viz="cd-promote"] .cp-builds li b, [data-viz="cd-promote"] .cp-card b { display: block; font-size: 14px; }
+  [data-viz="cd-promote"] .cp-dg { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+  [data-viz="cd-promote"] .cp-card { min-height: 64px; border-width: 2px; border-color: var(--auto); }
+  [data-viz="cd-promote"] .cp-env.wait .cp-card { border-style: dashed; }
+  [data-viz="cd-promote"] .cp-env.bad .cp-card { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="cd-promote"] .cp-env.good .cp-card { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="cd-promote"] .cp-env.wait .cp-state { color: var(--warn); font-weight: 700; }
+  [data-viz="cd-promote"] .cp-smoke { display: block; margin-top: 3px; font-size: 12.5px; color: var(--ok); font-weight: 700; }
+  [data-viz="cd-promote"] .cp-mismatch { display: block; margin-top: 3px; font-size: 12.5px; color: var(--bad); font-weight: 700; }
+  [data-viz="cd-promote"] .cp-hist { margin: 10px 2px 6px; font-size: 13.5px; color: var(--ink-2); }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  interface Img { v: number; dg: string }
+  type EnvId = "dev" | "stg" | "prod";
+  const ORDER: EnvId[] = ["dev", "stg", "prod"];
+
+  /* A short, stable fake digest per build, so the same build always shows the same one. */
+  function digest(seed: number) {
+    let h = (seed * 2654435761) >>> 0;
+    let s = "";
+    for (let i = 0; i < 4; i++) { h = (h * 1103515245 + 12345) >>> 0; s += (h >>> 8).toString(16).padStart(6, "0").slice(0, 3); }
+    return "sha256:" + s;
+  }
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="cd-promote"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btn = (a: string) => root.querySelector<HTMLButtonElement>(`[data-a="${a}"]`)!;
+    const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+    const envEl = (e: EnvId) => root.querySelector<HTMLElement>(`[data-env="${e}"]`)!;
+
+    let mode: "once" | "rebuild" = "once";
+    let reg: Img[] = [];
+    let env: Record<EnvId, Img> = {} as Record<EnvId, Img>;
+    let tested: Record<EnvId, string> = {} as Record<EnvId, string>;
+    let current: Img | null = null;
+    let next = 0;
+    let waiting = false;
+    let history: Img[] = [];
+    let seed = 0;
+
+    const tag = (i: Img) => `<b>v${i.v}</b><span class="cp-dg">${i.dg}</span>`;
+
+    function reset() {
+      seed = 0;
+      const v41 = { v: 41, dg: digest(++seed) };
+      reg = [v41];
+      env = { dev: v41, stg: v41, prod: v41 };
+      tested = { dev: v41.dg, stg: v41.dg, prod: v41.dg };
+      history = [v41];
+      current = null; next = 0; waiting = false;
+      render();
+      tell(say, "Ready", "Every environment runs <b>v41</b>. Choose <b>Build a new version</b>.");
+    }
+
+    function render() {
+      q("reg").innerHTML = reg.slice().reverse().map((i) => `<li>${tag(i)}</li>`).join("");
+      for (const e of ORDER) {
+        const el = envEl(e);
+        const img = env[e];
+        const prev = e === "dev" ? null : ORDER[ORDER.indexOf(e) - 1];
+        const mismatch = prev && env[prev].v === img.v && env[prev].dg !== img.dg;
+        el.className = "cp-col cp-env" + (waiting && e === "prod" ? " wait" : mismatch ? " bad" : "");
+        el.querySelector(".cp-state")!.textContent = waiting && e === "prod" ? "waiting for approval" : "running";
+        el.querySelector(".cp-card")!.innerHTML = tag(img) +
+          (mismatch ? `<span class="cp-mismatch">not the image ${prev} tested</span>` : tested[e] === img.dg ? `<span class="cp-smoke">smoke test passed</span>` : "");
+      }
+      q("hist").innerHTML = "prod has run, in order: " + history.map((i) => `v${i.v} (${i.dg.slice(7, 13)})`).join(" → ");
+      btn("promote").disabled = !current || next >= ORDER.length || waiting;
+      btn("promote").textContent = current && next < ORDER.length ? `Promote to ${ORDER[next]}` : "Promote";
+      btn("approve").disabled = !waiting;
+      btn("timeout").disabled = !waiting;
+      btn("build").disabled = waiting;
+      btn("rollback").disabled = waiting || history.length < 2;
+    }
+
+    function deploy(e: EnvId) {
+      if (!current) return;
+      let img = current;
+      if (mode === "rebuild" && e !== "dev") {
+        img = { v: current.v, dg: digest(++seed) };
+        reg.push(img);
+      }
+      const same = env[e].dg === img.dg;
+      env[e] = img;
+      tested[e] = img.dg;
+      if (e === "prod" && !same) history.push(img);
+      next++;
+      render();
+      const prev = e === "dev" ? null : ORDER[ORDER.indexOf(e) - 1];
+      if (mode === "rebuild" && prev) {
+        tell(say, `v${img.v} rebuilt for ${e}`, `The pipeline built v${img.v} <b>again</b> for ${e}. Same code, but a different image: <code>${img.dg}</code>, not the <code>${env[prev].dg}</code> that ${prev} tested. Base images and dependencies can change between builds, so ${e} runs something nobody tested.`, "bad");
+      } else if (e === "prod") {
+        tell(say, `v${img.v} is in prod`, `prod now runs <code>${img.dg}</code>: byte for byte the image that passed dev and stg. The smoke test passed.`, "good");
+      } else {
+        tell(say, `v${img.v} deployed to ${e}`, `${e} now runs <code>${img.dg}</code>, and the smoke test passed. ${next < ORDER.length ? `Choose <b>Promote to ${ORDER[next]}</b>.` : ""}`, "good");
+      }
+    }
+
+    root.addEventListener("click", (ev) => {
+      const b = (ev.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.mode) {
+        mode = b.dataset.mode as typeof mode;
+        press(modeBtns, (x) => x === b);
+        reset();
+        tell(say, mode === "once" ? "Build once" : "Build per environment", mode === "once"
+          ? "The pipeline builds the image <b>once</b> and promotes its digest. Choose <b>Build a new version</b>."
+          : "Now the pipeline <b>builds again</b> for every environment, as many hand-made pipelines do. Build a new version and promote it all the way.");
+        return;
+      }
+      switch (b.dataset.a) {
+        case "build": {
+          const v = (reg[reg.length - 1]?.v ?? 41) + 1;
+          current = { v, dg: digest(++seed) };
+          reg.push(current);
+          next = 0;
+          render();
+          tell(say, `v${v} built`, `CI built <b>v${v}</b> once and pushed it. The registry gives it a digest, <code>${current.dg}</code>, a fingerprint of its exact contents. Choose <b>Promote to dev</b>.`);
+          break;
+        }
+        case "promote": {
+          const e = ORDER[next];
+          if (e === "prod") {
+            waiting = true;
+            render();
+            tell(say, "Approval needed", `v${current!.v} passed dev and stg. The pipeline <b>pauses</b> for a person to approve prod, with a 30-minute timeout. Choose <b>Approve</b> or <b>Let it time out</b>.`);
+          } else deploy(e);
+          break;
+        }
+        case "approve":
+          waiting = false;
+          deploy("prod");
+          break;
+        case "timeout":
+          waiting = false;
+          current = null;
+          render();
+          tell(say, "Timed out", "Nobody answered in 30 minutes, so the build was <b>aborted</b>. prod didn't change. Nothing is left waiting forever, holding up the next release.", "");
+          break;
+        case "rollback": {
+          const bad = history[history.length - 1];
+          const good = history[history.length - 2];
+          env.prod = good;
+          tested.prod = good.dg;
+          history.push(good);
+          current = null;
+          render();
+          tell(say, "Rolled back", `The rollback job redeployed <code>${good.dg}</code>, the image prod ran before v${bad.v}. Nothing was rebuilt, so it takes seconds and gives back exactly what ran before.`, "good");
+          break;
+        }
+        case "reset":
+          reset();
+          break;
+      }
+    });
+
+    reset();
+  }));
+</script>

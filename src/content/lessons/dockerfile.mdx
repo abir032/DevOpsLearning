@@ -1,0 +1,832 @@
+---
+time: 40 minutes
+level: Beginner
+before: [images-and-containers]
+cost: free
+quiz:
+  - q: Leo changes one line in app.py. In which Dockerfile does the rebuild skip pip install?
+    answer: 2
+    options:
+      - t: "COPY . . then RUN pip install"
+        why: COPY . . copies app.py too, so its input changed. Every step below it runs again, including pip install.
+      - t: "RUN pip install then COPY requirements.txt ."
+        why: This one doesn't build at all. pip install runs before the file it needs has been copied in, so it fails with "Could not open requirements file".
+      - t: "COPY requirements.txt . then RUN pip install, then COPY app.py ."
+        why: Only the last COPY reads app.py. Everything above it is unchanged, so Docker reuses it, and the rebuild takes seconds.
+      - t: It makes no difference; Docker always reinstalls libraries
+        why: Docker reuses any step whose input hasn't changed. The order of the lines decides which steps that is.
+  - q: When does a RUN line run?
+    answer: 0
+    options:
+      - t: Once, while the image is being built
+        why: RUN changes the image, for example by installing libraries. Its result is saved as a layer, and containers start from that.
+      - t: Every time a container starts
+        why: That's CMD. RUN has already finished before any container exists.
+      - t: Only when you run docker run with -d
+        why: -d only puts the container in the background. It has nothing to do with RUN.
+      - t: Whenever the app crashes
+        why: Nothing in a Dockerfile runs when the app crashes. Restarting is the job of whatever runs the container, like ECS.
+  - q: "A Dockerfile has COPY .env . and, two lines later, RUN rm .env. Is the password in .env safe?"
+    answer: 3
+    options:
+      - t: Yes, the file was deleted
+        why: It was deleted from the final view of the files, but not from the image.
+      - t: Yes, as long as the image is private
+        why: Private helps, but everyone who can pull the image, now or later, can still read the file.
+      - t: Only if the container runs as a normal user
+        why: The user only matters while a container runs. Anyone who pulls the image can read its layers directly.
+      - t: No. The COPY step's layer still holds the file, and anyone with the image can read it
+        why: Each step is saved as its own layer. A later rm only hides the file in a newer layer. Keep secrets out with .dockerignore and pass them in when the container starts.
+  - q: Why write CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"] with square brackets?
+    answer: 1
+    options:
+      - t: It makes the image smaller
+        why: The two forms produce the same size of image.
+      - t: Gunicorn is started directly, so it receives Docker's stop signal and can shut down cleanly
+        why: Without brackets, Docker starts a shell that starts gunicorn, and the stop signal goes to the shell. Many shells don't pass it on, so gunicorn is killed mid-request after 10 seconds.
+      - t: It's the only form Docker accepts
+        why: Both forms are accepted. Docker's builder even warns you when you use the other one, because of the signal problem.
+      - t: It lets you override the command with docker run
+        why: You can override CMD in either form.
+  - q: What does EXPOSE 8080 do?
+    answer: 2
+    options:
+      - t: Opens port 8080 to the internet
+        why: EXPOSE opens nothing. The port is only reachable once you publish it, with -p on docker run or a load balancer in the cloud.
+      - t: Makes the app listen on port 8080
+        why: The app chooses its own port. Here that's gunicorn's --bind 0.0.0.0:8080.
+      - t: Records which port the app listens on, as a note for people and tools
+        why: That's all it does. It's worth writing, because tools and teammates read it, but it changes nothing on its own.
+      - t: Blocks every other port
+        why: Containers have no firewall from EXPOSE. Blocking traffic is the job of networks and security groups.
+  - q: In a multi-stage build, what ends up in the final image?
+    answer: 1
+    options:
+      - t: Everything from every stage
+        why: Then there would be no point in having stages. The build tools in the first stage would ship too.
+      - t: Only the last stage, plus whatever it copies from earlier stages with COPY --from
+        why: The earlier stages are thrown away. Only the files you name in COPY --from come across.
+      - t: Only the first stage
+        why: It's the other way round. The last stage is the image.
+      - t: Whichever stage is smallest
+        why: Docker doesn't choose by size. The last stage in the file is the image, unless you pick one with --target.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the order service moves into a container">
+
+Leo wrote QuickCart's first Dockerfile in five minutes. It copied the whole project folder into the image, installed the libraries, and started the app. It worked.
+
+Then every change got slow. Leo fixed a typo in one line of code, rebuilt, and waited four minutes while every library downloaded and installed again. A two-line fix meant eight minutes of waiting.
+
+Then Priya noticed something worse. Copying *the whole folder* had also copied Leo's `.env` file into the image, with the test database password in it. The image had already been pushed to the company's registry.
+
+</Story>
+
+<Case title="This really happens">
+
+Security researchers have scanned large numbers of public images on Docker Hub, more than once, and keep finding private keys, API tokens and cloud credentials inside them. Many were copied in by a broad `COPY` line. Some had been "deleted" by a later line in the Dockerfile, which doesn't remove them from the image at all.
+
+</Case>
+
+Both problems come from how a Dockerfile works: every line builds a **layer**, and layers are both reused and kept. This lesson is about writing each line on purpose.
+
+</Part>
+
+<Part id="idea">
+
+A **Dockerfile** is a text file of instructions for building an image. Docker runs them from top to bottom. Most lines change the files in the image, and each of those saves its result as a **layer**: a snapshot of what that one line changed.
+
+### Every instruction, in one table
+
+| Instruction | What it does | QuickCart's line |
+|---|---|---|
+| `FROM` | The image to start from: an operating system, often with a language already installed | `FROM python:3.12-slim` |
+| `WORKDIR` | The folder later lines work in. Created if it doesn't exist | `WORKDIR /app` |
+| `COPY` | Copy files from your folder into the image | `COPY requirements.txt .` |
+| `RUN` | Run a command **while building**, like installing libraries | `RUN pip install --no-cache-dir -r requirements.txt` |
+| `ARG` | A value you can pass in **at build time** with `--build-arg`. Gone once the build ends | `ARG APP_VERSION=v1` |
+| `ENV` | A setting the app can read **when it runs** | `ENV APP_VERSION=$APP_VERSION` |
+| `USER` | Which user later lines, and the app, run as | `USER 1001` |
+| `EXPOSE` | A note saying which port the app listens on. It opens nothing | `EXPOSE 8080` |
+| `HEALTHCHECK` | A command Docker runs every so often to ask "is the app really working?" | calls `/health` |
+| `CMD` | The command a container runs **when it starts**. Easy to replace | `CMD ["gunicorn", …]` in the full file |
+| `ENTRYPOINT` | Like `CMD`, but fixed. Anything you add on `docker run` is passed to it | not used here |
+
+<Note title="RUN and CMD are easy to mix up">
+
+`RUN` happens **once, when you build**. Its result is saved in the image. `CMD` happens **every time a container starts**. If you write `RUN gunicorn …`, the build hangs forever, because the server never finishes.
+
+</Note>
+
+### CMD or ENTRYPOINT
+
+Both say what runs when a container starts. The difference shows when you add words after the image name on `docker run`:
+
+| Dockerfile has | `docker run image` runs | `docker run image hello` runs |
+|---|---|---|
+| `CMD ["echo", "default"]` | `echo default` | `hello`: your words **replace** CMD |
+| `ENTRYPOINT ["echo", "always"]` | `echo always` | `echo always hello`: your words are **added** |
+
+Use `CMD` for an app like QuickCart's. It's easy to swap for something else when you're debugging. `ENTRYPOINT` suits images that are really one tool, like a command-line program, where every run calls the same thing.
+
+### Brackets or no brackets
+
+`CMD` and `ENTRYPOINT` can be written two ways:
+
+| Written as | Called | What starts |
+|---|---|---|
+| `CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]` | exec form | gunicorn itself |
+| `CMD gunicorn --bind 0.0.0.0:8080 app:app` | shell form | a shell, `/bin/sh -c`, which then starts gunicorn |
+
+When Docker stops a container, it sends the main process a polite "please stop" signal, called `SIGTERM`, and waits 10 seconds. Then it forces it. With the shell form, the signal goes to the shell, and many shells never pass it on. Gunicorn doesn't hear it, so it's killed in the middle of answering people. **Always use the bracket form.** [Releases without downtime](/lessons/zero-downtime-releases/) shows what this costs during a deploy.
+
+### The cache, and why the order matters
+
+On a rebuild, Docker looks at each line in turn. If the line hasn't changed, **and** the files it reads haven't changed, **and** nothing above it rebuilt, Docker reuses the saved layer. The build output says `CACHED`.
+
+The moment one line has to run again, **every line below it runs again too**, because each layer is built on top of the one before.
+
+So the rule is: **put what changes rarely at the top, and what changes often at the bottom.** QuickCart's libraries change once a month. The code changes many times a day. So the Dockerfile copies `requirements.txt` and installs the libraries first, and copies the code last.
+
+<YouKnow title="You already know this: incremental builds">
+
+Gradle and Xcode don't recompile your whole app when you change one file. They reuse what hasn't changed. Docker does the same, with one strict rule: it works top to bottom, and once one step changes, everything after it is rebuilt, whether it needed to be or not.
+
+</YouKnow>
+
+<Key>Docker reuses every layer until the first line whose input changed. Put what changes least at the top.</Key>
+
+### What goes into the build
+
+`docker build .` sends the whole folder, called the **build context**, to the builder. A `COPY . .` line then copies all of it into the image, including `.git`, local virtual environments and any `.env` file.
+
+A file called `.dockerignore`, next to the Dockerfile, lists what to leave out. It works like `.gitignore`. It keeps builds fast and secrets out.
+
+<Note title="Deleting a file in a later line doesn't remove it">
+
+If one line copies a secret in and a later line runs `rm`, the secret is still in the first line's layer. Anyone who pulls the image can extract it. Keep secrets out with `.dockerignore`, and give them to the container when it starts. [Secrets](/lessons/secrets/) covers how, on AWS.
+
+</Note>
+
+### Don't run as root
+
+Inside a container, the app runs as `root` unless you say otherwise. If someone finds a hole in the app, they get root's power inside the container, and containers share the host's kernel, so a root break-in is much more dangerous. Two lines fix it: create a normal user, then switch to it.
+
+| Line | What it does |
+|---|---|
+| `RUN useradd --create-home --uid 1001 appuser` | Create a normal user called `appuser`, with user number 1001 |
+| `USER 1001` | Run everything after this, including the app, as user 1001 |
+
+`USER` is given the **number**, not the name. The name only exists inside the image's own user list. Tools outside the image, like Kubernetes checking that a container isn't root, can only trust a number. The Dockerfile linter `hadolint` warns about a name for exactly that reason.
+
+This is also why the app listens on port **8080** rather than 80. On Linux, ports below 1024 have traditionally needed root, and not every platform relaxes that rule. A high port always works for a normal user, and the load balancer in front doesn't mind which port it forwards to.
+
+### Pin the base image
+
+`FROM` decides most of what's in your image. How precisely you name it decides whether next month's build gets the same thing:
+
+| You write | You get | Verdict |
+|---|---|---|
+| `FROM python` | Whatever is newest today. A different Python next year | Never |
+| `FROM python:3` | The newest Python 3. Can jump from 3.12 to 3.13 | Avoid |
+| `FROM python:3.12-slim` | Python 3.12, a small Debian, and security patches as they're released | **A good default** |
+| `FROM python:3.12-slim@sha256:` then the image's digest | Exactly one image, forever, byte for byte | Strictest. You must update it by hand to get patches |
+
+`slim` means a small Debian with only what Python needs. The full `python:3.12` image is several times larger, because it also carries compilers and build tools. [Images and containers](/lessons/images-and-containers/) explains tags and digests.
+
+### Multi-stage builds
+
+Some apps need big tools to **build** and none of them to **run**. A multi-stage build has more than one `FROM`. The early stages build things; only the **last stage** becomes the image, and it copies in just the finished result.
+
+```dockerfile title="Dockerfile.multi"
+FROM python:3.12 AS build
+WORKDIR /build
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.12-slim
+WORKDIR /app
+RUN useradd --create-home --uid 1001 appuser
+COPY --from=build /install /usr/local
+COPY app.py .
+USER 1001
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+```
+
+| Line | What it does |
+|---|---|
+| `FROM python:3.12 AS build` | Stage one, on the full image with compilers. `AS build` names the stage |
+| `--prefix=/install` | Install the libraries into their own folder, so they are easy to copy out |
+| `FROM python:3.12-slim` | Stage two, on the small image. This stage becomes the final image |
+| `COPY --from=build /install /usr/local` | Take only the installed libraries from stage one. Its compilers are thrown away |
+
+For QuickCart's two small Python libraries this saves little, because nothing needs compiling. It matters a lot for Go, Java or a front-end build, where the build tools are hundreds of megabytes and the finished program is small.
+
+</Part>
+
+<Part id="see">
+
+Below is QuickCart's Dockerfile, already built once. Pick what you edit and choose **Rebuild**. Then switch to the Dockerfile that **copies everything first** and do the same edit again.
+
+<LayerCache />
+
+**What to notice:** both Dockerfiles install exactly the same libraries. The only difference is the order of two lines, and it turns a one-second rebuild into a forty-second one, on every single code change.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything runs on your own computer.</Cost>
+
+You'll write QuickCart's order service and its Dockerfile, build it, run it, and watch the cache work and fail. About 30 minutes.
+
+You need Docker Desktop installed and running. [Set up your Mac](/lessons/mac-setup/) covers it. Check with:
+
+```sh
+docker version
+```
+
+| Part | What it means |
+|---|---|
+| `docker version` | print the version of the Docker client and of the engine it talks to |
+
+<See>
+
+Two sections, **Client** and **Server**. If you only see Client and an error like `Cannot connect to the Docker daemon`, Docker Desktop isn't running: open it and wait for it to say it's running.
+
+</See>
+
+<Steps>
+
+<Step title="Write the app">
+
+Make a folder called `order-service` and open it in your editor. Create these two files in it.
+
+```python title="app.py"
+import os
+import socket
+
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+VERSION = os.environ.get("APP_VERSION", "v1")
+
+ORDERS = [
+    {"id": 1, "item": "margherita pizza", "qty": 2},
+    {"id": 2, "item": "pad thai", "qty": 1},
+    {"id": 3, "item": "falafel wrap", "qty": 3},
+]
+
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", version=VERSION)
+
+
+@app.get("/")
+def home():
+    return jsonify(service="order-service", version=VERSION, served_by=socket.gethostname())
+
+
+@app.get("/orders")
+def orders():
+    return jsonify(version=VERSION, count=len(ORDERS), orders=ORDERS)
+```
+
+| Page | What it returns |
+|---|---|
+| `/health` | `ok` and the version. Health checks call this to ask "are you working?" |
+| `/` | The version, and `served_by`: the name of the machine, or container, that answered |
+| `/orders` | Three sample orders |
+
+```text title="requirements.txt"
+flask==3.0.3
+gunicorn==23.0.0
+```
+
+| Line | What it means |
+|---|---|
+| `flask==3.0.3` | Flask, the web framework the app is written in, exactly version 3.0.3 |
+| `gunicorn==23.0.0` | Gunicorn, the server that runs a Flask app properly, with several workers |
+
+Exact versions (`==`) mean every build installs the same libraries: no surprise upgrades.
+
+</Step>
+
+<Step title="Write the Dockerfile and .dockerignore">
+
+In the same folder, create `Dockerfile`, with no extension:
+
+```dockerfile title="Dockerfile"
+FROM python:3.12-slim
+WORKDIR /app
+RUN useradd --create-home --uid 1001 appuser
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
+USER 1001
+ARG APP_VERSION=v1
+ENV APP_VERSION=$APP_VERSION
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--graceful-timeout", "20", "app:app"]
+```
+
+| Line | What it does | Why it's here |
+|---|---|---|
+| `FROM python:3.12-slim` | Start from a small Debian with Python 3.12 | Pinned to 3.12, so it can't jump versions |
+| `WORKDIR /app` | Work in `/app` from now on | Keeps the app's files together |
+| `RUN useradd …` | Create `appuser`, number 1001 | Never changes, so it sits near the top and stays cached |
+| `COPY requirements.txt .` | Copy only the library list | So the next line depends on this file alone |
+| `RUN pip install --no-cache-dir -r requirements.txt` | Install the libraries. `--no-cache-dir` stops pip keeping its download cache, which would only make the image bigger | The slow step. Reused until `requirements.txt` changes |
+| `COPY app.py .` | Copy the code | Last, because it changes most |
+| `USER 1001` | Run the app as `appuser` | Not root |
+| `ARG APP_VERSION=v1` | A build-time value, `v1` unless you pass `--build-arg APP_VERSION=v2` | Lets later lessons build a v2 from the same code |
+| `ENV APP_VERSION=$APP_VERSION` | Copy that value into a setting the running app reads | `ARG` disappears after the build; `ENV` stays |
+| `EXPOSE 8080` | Note the port | Documentation for people and tools |
+| `HEALTHCHECK …` | Every 30 seconds, fetch `/health` with Python. Wait up to 3 seconds; after 3 failures in a row, mark the container unhealthy. Failures in the first 10 seconds don't count | The slim image has no `curl`, so the check uses Python, which is already there |
+| `CMD [ … ]` | Start gunicorn on port 8080 with 2 workers. On a stop signal, give requests in progress up to 20 seconds to finish | Bracket form, so gunicorn hears the stop signal |
+
+<Note title="Docker's HEALTHCHECK isn't used everywhere">
+
+Docker and Docker Compose use this line. ECS and Kubernetes ignore it and use their own health checks, which you set in the task definition or as probes. It's still worth having: it documents how to check the app, and it works locally.
+
+</Note>
+
+Now create `.dockerignore`, to keep anything else in the folder out of the build:
+
+```text title=".dockerignore"
+.git
+.venv
+__pycache__
+*.pyc
+.env
+*.pem
+Dockerfile*
+.dockerignore
+```
+
+| Line | Leaves out |
+|---|---|
+| `.git` | Your git history, which can be large and may hold old secrets |
+| `.venv`, `__pycache__`, `*.pyc` | Python's local files, which belong to your Mac, not the image |
+| `.env`, `*.pem` | Settings files and keys: secrets |
+| `Dockerfile*`, `.dockerignore` | The build files themselves. Docker still reads them; they just aren't copied into the image |
+
+This Dockerfile copies files by name, so `.dockerignore` is a second line of defence. It matters most the day someone writes `COPY . .`.
+
+</Step>
+
+<Step title="Build the image">
+
+In the terminal, go into the folder:
+
+```sh
+cd order-service
+```
+
+| Part | What it means |
+|---|---|
+| `cd order-service` | move into the folder, so the next commands use its files |
+
+```sh
+docker build -t order-service:v1 .
+```
+
+| Part | What it means |
+|---|---|
+| `docker build` | build an image from a Dockerfile |
+| `-t order-service:v1` | name it `order-service`, with the tag `v1` |
+| `.` | the build context: send this folder to the builder. Docker looks for `Dockerfile` in it |
+
+```output title="The lines that matter look like this"
+ => [1/6] FROM docker.io/library/python:3.12-slim
+ => [2/6] WORKDIR /app
+ => [3/6] RUN useradd --create-home --uid 1001 appuser
+ => [4/6] COPY requirements.txt .
+ => [5/6] RUN pip install --no-cache-dir -r requirements.txt
+ => [6/6] COPY app.py .
+ => exporting to image
+ => => naming to docker.io/library/order-service:v1
+```
+
+There are more lines than this, and each has a time on the right. The first build downloads the base image, so it takes longest. Only six lines are numbered: `USER`, `ARG`, `ENV`, `EXPOSE`, `HEALTHCHECK` and `CMD` are settings, not layers.
+
+<Note title="Building for AWS">
+
+On a Mac with an Apple chip, this builds an image for Arm processors, which is right for running it on your Mac. An image going to AWS needs `--platform linux/amd64` as well. [Storing images: ECR](/lessons/ecr/) does that.
+
+</Note>
+
+<Mistake title="installing before copying the file">
+
+If `RUN pip install` comes before `COPY requirements.txt .`, or `.dockerignore` leaves the file out, the build stops:
+
+```output title="The build fails with"
+ERROR: Could not open requirements file: [Errno 2] No such file or directory: 'requirements.txt'
+```
+
+**Why:** each line only sees what earlier lines put into the image. Your folder on your Mac isn't visible to `RUN` at all.
+
+**The fix:** copy the file first, and check `.dockerignore` doesn't list it.
+
+</Mistake>
+
+</Step>
+
+<Step title="Run it and check it">
+
+```sh
+docker run -d -p 8080:8080 --name orders order-service:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker run` | start a container from an image |
+| `-d` | detached: run in the background and give you the terminal back |
+| `-p 8080:8080` | connect port 8080 on your Mac to port 8080 in the container |
+| `--name orders` | call the container `orders`, so later commands can use that name |
+| `order-service:v1` | the image to start |
+
+<See>
+
+A long line of letters and numbers: the new container's ID. It started.
+
+</See>
+
+```sh
+curl localhost:8080/health
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch a web address and print the answer |
+| `localhost:8080` | your own Mac, port 8080, which `-p` connects to the container |
+| `/health` | the page to fetch |
+
+```output
+{"status":"ok","version":"v1"}
+```
+
+```sh
+curl localhost:8080/
+```
+
+| Part | What it means |
+|---|---|
+| `/` | the home page, which says who answered |
+
+```output
+{"served_by":"4d29ffd981e4","service":"order-service","version":"v1"}
+```
+
+`served_by` is the container's own name for itself: the first 12 characters of its ID. Yours will be different.
+
+```sh
+docker ps
+```
+
+| Part | What it means |
+|---|---|
+| `docker ps` | list running containers |
+
+<See>
+
+One row, named `orders`. Its STATUS says `Up` with `(health: starting)`, and about 30 seconds later, once the first check has passed, `(healthy)`. That's the `HEALTHCHECK` line at work.
+
+</See>
+
+```sh
+docker exec orders whoami
+```
+
+| Part | What it means |
+|---|---|
+| `docker exec` | run a command inside a running container |
+| `orders` | which container |
+| `whoami` | the command: print the current user |
+
+```output
+appuser
+```
+
+Not `root`. User 1001 is `appuser`, because that's the name the `useradd` line gave it.
+
+<Mistake title="the name is already in use">
+
+If you run the same `docker run` again, it fails:
+
+```output title="Docker says"
+docker: Error response from daemon: Conflict. The container name "/orders" is already in use by container "4d29ffd981e4a7c2b5e8f1d3c6a9b2e5f8d1c4a7b0e3f6a9c2d5e8b1f4a7c0d3". You have to remove (or rename) that container to be able to reuse that name.
+```
+
+**Why:** a container keeps its name until it's removed, even after it stops.
+
+**The fix:** `docker rm -f orders` stops and removes the old one. Then run it again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Change the code and watch the cache">
+
+Open `app.py` and add one line at the very end, a comment:
+
+```python title="app.py"
+import os
+import socket
+
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+VERSION = os.environ.get("APP_VERSION", "v1")
+
+ORDERS = [
+    {"id": 1, "item": "margherita pizza", "qty": 2},
+    {"id": 2, "item": "pad thai", "qty": 1},
+    {"id": 3, "item": "falafel wrap", "qty": 3},
+]
+
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", version=VERSION)
+
+
+@app.get("/")
+def home():
+    return jsonify(service="order-service", version=VERSION, served_by=socket.gethostname())
+
+
+@app.get("/orders")
+def orders():
+    return jsonify(version=VERSION, count=len(ORDERS), orders=ORDERS)
+
+# a small change, to test the cache
+```
+
+Save it and build again, as a new tag:
+
+```sh
+docker build -t order-service:v2 .
+```
+
+| Part | What it means |
+|---|---|
+| `-t order-service:v2` | the same name, a new tag, so you keep v1 as it was |
+
+```output title="Look for CACHED"
+ => CACHED [2/6] WORKDIR /app
+ => CACHED [3/6] RUN useradd --create-home --uid 1001 appuser
+ => CACHED [4/6] COPY requirements.txt .
+ => CACHED [5/6] RUN pip install --no-cache-dir -r requirements.txt
+ => [6/6] COPY app.py .
+```
+
+Only the step that reads `app.py` ran. The whole build takes a second or two.
+
+</Step>
+
+<Step title="Build it in the wrong order">
+
+Create a second Dockerfile called `Dockerfile.bad`. It copies the whole folder before installing:
+
+```dockerfile title="Dockerfile.bad"
+FROM python:3.12-slim
+WORKDIR /app
+RUN useradd --create-home --uid 1001 appuser
+COPY . .
+RUN pip install --no-cache-dir -r requirements.txt
+USER 1001
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+```
+
+Build it once, so there's a cache to reuse:
+
+```sh
+docker build -f Dockerfile.bad -t order-service:bad .
+```
+
+| Part | What it means |
+|---|---|
+| `-f Dockerfile.bad` | use this file instead of the one called `Dockerfile` |
+| `-t order-service:bad` | tag the result `bad` |
+| `.` | the same folder as before |
+
+Now change the comment at the end of `app.py`, so it reads `# a second small change`, save, and run the same build command again.
+
+```output title="This time"
+ => CACHED [2/5] WORKDIR /app
+ => CACHED [3/5] RUN useradd --create-home --uid 1001 appuser
+ => [4/5] COPY . .
+ => [5/5] RUN pip install --no-cache-dir -r requirements.txt
+```
+
+`pip install` ran again, for a comment. `COPY . .` reads `app.py`, so its input changed, and every step below it had to rebuild. With two small libraries it's a few seconds; with a real app's libraries it's minutes, on every change.
+
+</Step>
+
+<Step title="See CMD and ENTRYPOINT side by side">
+
+Create two tiny Dockerfiles. First, `Dockerfile.cmd`:
+
+```dockerfile title="Dockerfile.cmd"
+FROM python:3.12-slim
+CMD ["echo", "this is the default"]
+```
+
+Then `Dockerfile.ep`:
+
+```dockerfile title="Dockerfile.ep"
+FROM python:3.12-slim
+ENTRYPOINT ["echo", "always starts with this:"]
+```
+
+Build both:
+
+```sh
+docker build -f Dockerfile.cmd -t cmd-demo .
+```
+
+| Part | What it means |
+|---|---|
+| `-f Dockerfile.cmd` | build from the CMD example |
+| `-t cmd-demo` | name it `cmd-demo`. With no tag, Docker adds `latest` |
+
+```sh
+docker build -f Dockerfile.ep -t ep-demo .
+```
+
+| Part | What it means |
+|---|---|
+| `-f Dockerfile.ep -t ep-demo` | the same, for the ENTRYPOINT example |
+
+Run the CMD one twice, once with extra words:
+
+```sh
+docker run --rm cmd-demo
+```
+
+| Part | What it means |
+|---|---|
+| `--rm` | delete the container as soon as it finishes |
+| `cmd-demo` | the image; nothing after it, so CMD runs |
+
+```output
+this is the default
+```
+
+```sh
+docker run --rm cmd-demo echo "I replaced it"
+```
+
+| Part | What it means |
+|---|---|
+| `echo "I replaced it"` | words after the image name. They **replace** CMD |
+
+```output
+I replaced it
+```
+
+Now the ENTRYPOINT one:
+
+```sh
+docker run --rm ep-demo and this was added
+```
+
+| Part | What it means |
+|---|---|
+| `ep-demo` | the image with the ENTRYPOINT |
+| `and this was added` | words after the image name. They're **added** to the ENTRYPOINT |
+
+```output
+always starts with this: and this was added
+```
+
+</Step>
+
+<Step title="Stop it cleanly">
+
+```sh
+docker stop orders
+```
+
+| Part | What it means |
+|---|---|
+| `docker stop` | send the container's main process `SIGTERM`, wait up to 10 seconds, then force it |
+| `orders` | which container |
+
+```output
+orders
+```
+
+It returns in about a second, not ten. Look at what gunicorn did:
+
+```sh
+docker logs orders
+```
+
+| Part | What it means |
+|---|---|
+| `docker logs` | print everything the container wrote to its output, even after it stopped |
+
+```output title="The last lines"
+[INFO] Handling signal: term
+[INFO] Worker exiting (pid: 7)
+[INFO] Worker exiting (pid: 8)
+[INFO] Shutting down: Master
+```
+
+Each line also starts with a date and a number; yours will differ. Gunicorn heard the signal, let its workers finish, and exited. That's the bracket form of `CMD` doing its job.
+
+<Mistake title="the shell form of CMD">
+
+If you write `CMD gunicorn --bind 0.0.0.0:8080 app:app`, without brackets, the build still works but warns you:
+
+```output title="docker build prints"
+ 1 warning found (use docker --debug to expand):
+ - JSONArgsRecommended: JSON arguments recommended for CMD to prevent unintended behavior related to OS signals
+```
+
+**Why:** without brackets, Docker starts a shell, and the stop signal goes to the shell. Whether gunicorn ever hears it depends on the shell, so a stop can turn into a forced kill after 10 seconds, cutting off requests.
+
+**The fix:** write it with square brackets, one word per string, as in the Dockerfile above.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Remove the container:
+
+```sh
+docker rm orders
+```
+
+| Part | What it means |
+|---|---|
+| `docker rm` | delete a stopped container |
+
+```output
+orders
+```
+
+Then remove the images you built:
+
+```sh
+docker image rm order-service:v1 order-service:v2 order-service:bad cmd-demo ep-demo
+```
+
+| Part | What it means |
+|---|---|
+| `docker image rm` | delete images from your computer |
+| `order-service:v1` and the rest | every image this lab built, by name and tag |
+
+<See>
+
+An `Untagged:` line for each name, and some `Deleted:` lines. Nothing from this lab is left except the files in your folder.
+
+</See>
+
+**Keep the `order-service` folder.** [Data and networking](/lessons/volumes-and-networking/) and [Storing images: ECR](/lessons/ecr/) build from it again.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Line or command | What it does |
+|---|---|
+| `FROM python:3.12-slim` | Start from a pinned, small base image |
+| `COPY requirements.txt .` then `RUN pip install` then `COPY app.py .` | Libraries first, code last: fast rebuilds |
+| `RUN` | Runs once, at build time |
+| `CMD ["a", "b"]` | Runs at container start. Brackets, so the app hears stop signals |
+| `ENTRYPOINT` | Fixed start command; `docker run` words are added to it |
+| `USER 1001` | Don't run as root. Use the number |
+| `.dockerignore` | Keep `.git`, `.env` and keys out of the build |
+| `COPY --from=build` | Multi-stage: ship the result, not the build tools |
+| `docker build -t name:tag .` | Build from the Dockerfile here |
+| `docker build -f File -t name:tag .` | Build from another Dockerfile |
+| `CACHED` in the output | That step was reused |
+| Secret copied in, then `rm` | Still in the image. Never copy it in |
+
+</Cheat>
+
+</Part>

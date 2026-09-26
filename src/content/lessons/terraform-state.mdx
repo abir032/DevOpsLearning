@@ -1,0 +1,673 @@
+---
+time: 45 minutes
+level: Intermediate
+before: [first-resource]
+cost: pennies
+quiz:
+  - q: Leo clones the repository and runs apply. Terraform plans to create duplicates of everything. Why?
+    answer: 1
+    options:
+      - t: The code had a bug
+        why: The code was fine — it was exactly the code that built everything the first time.
+      - t: The state file wasn't in the repository, so Leo's Terraform had no memory of anything existing
+        why: State lives outside the code. With no state, every resource in the code looks new, so Terraform plans to create it again.
+      - t: AWS doesn't allow two people to use one account
+        why: Many people can share an account. The problem is on Terraform's side, not AWS's.
+      - t: Leo used a different version of Terraform
+        why: A different version might warn you, but it wouldn't make Terraform forget what exists.
+  - q: What is wrong with committing terraform.tfstate to git?
+    answer: 1
+    options:
+      - t: Nothing — it's the easiest way to share it
+        why: It shares it, but it also shares every secret inside it, forever. And git still has no lock.
+      - t: It can contain passwords in plain text, and stays in git history forever
+        why: Any secret that passes through Terraform ends up in state. Committing it copies those secrets to every clone, and deleting the file later doesn't remove it from history.
+      - t: Git can't store files that large
+        why: State files are usually small. Size isn't the problem.
+      - t: It makes Terraform slower
+        why: Where the file lives doesn't change how fast Terraform runs.
+  - q: Two people apply at the same time without locking. What happens?
+    answer: 1
+    options:
+      - t: Terraform stops both with an error
+        why: Without a lock there's nothing to detect the clash. That's the danger.
+      - t: Both succeed, and one silently overwrites the other's record in the state
+        why: Both read the same old state and both write back. The last write wins, and anything that only existed in the first version is forgotten.
+      - t: AWS merges the two changes
+        why: AWS never sees the state file. It just builds what each apply asks for.
+      - t: The second apply waits for the first automatically
+        why: That's what locking gives you. Without a lock, nothing waits.
+  - q: Your dev and stg environments keep state in the same bucket. What must be different between them?
+    answer: 1
+    options:
+      - t: The region
+        why: The region setting says where the bucket is. Both environments use the same bucket, so it's the same.
+      - t: The key — the path of the file inside the bucket
+        why: dev/terraform.tfstate and stg/terraform.tfstate are two separate files. The same key would make the environments overwrite each other.
+      - t: The encrypt setting
+        why: Both should be encrypted. It doesn't separate them.
+      - t: Nothing — Terraform keeps them apart by itself
+        why: It doesn't. Terraform writes to whatever key you give it.
+  - q: Someone's apply crashed hours ago and now nobody can apply. What do you do first?
+    answer: 2
+    options:
+      - t: Delete the state file
+        why: That makes Terraform forget everything it built — a much bigger problem than a lock.
+      - t: Run terraform force-unlock straight away
+        why: It's the right command, but only once you're sure the lock is really abandoned.
+      - t: Check nobody is still applying, then force-unlock using the lock's ID
+        why: The lock error tells you who holds the lock and since when. Ask them first. Removing a lock someone really holds brings back exactly the problem locking prevents.
+      - t: Recreate the bucket
+        why: The state and all its old versions live in the bucket. Recreating it would lose them.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the platform team grows">
+
+For six months, one engineer — Maya — ran all of QuickCart's Terraform from her laptop. The code was in git, so when Leo joined, he had all of it.
+
+He ran `terraform apply`. Terraform planned to create a **second** load balancer and a **second** database. Nothing in the code had changed, and nobody had asked for duplicates.
+
+Two weeks later, after a quick fix, they both ran `apply` within the same minute. Afterwards, Terraform no longer knew about a database Maya had just built. It was still running and still costing money, but nobody's code was managing it any more.
+
+</Story>
+
+Both problems have the same cause: a file called `terraform.tfstate` that lived only on Maya's laptop.
+
+<Case title="A very common real mistake">
+
+Teams hit the first problem and fix it by committing `terraform.tfstate` to git, so everyone shares it. But the state file holds every value Terraform knows — including a database's master password, in plain text. It now lives in the git history of every clone of the repository, even after the file is deleted. Every secret in it has to be changed.
+
+</Case>
+
+This lesson is about what that file is, and the four things a team does to keep it safe.
+
+</Part>
+
+<Part id="idea">
+
+After an apply, Terraform writes `terraform.tfstate`: a record of every resource it created, linked to that resource's real ID in AWS.
+
+Your code says *an ECR repository named quickcart-orders*. Your AWS account may have thousands of things in it. State is how Terraform knows **which one is yours**, and whether it already exists.
+
+<Key>State is Terraform's memory. Lose it, and Terraform forgets everything it built.</Key>
+
+### Every plan compares three things
+
+| Your code | State | AWS | What the plan does |
+|---|---|---|---|
+| has it | doesn't | doesn't | **Create** it |
+| has it | has it | has it, matching | **Nothing** |
+| has it | has it | someone changed it | **Change it back** to match the code |
+| deleted it | has it | has it | **Destroy** it |
+| has it | **lost** | has it | **Create a duplicate** — Leo's problem |
+
+That last row is why state matters so much. Without it, Terraform can't tell that something already exists.
+
+### Why two people at once breaks it
+
+<YouKnow title="You already know this: offline sync">
+
+Two phones edit the same record while offline. Both sync. The second sync quietly overwrites the first, and one person's change disappears. That's **last write wins**.
+
+Shared state without a lock is exactly this. Two applies read the same old state, each builds something, each writes its version back — and the second one erases the first one's record.
+
+</YouKnow>
+
+### What's inside it
+
+Every attribute of every resource: IDs, names, addresses, settings AWS filled in — and **any secret that passed through Terraform, in plain text**. So state has to be treated like a password file, because in part it is one.
+
+### The fix, in four parts
+
+| Part | What it does | Which problem it solves |
+|---|---|---|
+| **Remote** — kept in S3 | Everyone reads and writes the same copy | Leo's duplicates, and a lost laptop |
+| **Locking** | Only one apply at a time; others are refused | Two applies erasing each other's record |
+| **Versioning** | Every past version of the file is kept | A damaged state can be rolled back |
+| **Encryption and no public access** | Unreadable to anyone who shouldn't see it | The secrets inside the state |
+
+### The backend block, every setting explained
+
+You tell Terraform where state lives with a **backend** block, usually in a file called `backend.tf`:
+
+```hcl title="backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "dev/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `backend "s3"` | Store state in S3 instead of on your laptop | State stays in a local file, with all the problems above | Never, once a team shares the code |
+| `bucket` | Which bucket holds the file. Bucket names are unique across all of AWS, so adding your account number keeps yours unique | Required — `terraform init` stops with an error | Never after the first init; moving state is a deliberate migration |
+| `key` | The file's path inside the bucket. **Each environment gets its own**, like `dev/…` and `stg/…` | Required — `terraform init` stops with an error | Once per environment |
+| `region` | Which region the **bucket** is in — not where your servers are | Terraform uses your default region and may not find the bucket | Only if the bucket is in another region |
+| `encrypt` | Encrypt the state file when it's written to S3 | S3 still encrypts new objects by default today, but saying so makes it explicit and survives a bucket setting being changed | Never |
+| `use_lockfile` | While a command runs, keep a lock file next to the state in S3. Needs Terraform 1.10 or later | No locking: two people can apply at once | Never |
+
+<Note title="You'll see an older version of this">
+
+Before Terraform 1.10, locking needed a separate DynamoDB table, written as `dynamodb_table = "terraform-locks"`. `use_lockfile = true` does the same job with S3 alone, and the DynamoDB option is now deprecated. If you join a project that still uses it, it's the same idea with one more piece.
+
+</Note>
+
+### The chicken and the egg
+
+The bucket that holds state can't be created by the Terraform code that needs it — where would *that* state live? So you create it once, by hand, and never manage it with Terraform. It's the one place where clicking in the console is correct.
+
+</Part>
+
+<Part id="see">
+
+**First, the three-way comparison.** Pick what happens, and see what the next plan does about it.
+
+<TfThreeway />
+
+**Now the race.** Maya and Leo press apply at the same moment. Play it with locking off, then again with locking on, and watch the state file.
+
+<TfRace />
+
+**What to notice:** with locking off, both applies finished successfully — no error, no warning. That's what makes it dangerous. Nothing tells you anything went wrong until a later plan tries to create something that already exists.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">one S3 bucket holding a few small files, and an empty ECR repository, which is free.</Cost>
+
+You'll build a tiny Terraform project, move its state into S3, watch the lock refuse a second command, and bring back an old version of the state. About 30 minutes.
+
+You need Terraform 1.10 or later and a working AWS login in your terminal. [Set up your Mac](/lessons/mac-setup/) covers both. Check with:
+
+```sh
+terraform version
+```
+
+| Part | What it means |
+|---|---|
+| `terraform version` | print the version of Terraform installed |
+
+```output
+Terraform v1.16.4
+on darwin_arm64
+```
+
+Any version from 1.10 upwards works. Yours may be newer.
+
+<Steps>
+
+<Step title="Make a small project with local state">
+
+If you already have a Terraform folder from [Your first resource](/lessons/first-resource/), you can use it and skip to step 2. Otherwise, make a new folder and move into it:
+
+```sh
+mkdir quickcart-tf
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-tf` | its name, inside the folder you're in now |
+
+```sh
+cd quickcart-tf
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory — every later command runs in here |
+| `quickcart-tf` | the folder you just made |
+
+In that folder, create `main.tf`:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "quickcart-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version` | Refuse to run on a Terraform older than 1.10, which has no `use_lockfile` | An old Terraform would fail later with a confusing error about the backend | When you start relying on a newer feature |
+| `required_providers` → `aws` | Which plugin talks to AWS: `hashicorp/aws`, any 6.x version | Terraform guesses the source and takes the newest version, which may one day bring breaking changes | When you deliberately upgrade to a new major version |
+| `provider "aws"` → `region` | Where the resources are created | Terraform uses the region from your AWS login settings, which may not be the one you expect | To build somewhere else |
+| `aws_ecr_repository` `"orders"` | An ECR repository — a private store for container images. `orders` is Terraform's name for it; `quickcart-orders` is AWS's | — | — |
+| `name` | The repository's name in AWS | Required | Never after creation — changing it replaces the repository |
+| `image_tag_mutability` | `IMMUTABLE` means a tag like `v1` can never be pointed at a different image | Defaults to `MUTABLE`: someone can push a different image under the same tag | Rarely. [Storing images: ECR](/lessons/ecr/) explains why |
+| `force_delete` | Let `terraform destroy` delete the repository even if it holds images | Destroy fails while any image is inside | Set to `false` for production repositories |
+| `tags` | Labels, so you can find and cost everything belonging to QuickCart | No labels; harder to find later | Add owner, environment and cost-centre tags in real projects |
+
+Set up the folder and build the repository:
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | download the AWS provider and prepare this folder |
+
+```output
+Terraform has been successfully initialized!
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | work out a plan, show it, and carry it out once you type `yes` |
+
+It shows the plan and asks you to confirm. Type `yes`.
+
+```output
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: yes
+
+aws_ecr_repository.orders: Creating...
+aws_ecr_repository.orders: Creation complete after 1s [id=quickcart-orders]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+You now have a file called `terraform.tfstate` in the folder. That's Terraform's memory, sitting on your laptop — Maya's situation.
+
+</Step>
+
+<Step title="Create the state bucket in the console">
+
+First, find your account number: open the account menu at the top right of the console and copy the 12-digit **Account ID**. In this course it's shown as `111122223333`; use yours instead.
+
+<ConsolePath path="S3 > General purpose buckets > Create bucket" />
+
+| Field | Enter |
+|---|---|
+| Bucket type | **General purpose** |
+| Bucket name | `quickcart-tfstate-` followed by your account ID, like `quickcart-tfstate-111122223333` |
+| Object Ownership | **ACLs disabled** — the default |
+| Block all public access | **On** — the default. Leave it |
+| Bucket Versioning | **Enable** |
+| Default encryption | **SSE-S3** — the default. Leave it |
+
+Choose **Create bucket**.
+
+<See>
+
+The bucket in the list. Open it, go to **Properties**, and check that **Bucket Versioning** says **Enabled**.
+
+</See>
+
+**Versioning is the setting people skip, and regret.** It's the only way back if the state is ever damaged.
+
+<Mistake title="the bucket name is taken">
+
+```output title="Creating the bucket fails with a message like"
+The requested bucket name is not available. The bucket namespace is shared by all users of the system. Please select a different name and try again.
+```
+
+**Why:** bucket names are shared across every AWS account in the world. Someone, somewhere, already has that name.
+
+**The fix:** make sure you added your own account ID to the end. That makes the name unique to you.
+
+</Mistake>
+
+</Step>
+
+<Step title="Add the backend block">
+
+In the same folder as `main.tf`, create `backend.tf`. Put your own bucket name in place of the highlighted account number:
+
+```hcl title="backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "dev/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+Every setting is explained in [the idea](#idea), above.
+
+<Mistake title="running plan straight after adding the backend">
+
+```output title="Terraform stops with"
+Error: Backend initialization required, please run "terraform init"
+
+Reason: Initial configuration of the requested backend "s3"
+```
+
+**Why:** changing where state lives is a big step, so Terraform won't do it silently.
+
+**The fix:** run the `init` command in the next step first.
+
+</Mistake>
+
+</Step>
+
+<Step title="Move the state across">
+
+```sh
+terraform init -migrate-state
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | set the folder up again, now with the S3 backend |
+| `-migrate-state` | copy the state you already have into the new backend |
+
+It asks before copying. **Type `yes`.**
+
+```output title="It asks, then confirms"
+Initializing the backend...
+Do you want to copy existing state to the new backend?
+  Pre-existing state was found while migrating the previous "local" backend to the
+  newly configured "s3" backend. No existing state was found in the newly
+  configured "s3" backend. Do you want to copy this state to the new "s3"
+  backend? Enter "yes" to copy and "no" to start with an empty state.
+
+  Enter a value: yes
+
+
+Successfully configured the backend "s3"! Terraform will automatically
+use this backend unless the backend configuration changes.
+```
+
+<Mistake title="answering no">
+
+If you type `no`, Terraform starts with an empty memory in S3. The next plan shows `Plan: 1 to add` for a repository that already exists — Leo's duplicates. Applying would fail with `RepositoryAlreadyExistsException`.
+
+**The fix:** run `terraform init -migrate-state` again and answer `yes`. Your local `terraform.tfstate` is still in the folder, so there's still something to copy.
+
+</Mistake>
+
+</Step>
+
+<Step title="Check it worked">
+
+<ConsolePath path="S3 > General purpose buckets > your bucket > dev/" />
+
+<See>
+
+A file called `terraform.tfstate`.
+
+</See>
+
+Now ask Terraform to compare everything again, reading state from S3 this time:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | compare code, state and AWS, and show what would change — without changing anything |
+
+```output
+No changes. Your infrastructure matches the configuration.
+```
+
+Same result as before. Only the state's location changed.
+
+</Step>
+
+<Step title="Watch the lock refuse a second command">
+
+To see the lock you need a command that stops half-way and holds it. `apply` does that while it waits for you to type `yes` — but only when there's a change to approve. So first make a small change: add a second tag, `Team`, at the end of `main.tf`. The whole file now reads:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "quickcart-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+    Team    = "platform"
+  }
+}
+```
+
+Now open **two terminal windows**, both in the `quickcart-tf` folder.
+
+**Window 1** — start an apply. When it asks `Enter a value:`, **don't answer yet**:
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | takes the lock, plans the tag change, then waits for you — still holding the lock |
+
+**Window 2** — while window 1 is waiting:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | also needs the lock, even though it changes nothing, so it reads a state nobody is halfway through writing |
+
+```output title="Window 2 is refused"
+Error: Error acquiring the state lock
+
+Lock Info:
+  ID:        6f1c2d9e-3b7a-4c55-9e2f-8a0d4b1c7e21
+  Path:      quickcart-tfstate-111122223333/dev/terraform.tfstate
+  Operation: OperationTypeApply
+  Who:       maya@maya-laptop
+  Version:   1.16.4
+  Created:   2026-09-25 10:22:11.482913 +0000 UTC
+  Info:
+
+Terraform acquires a state lock to protect the state from being written
+by multiple users at the same time. Please resolve the issue above and try
+again. For most commands, you can disable locking with the "-lock=false"
+flag, but this is not recommended.
+```
+
+Your ID, name and times will differ, and there's an extra `Error message` line from S3 explaining the refusal. **That refusal is the whole point.** It tells you who holds the lock and since when.
+
+Now go back to **window 1** and type `yes`. The tag is added and the lock is released. Run `terraform plan` in window 2 again, and this time it works.
+
+</Step>
+
+<Step title="Bring back an old version">
+
+Because of the tag change, the bucket now holds more than one version of the state.
+
+<ConsolePath path="S3 > your bucket > dev/ > terraform.tfstate > Versions" />
+
+<See>
+
+Two or more versions, each with a time. The newest is at the top, marked **Current version**.
+
+</See>
+
+Tick the older version, choose **Download**, and move the file into your project folder, renamed to `recovered.json`. Then replace the state with it:
+
+```sh
+terraform state push recovered.json
+```
+
+| Part | What it means |
+|---|---|
+| `terraform state push` | replace the state in S3 with a file you give it |
+| `recovered.json` | the older version you downloaded |
+
+<Mistake title="Terraform refuses the older version">
+
+```output title="Terraform stops with"
+Failed to write state: cannot import state with serial 1 over newer state with serial 2
+```
+
+**Why:** every time state is written, a counter called the **serial** goes up. Terraform refuses to write an older state over a newer one, because that usually means you're about to throw away someone's changes. Your serial numbers may be different.
+
+**The fix:** if you are sure — and in a real recovery you've checked with the team first — add `-force`, which skips that one safety check:
+
+```sh
+terraform state push -force recovered.json
+```
+
+| Part | What it means |
+|---|---|
+| `terraform state push` | replace the state with a file |
+| `-force` | allow it even though the file is older than the current state |
+| `recovered.json` | the version to restore |
+
+</Mistake>
+
+Straight afterwards, see how the recovered state compares with reality:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | refresh the state from AWS, then compare it with the code |
+
+```output
+No changes. Your infrastructure matches the configuration.
+```
+
+The old version didn't know about the `Team` tag, but `plan` reads the real repository from AWS first and finds the tag already there. The recovery was safe because the old state still pointed at the same real resource.
+
+<Note title="Only push a state you have checked">
+
+In real life you do this after something has gone wrong, not as practice on a project others are using. Always run `terraform plan` straight after, and read it carefully before any apply.
+
+</Note>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Delete the repository Terraform built:
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything in the state, and carry it out once you type `yes` |
+
+```output
+Destroy complete! Resources: 1 destroyed.
+```
+
+**Keep the bucket** if you're carrying on with the course. It costs pennies, and later lessons and the pipeline project use it.
+
+If you're not carrying on, empty it and delete it: **S3 → your bucket → Empty**, type `permanently delete`, then **Delete** the bucket itself. Emptying a versioned bucket removes every old version too.
+
+</Step>
+
+</Steps>
+
+### If a lock ever gets stuck
+
+A laptop goes to sleep mid-apply, or a terminal is closed. The lock is never released, and everyone is refused. First, **check that nobody is really applying** — the error tells you who holds the lock. Then remove it using the ID from the error:
+
+```sh ph="LOCK_ID"
+terraform force-unlock LOCK_ID
+```
+
+| Part | What it means |
+|---|---|
+| `terraform force-unlock` | remove a lock by hand |
+| `LOCK_ID` | replace this with the `ID` line from the lock error |
+
+```output
+Do you really want to force-unlock?
+  Terraform will remove the lock on the remote state.
+  This will allow local Terraform commands to modify this state, even though it
+  may still be in use. Only 'yes' will be accepted to confirm.
+
+  Enter a value: yes
+
+Terraform state has been successfully unlocked!
+```
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command or setting | What it does |
+|---|---|
+| `terraform state list` | List everything Terraform is tracking |
+| `terraform state show aws_ecr_repository.orders` | Every detail of one resource |
+| `terraform init -migrate-state` | Move state into a new backend |
+| `terraform state pull` | Print the current state, to save a copy |
+| `terraform state push FILE` | Replace the state. Refused if the file is older, unless you add `-force` |
+| `terraform force-unlock LOCK_ID` | Clear a stuck lock, after checking nobody holds it |
+| `key` | One per environment: `dev/…`, `stg/…` |
+| `use_lockfile = true` | One command at a time. Terraform 1.10 or later |
+| Bucket versioning | Turn it on before you need it |
+| `.gitignore` | `*.tfstate` and `*.tfstate.*` — never commit state |
+
+</Cheat>
+
+</Part>

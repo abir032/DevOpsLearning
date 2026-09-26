@@ -1,0 +1,195 @@
+---
+/*
+ * Auto scaling: servers under load.
+ * Teaches: target tracking adds servers when busy (up to the max), and the
+ * group replaces any server that dies, with nobody touching the console.
+ */
+import { fresh, simHtml } from "../../scripts/asg-load";
+const first = fresh();
+---
+<div class="viz" data-track="cloud" data-viz="asg-load">
+  <div class="viz-controls">
+    <span class="lbl" id="al-lbl">Traffic</span>
+    <div class="seg" role="group" aria-labelledby="al-lbl">
+      <button type="button" data-t="quiet" aria-pressed="true">Quiet</button>
+      <button type="button" data-t="busy" aria-pressed="false">Busy</button>
+      <button type="button" data-t="rush" aria-pressed="false">Dinner rush</button>
+    </div>
+    <button class="btn line" type="button" data-a="kill">Terminate a server</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+  </div>
+  <div class="viz-stage asg" set:html={simHtml(first)} />
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Two servers, one in each zone, handle a quiet afternoon. Raise the <b>traffic</b>, or <b>terminate a server</b>, and watch what the group does.</div>
+</div>
+
+<script>
+  import { fresh, simHtml, cpuEach, wanted, live, running, pickZone, pickVictim, settled, TARGET, MAX, MIN,
+    BOOT_TICKS, GRACE_TICKS, OUT_TICKS, IN_TICKS, type Sim, type Traffic } from "../../scripts/asg-load";
+  import { press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  const NAMES: Record<Traffic, string> = { quiet: "quiet", busy: "busy", rush: "a dinner rush" };
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="asg-load"]').forEach((root) => {
+      if (!once(root)) return;
+      const stage = root.querySelector<HTMLElement>(".asg")!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const tBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-t]")];
+      const kill = root.querySelector<HTMLButtonElement>('[data-a="kill"]')!;
+      let s: Sim = fresh();
+      let timer: ReturnType<typeof setInterval> | null = null;
+      let killed: number[] = [];   /* servers the learner terminated, awaiting replacement */
+      let healers = new Map<number, number>(); /* replacement id -> the id it replaces */
+      let healedMsg = "";
+
+      const render = () => {
+        stage.innerHTML = simHtml(s);
+        kill.disabled = live(s).length === 0;
+      };
+      const stop = () => { if (timer) clearInterval(timer); timer = null; };
+      const start = () => { if (!timer) timer = setInterval(tick, reduced() ? 350 : 1000); };
+
+      function launch(reason: "heal" | "scale") {
+        const z = pickZone(s);
+        const id = s.next++;
+        s.servers.push({ id, zone: z, state: "boot", age: 0 });
+        if (reason === "heal" && killed.length) healers.set(id, killed.shift()!);
+        return { id, z };
+      }
+
+      function tick() {
+        let msg: [string, string, "" | "good" | "bad"] | null = null;
+
+        /* 1. servers move through their life */
+        for (const x of s.servers) {
+          x.age++;
+          if (x.state === "boot" && x.age >= BOOT_TICKS) {
+            x.state = "grace"; x.age = 0;
+            msg = ["Grace period", `<b>web ${x.id}</b> has booted and is running its start-up script. For the <b>grace period</b> the group ignores its health checks, so a slow start isn't mistaken for a failure. It gets no traffic yet.`, ""];
+          } else if (x.state === "grace" && x.age >= GRACE_TICKS) {
+            x.state = "live"; x.age = 0;
+            const was = healers.get(x.id);
+            if (was !== undefined) {
+              healers.delete(x.id);
+              healedMsg = `<b>web ${x.id}</b> replaced <b>web ${was}</b>. `;
+            }
+            msg = ["In service", `<b>web ${x.id}</b> passed its checks and is <b>in service</b>. It now takes its share of the traffic.`, ""];
+          }
+        }
+        s.servers = s.servers.filter((x) => !(x.state === "gone" && x.age >= 1));
+
+        /* 2. health: fewer running than desired means launch replacements */
+        while (running(s).length < s.desired) {
+          const heal = killed.length > 0;
+          const { id, z } = launch(heal ? "heal" : "scale");
+          if (heal) msg = ["Self-healing", `The group counts <b>${running(s).length - 1} running</b>, but desired is <b>${s.desired}</b>. It is one short, so it launches <b>web ${id}</b> in zone ${z} from the launch template.`, ""];
+          else msg = ["Scaling out", `Launching <b>web ${id}</b> in zone ${z}. The group spreads servers across both zones.`, ""];
+        }
+
+        /* 3. target tracking watches the average CPU of servers in service */
+        const cpu = cpuEach(s);
+        const allLive = s.servers.every((x) => x.state === "live");
+        if (cpu > TARGET + 5 && wanted(s) > s.desired) {
+          s.high++; s.low = 0;
+          if (s.high >= OUT_TICKS) {
+            const from = s.desired;
+            s.desired = wanted(s); s.high = 0;
+            msg = ["Target tracking: scale out", `Average CPU has stayed at <b>${cpu}%</b>, above the ${TARGET}% target. Target tracking raises <b>desired capacity from ${from} to ${s.desired}</b>.`, ""];
+          }
+        } else if (allLive && cpu < TARGET - 15 && wanted(s) < s.desired) {
+          s.low++; s.high = 0;
+          if (s.low >= IN_TICKS) {
+            const from = s.desired;
+            s.desired = wanted(s); s.low = 0;
+            msg = ["Target tracking: scale in", `CPU has stayed well under ${TARGET}% for a while. Target tracking lowers <b>desired capacity from ${from} to ${s.desired}</b>. It scales in more slowly than it scales out, so a short dip doesn't remove servers you'll need again a minute later.`, ""];
+          }
+        } else { s.high = 0; s.low = 0; }
+
+        /* 4. more running than desired: terminate the extras */
+        while (running(s).length > s.desired) {
+          const v = pickVictim(s);
+          if (!v) break;
+          v.state = "gone"; v.age = 0;
+        }
+
+        render();
+        if (settled(s)) {
+          stop();
+          const c = cpuEach(s);
+          if (c > TARGET + 5 && s.desired >= MAX) {
+            msg = ["At the maximum", `${healedMsg}<b>${live(s).length} servers in service</b> — the <b>maximum of ${MAX}</b>. Average CPU is still <b>${c}%</b>. The group never goes past the maximum you set, even when it would help. That limit protects your bill; raise it if this is normal traffic.`, "bad"];
+          } else {
+            msg = [healedMsg ? "Self-healed" : "Settled", `${healedMsg}<b>${live(s).length} servers in service</b>, average CPU <b>${c}%</b>${c < TARGET - 15 && s.desired <= MIN ? `. That's the minimum you set, so the group keeps them even when quiet` : c <= TARGET + 5 ? `, close to the ${TARGET}% target` : ""}. Nobody touched the console.`, "good"];
+          }
+          healedMsg = "";
+        }
+        if (msg) tell(say, msg[0], msg[1], msg[2]);
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.t) {
+          s.traffic = b.dataset.t as Traffic;
+          s.high = 0; s.low = 0;
+          press(tBtns, (x) => x === b);
+          render();
+          const c = cpuEach(s);
+          tell(say, "Traffic: " + NAMES[s.traffic], `Traffic is now ${NAMES[s.traffic]}. Each server in service is at <b>${c}% CPU</b>. ${c > TARGET + 5 ? "That's above the 50% target, so target tracking will want more servers." : c < TARGET - 15 && s.desired > 2 ? "That's well under the target, so in a while target tracking will remove some." : "That's close enough to the target."}`);
+          start();
+        } else if (b.dataset.a === "kill") {
+          const v = live(s)[0];
+          if (!v) return;
+          v.state = "gone"; v.age = 0;
+          killed.push(v.id);
+          render();
+          tell(say, "Server terminated", `You terminated <b>web ${v.id}</b> in zone ${v.zone}. Its traffic moves to the servers still in service, so their CPU goes up. The group checks how many are running against the desired capacity.`, "bad");
+          start();
+        } else if (b.dataset.a === "reset") {
+          stop(); s = fresh(); killed = []; healers = new Map(); healedMsg = "";
+          press(tBtns, (x) => x.dataset.t === "quiet");
+          render();
+          tell(say, "Ready", "Two servers, one in each zone. Raise the <b>traffic</b>, or <b>terminate a server</b>.");
+        }
+      });
+      stops.push(stop);
+    });
+    return () => stops.forEach((f) => f());
+  });
+</script>
+
+<style is:global>
+  [data-viz="asg-load"] .asg { padding: 14px 16px; }
+  [data-viz="asg-load"] .asg-stats { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  [data-viz="asg-load"] .asg-stats div { background: var(--bg); border: 1px solid var(--rule); border-radius: 9px; padding: 6px 12px; min-width: 88px; }
+  [data-viz="asg-load"] .asg-stats dt { font-size: 12.5px; color: var(--ink-3); font-weight: 700; }
+  [data-viz="asg-load"] .asg-stats dd { margin: 0; font-size: 18px; font-weight: 800; }
+  [data-viz="asg-load"] .asg-stats dd.hi { color: var(--bad); }
+  [data-viz="asg-load"] .zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  [data-viz="asg-load"] .zone { border: 1.5px dashed var(--rule-2); border-radius: 10px; padding: 10px; background: color-mix(in srgb, var(--cloud) 4%, var(--bg)); min-height: 150px; }
+  [data-viz="asg-load"] .zone .zh { margin: 0 0 8px; font-size: 14px; font-weight: 800; color: var(--ink-2); }
+  [data-viz="asg-load"] .zone ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  [data-viz="asg-load"] .srv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1.5px solid var(--rule-2); animation: pop .3s ease-out; }
+  [data-viz="asg-load"] .srv .nm { font-weight: 800; font-size: 14px; }
+  [data-viz="asg-load"] .srv .stt { font-size: 12.5px; font-weight: 700; color: var(--ink-2); text-align: right; }
+  [data-viz="asg-load"] .srv .bar { grid-column: 1 / -1; height: 7px; border-radius: 4px; background: var(--sunk); overflow: hidden; }
+  [data-viz="asg-load"] .srv .bar i { display: block; height: 100%; background: var(--ok); transition: width .4s; }
+  [data-viz="asg-load"] .srv .cpu { grid-column: 1 / -1; font-size: 12.5px; color: var(--ink-2); }
+  [data-viz="asg-load"] .srv.warm .bar i { background: var(--warn); }
+  [data-viz="asg-load"] .srv.hot { border-color: var(--bad); }
+  [data-viz="asg-load"] .srv.hot .bar i { background: var(--bad); }
+  [data-viz="asg-load"] .srv.boot, [data-viz="asg-load"] .srv.grace { border-style: dashed; border-color: var(--cloud); }
+  [data-viz="asg-load"] .srv.boot .stt, [data-viz="asg-load"] .srv.grace .stt { color: var(--cloud-t); }
+  [data-viz="asg-load"] .srv.gone { opacity: .55; border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="asg-load"] .srv.gone .nm { text-decoration: line-through; }
+  [data-viz="asg-load"] .none { font-size: 13.5px; color: var(--ink-3); font-style: italic; }
+  @media (max-width: 520px) {
+    [data-viz="asg-load"] .asg { padding: 12px 10px; }
+    [data-viz="asg-load"] .zones { gap: 8px; }
+    [data-viz="asg-load"] .srv { grid-template-columns: minmax(0, 1fr); }
+    [data-viz="asg-load"] .srv .stt { text-align: left; }
+    [data-viz="asg-load"] .asg-stats div { min-width: 0; flex: 1 1 28%; }
+  }
+</style>

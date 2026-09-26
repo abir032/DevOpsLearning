@@ -1,0 +1,2136 @@
+---
+time: 8 to 10 hours, over two or three sittings
+cost: about $2 a day for Jenkins, plus the dev and prod environments from Project 4
+---
+
+QuickCart releases twice a week, and every release is Sam's afternoon. He builds the image on his laptop, pushes it, clicks through the ECS console, refreshes the site, and hopes. When Sam is on holiday, nobody releases. Last month he pushed an image built from a branch he'd forgotten to update, and production ran week-old code for two days before anyone noticed.
+
+In this project you take Sam's afternoon away. You build a Jenkins pipeline that checks every pull request, and releases every merge: to dev first, then to production as a canary that rolls itself back if it misbehaves. You add two operations jobs that replace the riskiest console tasks, safe SQL and log extraction, and you write the runbook that tells the next person how to use all of it.
+
+## What you'll have at the end
+
+<PipelineMap />
+
+**What to notice:** a pull request and a merge run the same checks, but only a merge can release. Set the canary to **Raises errors** and merge: the pipeline stops itself at 10% and puts everything back, and nobody touched anything.
+
+| Piece | What it does |
+|---|---|
+| Jenkins controller | an EC2 instance with **no open ports**. You reach its web page through Session Manager. It has no AWS permissions at all |
+| Jenkins agent | a second EC2 instance that runs every build, with Docker and Terraform. Its **IAM role** is the only AWS identity the pipeline has: no access keys anywhere |
+| The `Jenkinsfile` | the pipeline, in the repository, next to the code it releases |
+| `scripts/` | the release, canary, rollback, SQL and log scripts the pipeline calls. You can read and test each one on its own |
+| Three extra jobs | one-click rollback, safe SQL in a transaction, and log extraction for a time window |
+| The runbook | what to do, and what not to do, for each operation |
+
+The repository ends up like this:
+
+```text title="quickcart/"
+quickcart/
+├── Jenkinsfile             the release pipeline
+├── app/                    the order service: app.py, requirements.txt,
+│                           requirements-dev.txt, test_app.py, Dockerfile
+├── ops/                    the SQL tool: run_sql.py and its Dockerfile
+├── scripts/                stack-outputs.sh, deploy.sh, smoke.sh, weights.sh,
+│                           canary.sh, rollback.sh, run-sql-task.sh, extract-logs.sh
+├── jenkins/                rollback, ops-sql and ops-logs .Jenkinsfile
+├── infra/                  Project 4's quickcart-infra, unchanged
+└── ci/                     Terraform for Jenkins itself
+```
+
+## Before you start
+
+| Read | You'll use it for |
+|---|---|
+| [Jenkins from zero](/lessons/jenkins/) | controllers, agents, plugins, credentials and backups |
+| [The Jenkinsfile](/lessons/jenkinsfile/) | every directive in the pipeline |
+| [Continuous integration](/lessons/continuous-integration/) | the pull request checks |
+| [Continuous delivery](/lessons/continuous-delivery/) | approval, smoke tests and rollback |
+| [Canary from a pipeline](/lessons/canary-pipeline/) | the abort criteria |
+| [Running SQL safely](/lessons/sql-safely/) | why the SQL job works the way it does |
+| [Runbooks](/lessons/runbooks/) | the last stage |
+| [Project 4](/projects/04-everything-as-code/) | the environments this pipeline releases to |
+
+| Tool | For |
+|---|---|
+| Terraform, the AWS CLI and git | as in Project 4 |
+| The Session Manager plugin for the AWS CLI | opening Jenkins without an open port. Install it with `brew install --cask session-manager-plugin` |
+| A GitHub account | a **private** repository for the code |
+
+## Cost
+
+<Cost kind="paid">about $2 a day for the two Jenkins instances, plus about $3 a day for dev and $7 a day for prod from Project 4. Destroy all of it when you finish.</Cost>
+
+| What | Price in us-east-1 (prices change; check the pricing pages) | Per day |
+|---|---|---|
+| Jenkins controller and agent, 2 `t3.medium` | about $0.042 an hour each | about $2.00 |
+| Their disks, 30 and 50 GB `gp3`, and daily snapshots | about $0.08 per GB a month | pennies |
+| Their public IPv4 addresses | $0.005 an hour each | about $0.24 |
+| Project 4's dev environment, with EKS **off** | see Project 4 | about $3 |
+| Project 4's prod environment | see Project 4 | about $7 |
+| Canary test traffic, logs, metrics, ECR storage | a few cents | pennies |
+
+<Note title="Production is real money here">
+
+The canary needs a production environment to release into, so this project applies Project 4's `prod`: two NAT gateways and a standby database. That's most of the bill. Do the whole project in as few days as you can, and destroy `prod` first when you finish. Keep EKS **off**: nothing in this pipeline uses it.
+
+</Note>
+
+## Prepare the environments
+
+<Steps>
+
+<Step title="Turn EKS off in dev">
+
+In `infra/envs/dev/terraform.tfvars`, set `enable_eks = false`. If dev is still running with EKS on from Project 4, `terraform destroy` it first, because switching EKS off in place fails (see Project 4's troubleshooting).
+
+The pipeline plans dev on every pull request. With EKS on, the plan would need its own access to the Kubernetes cluster, for no benefit.
+
+</Step>
+
+<Step title="Build dev and prod">
+
+From `infra/envs/dev`, then from `infra/envs/prod`, run Project 4's commands:
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to that environment's state and download the providers |
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | build the environment once you type `yes` |
+
+<See>
+
+`Apply complete!` in each. `terraform plan -detailed-exitcode` then exits with `0` in each.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `curl -k` on each environment's `ecs_url` with `/health` answers `{"status":"ok","version":"v1"}`.
+
+</See>
+
+## Build Jenkins with Terraform
+
+Jenkins is infrastructure too, so it's built from code, in the `ci/` folder, with its own state. Every file below goes in `ci/`.
+
+<Steps>
+
+<Step title="Where it lives and what it runs on">
+
+```hcl title="main.tf" ph="111122223333"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+  }
+
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "ci/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Project   = "quickcart"
+      ManagedBy = "terraform"
+    }
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnet" "ci" {
+  vpc_id            = data.aws_vpc.default.id
+  availability_zone = "us-east-1a"
+  default_for_az    = true
+}
+
+data "aws_ssm_parameter" "al2023" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+}
+
+locals {
+  account_id = data.aws_caller_identity.current.account_id
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `backend "s3"` → `key = "ci/terraform.tfstate"` | Jenkins gets its own state, separate from every environment. The other settings are as in [Terraform state](/lessons/terraform-state/) | — | — |
+| `data "aws_vpc"` → `default = true` | Jenkins runs in the account's default VPC, away from the environments it deploys to | — | a dedicated tooling VPC in a real company |
+| `data "aws_subnet"` → `availability_zone`, `default_for_az` | the default subnet in `us-east-1a` | — | — |
+| `data "aws_ssm_parameter"` → `name` | the newest Amazon Linux 2023 image ID, published by AWS in Parameter Store. No image ID is typed into the code | an image ID that is different in every region and goes stale | — |
+| `local.account_id` | your account number, read, not typed | — | — |
+
+</Step>
+
+<Step title="Firewalls with no way in">
+
+```hcl title="network.tf"
+resource "aws_security_group" "controller" {
+  name        = "quickcart-jenkins-controller"
+  description = "Jenkins controller: no inbound at all; reached through Session Manager"
+  vpc_id      = data.aws_vpc.default.id
+}
+
+resource "aws_security_group" "agent" {
+  name        = "quickcart-jenkins-agent"
+  description = "Jenkins agent: SSH from the controller only"
+  vpc_id      = data.aws_vpc.default.id
+}
+
+resource "aws_vpc_security_group_egress_rule" "controller_out" {
+  security_group_id = aws_security_group.controller.id
+  description       = "Plugins, GitHub, and SSH to the agent"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+
+resource "aws_vpc_security_group_egress_rule" "agent_out" {
+  security_group_id = aws_security_group.agent.id
+  description       = "GitHub, ECR, AWS APIs and package downloads"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "agent_ssh" {
+  security_group_id            = aws_security_group.agent.id
+  description                  = "SSH from the Jenkins controller only"
+  referenced_security_group_id = aws_security_group.controller.id
+  ip_protocol                  = "tcp"
+  from_port                    = 22
+  to_port                      = 22
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_security_group.controller` with **no ingress rule** | nothing on the internet can even try to reach Jenkins. You'll open its page through Session Manager instead | — | never: a public Jenkins is a favourite target |
+| `controller_out`, `agent_out` egress to anywhere | both can download plugins and packages, reach GitHub and call AWS | a Terraform-made group has no outbound rules, and nothing works | — |
+| `agent_ssh` → `referenced_security_group_id` | only the controller may SSH to the agent. That's how the controller starts builds on it | the controller can't reach the agent | — |
+
+</Step>
+
+<Step title="Roles instead of keys">
+
+```hcl title="iam.tf"
+data "aws_iam_policy_document" "ec2_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "controller" {
+  name               = "quickcart-jenkins-controller"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "controller_ssm" {
+  role       = aws_iam_role.controller.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "controller" {
+  name = "quickcart-jenkins-controller"
+  role = aws_iam_role.controller.name
+}
+
+resource "aws_iam_role" "agent" {
+  name               = "quickcart-jenkins-agent"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "agent" {
+  for_each = toset([
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "arn:aws:iam::aws:policy/ReadOnlyAccess",
+  ])
+
+  role       = aws_iam_role.agent.name
+  policy_arn = each.value
+}
+
+data "aws_iam_policy_document" "agent_deploy" {
+  statement {
+    sid       = "EcrLogin"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "EcrPush"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+    resources = ["arn:aws:ecr:us-east-1:${local.account_id}:repository/quickcart-*"]
+  }
+
+  statement {
+    sid = "EcsRelease"
+    actions = [
+      "ecs:RegisterTaskDefinition",
+      "ecs:UpdateService",
+      "ecs:RunTask",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "PassOnlyExecutionRoles"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/quickcart-*-ecs-execution"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "CanaryWeights"
+    actions   = ["elasticloadbalancing:ModifyListener"]
+    resources = ["arn:aws:elasticloadbalancing:us-east-1:${local.account_id}:listener/app/quickcart-*"]
+  }
+
+  statement {
+    sid       = "TerraformPlanLock"
+    actions   = ["s3:PutObject", "s3:DeleteObject"]
+    resources = ["arn:aws:s3:::quickcart-tfstate-${local.account_id}/*.tflock"]
+  }
+}
+
+resource "aws_iam_role_policy" "agent_deploy" {
+  name   = "deploy"
+  role   = aws_iam_role.agent.id
+  policy = data.aws_iam_policy_document.agent_deploy.json
+}
+
+resource "aws_iam_instance_profile" "agent" {
+  name = "quickcart-jenkins-agent"
+  role = aws_iam_role.agent.name
+}
+```
+
+This is the most important file in the project. **There is no AWS access key anywhere.** The agent's instance profile gives builds short-lived credentials that rotate by themselves, the same way ECS tasks get theirs. [Who can do what: IAM](/lessons/iam/) explains roles.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_iam_role.controller` with only `AmazonSSMManagedInstanceCore` | the controller can talk to Session Manager, and nothing else. If Jenkins itself is ever broken into, the attacker gets no AWS access | — | never add deploy rights here |
+| `aws_iam_instance_profile` | the wrapper that lets an EC2 instance use a role | the instance can't use the role | — |
+| `aws_iam_role.agent` → `ReadOnlyAccess` | builds can read everything: what `terraform plan` needs | plans fail on the first resource they read | scope it down to the services in your plan once they're stable |
+| `EcrLogin`, `EcrPush` | log in to ECR and push, only to `quickcart-*` repositories | pushes are refused | — |
+| `EcsRelease` | register task definitions, update services and run one-off tasks | releases are refused | limit `resources` to the clusters' services |
+| `PassOnlyExecutionRoles` → `iam:PassRole` with the `iam:PassedToService` condition | a task definition may name the environments' execution roles, and only for ECS tasks. Without this limit, `PassRole` is a classic way to gain more power than you were given | registering a task definition is refused | — |
+| `CanaryWeights` → `ModifyListener` | change the listener weights, only on QuickCart's load balancers | the canary can't shift traffic | — |
+| `TerraformPlanLock` | write and delete the `.tflock` file next to state, so plans take the lock | plans fail to lock. The agent **cannot** write the state itself: it can plan, never apply | — |
+
+<Note title="Agents outside AWS">
+
+If your builds ran somewhere without an instance role, like GitHub-hosted runners, the same idea works through **OIDC**: the CI system proves who it is to AWS, and AWS hands it a role for that one job. Still no stored keys. [Jenkins from zero](/lessons/jenkins/) shows both.
+
+</Note>
+
+</Step>
+
+<Step title="The two instances">
+
+```hcl title="instances.tf"
+resource "tls_private_key" "agent_ssh" {
+  algorithm = "ED25519"
+}
+
+resource "aws_ssm_parameter" "agent_ssh_key" {
+  name        = "/quickcart/jenkins/agent-ssh-key"
+  description = "The private key the controller uses to reach the agent"
+  type        = "SecureString"
+  value       = tls_private_key.agent_ssh.private_key_openssh
+}
+
+resource "aws_instance" "controller" {
+  ami                    = data.aws_ssm_parameter.al2023.value
+  instance_type          = "t3.medium"
+  subnet_id              = data.aws_subnet.ci.id
+  vpc_security_group_ids = [aws_security_group.controller.id]
+  iam_instance_profile   = aws_iam_instance_profile.controller.name
+
+  metadata_options {
+    http_tokens = "required"
+  }
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 30
+    encrypted   = true
+  }
+
+  volume_tags = {
+    Name   = "quickcart-jenkins-controller"
+    Backup = "jenkins-home"
+  }
+
+  user_data = <<-EOT
+    #!/bin/bash
+    set -euxo pipefail
+    dnf install -y java-21-amazon-corretto-headless fontconfig git
+    curl -fsSL -o /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/rpm-stable/jenkins.repo
+    dnf install -y jenkins
+    systemctl enable --now jenkins
+  EOT
+
+  tags = { Name = "quickcart-jenkins-controller" }
+
+  lifecycle {
+    ignore_changes = [ami, user_data]
+  }
+}
+
+resource "aws_instance" "agent" {
+  ami                    = data.aws_ssm_parameter.al2023.value
+  instance_type          = "t3.medium"
+  subnet_id              = data.aws_subnet.ci.id
+  vpc_security_group_ids = [aws_security_group.agent.id]
+  iam_instance_profile   = aws_iam_instance_profile.agent.name
+
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 50
+    encrypted   = true
+  }
+
+  user_data = <<-EOT
+    #!/bin/bash
+    set -euxo pipefail
+    dnf install -y java-21-amazon-corretto-headless docker git jq dnf-plugins-core
+    dnf config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+    dnf install -y terraform
+    systemctl enable --now docker
+    useradd --create-home jenkins
+    usermod -aG docker jenkins
+    install -d -m 700 -o jenkins -g jenkins /home/jenkins/.ssh
+    echo "${tls_private_key.agent_ssh.public_key_openssh}" > /home/jenkins/.ssh/authorized_keys
+    chown jenkins:jenkins /home/jenkins/.ssh/authorized_keys
+    chmod 600 /home/jenkins/.ssh/authorized_keys
+  EOT
+
+  tags = { Name = "quickcart-jenkins-agent" }
+
+  lifecycle {
+    ignore_changes = [ami, user_data]
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `tls_private_key` → `algorithm = "ED25519"` | an SSH key pair for controller-to-agent connections | — | — |
+| `aws_ssm_parameter` → `type = "SecureString"` | stores the private key encrypted in Parameter Store, where only admins can read it | — | — |
+| `ami`, `instance_type`, `subnet_id`, `vpc_security_group_ids`, `iam_instance_profile` | what to run, how big, where, which firewall, which role | required, or the wrong defaults | a bigger agent for bigger builds |
+| `metadata_options` → `http_tokens = "required"` | only IMDSv2, which stops a class of credential-stealing attacks | IMDSv1 is allowed | never |
+| `http_put_response_hop_limit = 2` (agent) | lets containers the agent runs reach the instance's credentials too. Trivy doesn't need them, but `docker build` steps sometimes do | calls from inside containers time out | — |
+| `root_block_device` → `volume_type`, `volume_size`, `encrypted` | an encrypted disk, big enough for Jenkins' data and Docker's images | 8 GB, which fills up within days | — |
+| `volume_tags` → `Backup = "jenkins-home"` | marks the controller's disk for the backup policy | nothing is backed up | — |
+| `user_data` | a script the instance runs once, at first boot: installs Java 21 and Jenkins from the official repository on the controller; Docker, Terraform, git, jq and the `jenkins` user on the agent | you'd install everything by hand | — |
+| `${tls_private_key.agent_ssh.public_key_openssh}` | Terraform writes the public key into the agent's `authorized_keys` | the controller can't log in | — |
+| `lifecycle` → `ignore_changes = [ami, user_data]` | a newer Amazon Linux image, published weekly, doesn't replace Jenkins and lose its data | the next plan after an AMI release replaces both instances: never clean | upgrade on purpose, with a backup |
+
+</Step>
+
+<Step title="Backups of JENKINS_HOME">
+
+Everything Jenkins knows (jobs, build history, credentials, plugins) lives in `JENKINS_HOME`, `/var/lib/jenkins` on the controller's disk. Lose the disk and you lose all of it.
+
+```hcl title="backup.tf"
+data "aws_iam_policy_document" "dlm_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["dlm.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "dlm" {
+  name               = "quickcart-jenkins-backup"
+  assume_role_policy = data.aws_iam_policy_document.dlm_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "dlm" {
+  role       = aws_iam_role.dlm.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+}
+
+resource "aws_dlm_lifecycle_policy" "jenkins_home" {
+  description        = "Daily snapshot of the Jenkins controller disk kept for 7 days"
+  execution_role_arn = aws_iam_role.dlm.arn
+  state              = "ENABLED"
+
+  policy_details {
+    resource_types = ["VOLUME"]
+    target_tags    = { Backup = "jenkins-home" }
+
+    schedule {
+      name      = "daily"
+      copy_tags = true
+
+      create_rule {
+        interval      = 24
+        interval_unit = "HOURS"
+        times         = ["03:00"]
+      }
+
+      retain_rule {
+        count = 7
+      }
+    }
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_iam_role.dlm` with AWS's managed policy | lets Data Lifecycle Manager take and delete snapshots | the policy can't run | — |
+| `aws_dlm_lifecycle_policy` → `description`, `execution_role_arn`, `state` | a snapshot policy, switched on | — | — |
+| `resource_types`, `target_tags` | acts on every volume tagged `Backup = jenkins-home` | — | — |
+| `schedule` → `create_rule` | one snapshot every 24 hours, at 03:00 UTC | — | more often if builds change a lot |
+| `retain_rule` → `count = 7` | keeps the last seven, deleting older ones | snapshots pile up and cost money | — |
+| `copy_tags` | snapshots carry the volume's tags, so you can find them | untagged snapshots | — |
+
+```hcl title="outputs.tf"
+output "controller_id" {
+  description = "Use it to open Jenkins through Session Manager"
+  value       = aws_instance.controller.id
+}
+
+output "agent_private_ip" {
+  description = "The address the controller uses to reach the agent"
+  value       = aws_instance.agent.private_ip
+}
+
+output "agent_role_arn" {
+  description = "The role builds run with. Add it to eks_admin_role_arns if an environment runs EKS"
+  value       = aws_iam_role.agent.arn
+}
+```
+
+</Step>
+
+<Step title="Apply it">
+
+```sh
+cd ci
+```
+
+| Part | What it means |
+|---|---|
+| `cd ci` | into the Jenkins folder |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to `ci/terraform.tfstate` and download the AWS and TLS providers |
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | build Jenkins once you type `yes` |
+
+<See>
+
+`Apply complete!` and three outputs: `controller_id`, like `i-0example12345678`, `agent_private_ip` and `agent_role_arn`. Give the instances five minutes to finish installing.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** **EC2 > Instances** shows `quickcart-jenkins-controller` and `quickcart-jenkins-agent` running, and **Systems Manager > Fleet Manager** lists both as online.
+
+</See>
+
+## Set Jenkins up
+
+This is the only part done by hand, once, in Jenkins' own web page. Nothing here touches the AWS console.
+
+<Steps>
+
+<Step title="Open Jenkins through Session Manager">
+
+```sh ph="CONTROLLER_ID"
+aws ssm start-session --target CONTROLLER_ID --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080
+```
+
+| Part | What it means |
+|---|---|
+| `aws ssm start-session` | open a Session Manager connection to an instance |
+| `--target CONTROLLER_ID` | the controller. Use the `controller_id` output |
+| `--document-name AWS-StartPortForwardingSession` | forward a port, instead of opening a shell |
+| `--parameters portNumber=8080,localPortNumber=8080` | Jenkins' port on the instance appears as port 8080 on your Mac |
+
+```output
+Starting session with SessionId: you-0a1b2c3d4e5f67890
+Port 8080 opened for sessionId you-0a1b2c3d4e5f67890.
+Waiting for connections...
+```
+
+Leave it running and open `http://localhost:8080` in your browser. The traffic travels inside the encrypted Session Manager connection.
+
+</Step>
+
+<Step title="Unlock it">
+
+Jenkins asks for an initial password stored on the controller. In a **second** terminal, open a shell on it:
+
+```sh ph="CONTROLLER_ID"
+aws ssm start-session --target CONTROLLER_ID
+```
+
+| Part | What it means |
+|---|---|
+| `aws ssm start-session --target` | a shell on the instance, with no SSH and no open port |
+
+Then, in that shell:
+
+```sh
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+```
+
+| Part | What it means |
+|---|---|
+| `sudo cat` | print a file only root can read |
+| `/var/lib/jenkins/secrets/initialAdminPassword` | the one-time password, inside `JENKINS_HOME` |
+
+Paste it into the page. Choose **Install suggested plugins**, then create the first admin user with the username `admin`. The pipeline's approval steps name that user.
+
+</Step>
+
+<Step title="Add the plugins the pipeline needs">
+
+**Manage Jenkins > Plugins > Available plugins**. Search for and tick **Lockable Resources**, then choose **Install**. The suggested set already includes Pipeline, Git, GitHub Branch Source, SSH Build Agents, Timestamper and Workspace Cleanup.
+
+| Plugin | Used for |
+|---|---|
+| Pipeline | the `Jenkinsfile` itself |
+| GitHub Branch Source | finding branches and pull requests in the repository |
+| SSH Build Agents | the controller starting the agent over SSH |
+| Lockable Resources | `lock('quickcart-prod')`: one release per environment at a time |
+| Timestamper, Workspace Cleanup | `timestamps()` and `cleanWs()` |
+
+</Step>
+
+<Step title="Store the agent's SSH key in Jenkins">
+
+The controller has no permission to read the key, on purpose. Read it from **your Mac**, where your admin login can:
+
+```sh
+aws ssm get-parameter --name /quickcart/jenkins/agent-ssh-key --with-decryption --region us-east-1 --query Parameter.Value --output text
+```
+
+| Part | What it means |
+|---|---|
+| `aws ssm get-parameter` | read a Parameter Store value |
+| `--name /quickcart/jenkins/agent-ssh-key` | the one Terraform stored |
+| `--with-decryption` | decrypt the SecureString |
+| `--region us-east-1` | where it is |
+| `--query Parameter.Value --output text` | print only the key |
+
+It prints a block starting `-----BEGIN OPENSSH PRIVATE KEY-----`.
+
+**Manage Jenkins > Credentials > System > Global credentials > Add Credentials**
+
+| Field | Enter |
+|---|---|
+| Kind | **SSH Username with private key** |
+| ID | `agent-ssh` |
+| Username | `jenkins` |
+| Private Key | **Enter directly**, then paste the whole key |
+
+Choose **Create**. The key now lives in Jenkins' encrypted credentials store, not in any file or repository. Close the terminal window that showed it.
+
+</Step>
+
+<Step title="Connect the agent">
+
+**Manage Jenkins > Nodes > New Node**: name `aws-agent`, **Permanent Agent**, **Create**.
+
+| Field | Enter |
+|---|---|
+| Number of executors | `2` |
+| Remote root directory | `/home/jenkins/agent` |
+| Labels | `aws` |
+| Usage | **Only build jobs with label expressions matching this node** |
+| Launch method | **Launch agents via SSH** |
+| Host | the `agent_private_ip` output |
+| Credentials | `jenkins (agent-ssh)` |
+| Host Key Verification Strategy | **Manually trusted key Verification Strategy** |
+
+Choose **Save**. Then set the built-in node to run nothing: **Manage Jenkins > Nodes > Built-In Node > Configure**, **Number of executors** `0`. Builds on the controller would run with the controller's powers, next to its secrets.
+
+<See>
+
+`aws-agent` shows as connected, with two idle executors, and the built-in node has none.
+
+</See>
+
+</Step>
+
+<Step title="Add the two locks">
+
+**Manage Jenkins > System > Lockable Resources Manager > Add Lockable Resource**, twice: `quickcart-dev` and `quickcart-prod`. Choose **Save**.
+
+If you skip this, the `lock` step creates them the first time it's used; declaring them makes them visible.
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** Jenkins opens at `http://localhost:8080` through Session Manager, `aws-agent` is connected with the label `aws`, and the built-in node has no executors.
+
+</See>
+
+## Put the code in one repository
+
+<Steps>
+
+<Step title="Make the repository">
+
+Create a new, **private**, empty repository on GitHub called `quickcart`. On your Mac, make the folders:
+
+```sh
+mkdir -p quickcart/app quickcart/ops quickcart/scripts quickcart/jenkins quickcart/ci
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir -p` | make the folders, and any parents |
+
+Copy Project 3's `app.py` and `requirements.txt` into `quickcart/app/`, Project 4's whole `quickcart-infra` folder to `quickcart/infra`, and the `ci/` files from the last stage into `quickcart/ci/`. Put Project 4's `.gitignore` at the top.
+
+</Step>
+
+<Step title="Tests, and a Dockerfile that runs them">
+
+```python title="app/test_app.py"
+from app import app
+
+
+def test_health_says_ok():
+    response = app.test_client().get("/health")
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"
+
+
+def test_orders_lists_three():
+    response = app.test_client().get("/orders")
+    assert response.status_code == 200
+    assert response.get_json()["count"] == 3
+```
+
+```ini title="app/requirements-dev.txt"
+pytest==9.1.1
+ruff==0.16.9
+```
+
+The Dockerfile now has three **stages**. Tests run inside the build, so the agent needs nothing but Docker, and nothing the tests write ends up in Jenkins' workspace.
+
+```dockerfile title="app/Dockerfile"
+FROM python:3.12-slim AS base
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
+
+FROM base AS test
+COPY requirements-dev.txt test_app.py ./
+RUN pip install --no-cache-dir -r requirements-dev.txt \
+    && ruff check . \
+    && python -m pytest -q -p no:cacheprovider
+
+FROM base AS release
+RUN useradd --create-home --uid 1001 appuser
+USER 1001
+ARG APP_VERSION=v1
+ENV APP_VERSION=$APP_VERSION
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--graceful-timeout", "20", "app:app"]
+```
+
+| Stage | What it does |
+|---|---|
+| `base` | Python, the libraries and the code: shared by the other two |
+| `test` | adds the test tools, runs `ruff` (a linter) and `pytest`. `-p no:cacheprovider` stops pytest writing a cache. `docker build --target test` fails if any test fails |
+| `release` | the image that ships: the same as Project 3's, without the test tools |
+
+</Step>
+
+<Step title="The release scripts">
+
+The pipeline's steps are ordinary shell scripts in `scripts/`. You can run any of them from your own terminal, which makes them easy to test and to use when Jenkins itself is down. Make each one executable after creating it with `chmod +x scripts/*.sh`.
+
+All of them read the environment's Terraform outputs from one file, made by this script. That keeps every address and name in Project 4's code, not typed into the pipeline:
+
+```sh title="scripts/stack-outputs.sh"
+#!/usr/bin/env bash
+# Write an environment's Terraform outputs to stack-ENV.json.
+# Usage: scripts/stack-outputs.sh ENV
+set -euo pipefail
+env="$1"
+terraform -chdir="infra/envs/$env" init -input=false -no-color > /dev/null
+terraform -chdir="infra/envs/$env" output -json stack > "stack-$env.json"
+echo "wrote stack-$env.json"
+```
+
+| Line | What it does |
+|---|---|
+| `set -euo pipefail` | stop at the first failing command, at any unset variable, and at a failure anywhere in a pipe. Every script starts with it |
+| `terraform -chdir="infra/envs/$env" init` | set up that environment's folder without `cd`-ing into it |
+| `output -json stack > "stack-$env.json"` | save the stack's outputs as JSON |
+
+The rolling release, used for dev and for promoting a canary:
+
+```sh title="scripts/deploy.sh"
+#!/usr/bin/env bash
+# Release an image to one ECS service, and wait until it is stable.
+# Usage: scripts/deploy.sh ENV stable|canary IMAGE [COUNT]
+set -euo pipefail
+env="$1"
+lane="$2"
+image="$3"
+count="${4:-}"
+stack="stack-$env.json"
+cluster=$(jq -r '.cluster_name' "$stack")
+service=$(jq -r --arg lane "$lane" '.services[$lane]' "$stack")
+
+current=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+  --query 'services[0].taskDefinition' --output text)
+aws ecs describe-task-definition --task-definition "$current" --query 'taskDefinition' > current-task.json
+
+# Keep only the fields register-task-definition accepts, with the new image.
+jq --arg image "$image" '
+  .containerDefinitions[0].image = $image
+  | {family, executionRoleArn, taskRoleArn, networkMode, containerDefinitions,
+     requiresCompatibilities, cpu, memory, runtimePlatform}
+  | with_entries(select(.value != null))' current-task.json > new-task.json
+
+new=$(aws ecs register-task-definition --cli-input-json file://new-task.json \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+echo "registered $new"
+
+if [ -n "$count" ]; then
+  aws ecs update-service --cluster "$cluster" --service "$service" \
+    --task-definition "$new" --desired-count "$count" > /dev/null
+else
+  aws ecs update-service --cluster "$cluster" --service "$service" \
+    --task-definition "$new" > /dev/null
+fi
+
+aws ecs wait services-stable --cluster "$cluster" --services "$service"
+
+running=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+  --query 'services[0].taskDefinition' --output text)
+if [ "$running" != "$new" ]; then
+  echo "FAILED: $service is running $running, not $new. The circuit breaker rolled it back."
+  exit 1
+fi
+echo "$service is stable on $new"
+```
+
+| Line | What it does |
+|---|---|
+| `jq -r '.cluster_name'` and `'.services[$lane]'` | read the cluster and the stable or canary service's name from the outputs |
+| `describe-services` then `describe-task-definition` | fetch the recipe the service runs now |
+| the `jq` filter | copy it, change only the image, and keep only the fields a new registration accepts |
+| `register-task-definition` | save it as a new revision |
+| `update-service`, with `--desired-count` for the canary | start the release |
+| `aws ecs wait services-stable` | wait until the release finishes, up to 10 minutes |
+| the last check | if the circuit breaker rolled back, the service is on the old revision. Waiting succeeds either way, so the script checks which one is running and fails the build if it's the old one |
+
+The smoke test:
+
+```sh title="scripts/smoke.sh"
+#!/usr/bin/env bash
+# Check an environment answers /health with the expected version.
+# Usage: scripts/smoke.sh ENV VERSION
+set -euo pipefail
+env="$1"
+version="$2"
+url=$(jq -r '.ecs_url' "stack-$env.json")
+for attempt in 1 2 3 4 5 6; do
+  body=$(curl --silent --insecure --max-time 5 "$url/health" || true)
+  if echo "$body" | jq -e --arg v "$version" '.status == "ok" and .version == $v' > /dev/null 2>&1; then
+    echo "smoke test passed on attempt $attempt: $body"
+    exit 0
+  fi
+  echo "attempt $attempt: got '$body', waiting"
+  sleep 10
+done
+echo "FAILED: $url/health never reported version $version"
+exit 1
+```
+
+| Line | What it does |
+|---|---|
+| `for attempt in 1 2 3 4 5 6` | up to six tries, ten seconds apart |
+| `jq -e '.status == "ok" and .version == $v'` | passes only if `/health` says `ok` **and** reports exactly this build's version. An old task answering `ok` doesn't count |
+
+Shifting traffic:
+
+```sh title="scripts/weights.sh"
+#!/usr/bin/env bash
+# Split the HTTPS listener's traffic between the stable and canary target groups.
+# Usage: scripts/weights.sh ENV STABLE_PERCENT CANARY_PERCENT
+set -euo pipefail
+env="$1"
+stable="$2"
+canary="$3"
+stack="stack-$env.json"
+jq -n \
+  --arg s "$(jq -r '.target_group_arns.stable' "$stack")" \
+  --arg c "$(jq -r '.target_group_arns.canary' "$stack")" \
+  --argjson sw "$stable" --argjson cw "$canary" \
+  '[{Type: "forward", ForwardConfig: {TargetGroups: [
+      {TargetGroupArn: $s, Weight: $sw},
+      {TargetGroupArn: $c, Weight: $cw}]}}]' > actions.json
+aws elbv2 modify-listener --listener-arn "$(jq -r '.https_listener_arn' "$stack")" \
+  --default-actions file://actions.json > /dev/null
+echo "traffic: stable $stable%, canary $canary%"
+```
+
+| Line | What it does |
+|---|---|
+| `jq -n … > actions.json` | build the listener's new forward action, with both target groups and their weights |
+| `aws elbv2 modify-listener --default-actions file://actions.json` | apply it. Traffic shifts within seconds |
+
+The canary. The abort criteria are written at the top, before any code, where a reviewer reads them first:
+
+```sh title="scripts/canary.sh"
+#!/usr/bin/env bash
+# Release IMAGE to production as a canary, and promote it only if it stays healthy.
+# Usage: scripts/canary.sh ENV IMAGE
+#
+# Abort criteria, checked after every step. Any one of them stops the release:
+#   1. every canary target is healthy in its target group
+#   2. at least 20 requests reached the canary during the step
+#   3. no more than 1% of the canary's requests returned a 5xx error
+set -euo pipefail
+env="$1"
+image="$2"
+bake_seconds="${BAKE_SECONDS:-300}"
+stack="stack-$env.json"
+url=$(jq -r '.ecs_url' "$stack")
+canary_tg=$(jq -r '.target_group_arns.canary' "$stack")
+lb_dim=$(jq -r '.alb_arn_suffix' "$stack")
+tg_dim=$(jq -r '.target_group_arn_suffixes.canary' "$stack")
+
+abort() {
+  echo "ABORT: $1"
+  scripts/weights.sh "$env" 100 0
+  aws ecs update-service --cluster "$(jq -r '.cluster_name' "$stack")" \
+    --service "$(jq -r '.services.canary' "$stack")" --desired-count 0 > /dev/null
+  echo "rolled back: all traffic is on the stable version, the canary is scaled to 0"
+  exit 1
+}
+
+sum_metric() {
+  aws cloudwatch get-metric-statistics --namespace AWS/ApplicationELB --metric-name "$1" \
+    --dimensions Name=LoadBalancer,Value="$lb_dim" Name=TargetGroup,Value="$tg_dim" \
+    --start-time "$2" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --period 60 --statistics Sum --query 'sum(Datapoints[].Sum)' --output text
+}
+
+check_step() {
+  local since="$1"
+  local unhealthy requests errors
+  # The backticks are JMESPath's way of writing the text "healthy", not shell.
+  # shellcheck disable=SC2016
+  unhealthy=$(aws elbv2 describe-target-health --target-group-arn "$canary_tg" \
+    --query 'length(TargetHealthDescriptions[?TargetHealth.State!=`healthy`])' --output text)
+  [ "$unhealthy" = "0" ] || abort "$unhealthy canary targets are not healthy"
+  requests=$(sum_metric RequestCount "$since")
+  errors=$(sum_metric HTTPCode_Target_5XX_Count "$since")
+  echo "canary since $since: $requests requests, $errors server errors"
+  awk -v r="$requests" 'BEGIN { exit !(r >= 20) }' || abort "only $requests requests reached the canary"
+  awk -v r="$requests" -v e="$errors" 'BEGIN { exit !(e / r <= 0.01) }' || abort "error rate above 1%"
+}
+
+step() {
+  local percent="$1"
+  local since
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  scripts/weights.sh "$env" $((100 - percent)) "$percent"
+  echo "baking for $bake_seconds seconds, with test traffic"
+  local end=$((SECONDS + bake_seconds))
+  while [ "$SECONDS" -lt "$end" ]; do
+    curl --silent --insecure --output /dev/null --max-time 3 "$url/orders" || true
+  done
+  echo "waiting 120 seconds for CloudWatch to catch up"
+  sleep 120
+  check_step "$since"
+}
+
+scripts/deploy.sh "$env" canary "$image" 1
+step 10
+step 50
+echo "canary passed every check: promoting"
+scripts/deploy.sh "$env" stable "$image"
+scripts/weights.sh "$env" 100 0
+aws ecs update-service --cluster "$(jq -r '.cluster_name' "$stack")" \
+  --service "$(jq -r '.services.canary' "$stack")" --desired-count 0 > /dev/null
+echo "promoted: stable runs $image"
+```
+
+| Part | What it does |
+|---|---|
+| `abort()` | puts 100% back on stable, scales the canary to 0, and fails the build |
+| `sum_metric()` | adds up one ALB metric for the canary's target group since a given time |
+| `check_step()` | the three criteria: every canary target healthy, at least 20 requests, and at most 1% server errors |
+| `awk … 'BEGIN { exit !(…) }'` | bash can't compare decimals, so `awk` does the sum and exits `0` for true |
+| `step()` | set the weights, send test traffic for `BAKE_SECONDS` (5 minutes by default), wait 2 minutes for CloudWatch, then check |
+| the last lines | canary with one task; 10%; 50%; then release to stable, all traffic back to stable, canary to zero |
+
+And the rollback:
+
+```sh title="scripts/rollback.sh"
+#!/usr/bin/env bash
+# Put the stable service back on the previous revision of its task definition.
+# Usage: scripts/rollback.sh ENV
+set -euo pipefail
+env="$1"
+stack="stack-$env.json"
+cluster=$(jq -r '.cluster_name' "$stack")
+service=$(jq -r '.services.stable' "$stack")
+
+scripts/weights.sh "$env" 100 0
+aws ecs update-service --cluster "$cluster" --service "$(jq -r '.services.canary' "$stack")" \
+  --desired-count 0 > /dev/null
+
+current=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+  --query 'services[0].taskDefinition' --output text)
+family_rev="${current##*/}"
+family="${family_rev%:*}"
+revision="${family_rev##*:}"
+if [ "$revision" -le 1 ]; then
+  echo "FAILED: $family_rev is the first revision; there is nothing to go back to"
+  exit 1
+fi
+previous="$family:$((revision - 1))"
+echo "rolling $service back from $family_rev to $previous"
+aws ecs update-service --cluster "$cluster" --service "$service" --task-definition "$previous" > /dev/null
+aws ecs wait services-stable --cluster "$cluster" --services "$service"
+echo "$service is stable on $previous"
+```
+
+| Line | What it does |
+|---|---|
+| `weights.sh "$env" 100 0` and canary to `0` | first, stop any canary that's running |
+| `${current##*/}`, `${family_rev%:*}`, `${family_rev##*:}` | cut `…/quickcart-prod-orders:7` into the family `quickcart-prod-orders` and the revision `7` |
+| `previous="$family:$((revision - 1))"` | the revision before it: the version that ran before the last release |
+| `update-service` and `wait services-stable` | a normal rolling release, back to that revision |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `shellcheck scripts/*.sh` prints nothing, and `docker build --target test app` ends with the tests passing.
+
+</See>
+
+## Write the Jenkinsfile
+
+<Steps>
+
+<Step title="The pipeline">
+
+```groovy title="Jenkinsfile" ph="111122223333"
+pipeline {
+  agent none
+
+  options {
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    disableConcurrentBuilds()
+    timestamps()
+    timeout(time: 2, unit: 'HOURS')
+  }
+
+  environment {
+    AWS_REGION = 'us-east-1'
+    AWS_ACCOUNT_ID = '111122223333'
+    IMAGE_REPO = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/quickcart-orders"
+  }
+
+  stages {
+    stage('Build and check') {
+      agent { label 'aws' }
+      options { timeout(time: 30, unit: 'MINUTES') }
+      stages {
+        stage('Version') {
+          steps {
+            script {
+              env.IMAGE_TAG = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+            }
+            echo "This build is version ${env.IMAGE_TAG}"
+          }
+        }
+        stage('Lint') {
+          steps {
+            sh 'docker run --rm -i hadolint/hadolint:v2.15.1 < app/Dockerfile'
+            sh 'docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 scripts/deploy.sh scripts/canary.sh scripts/weights.sh scripts/smoke.sh scripts/rollback.sh scripts/stack-outputs.sh scripts/run-sql-task.sh scripts/extract-logs.sh'
+            sh 'terraform fmt -check -recursive infra'
+          }
+        }
+        stage('Test') {
+          steps {
+            sh 'docker build --target test app'
+          }
+        }
+        stage('Build image') {
+          steps {
+            sh 'docker build --target release --build-arg APP_VERSION="$IMAGE_TAG" -t "$IMAGE_REPO:$IMAGE_TAG" app'
+          }
+        }
+        stage('Scan image') {
+          steps {
+            sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE_REPO:$IMAGE_TAG"'
+          }
+        }
+        stage('Terraform plan') {
+          when { changeRequest() }
+          steps {
+            script {
+              for (envName in ['dev', 'prod']) {
+                dir("infra/envs/${envName}") {
+                  sh 'terraform init -input=false -no-color'
+                  sh "terraform plan -input=false -no-color -lock-timeout=5m > ../../../plan-${envName}.txt"
+                }
+              }
+            }
+            archiveArtifacts artifacts: 'plan-*.txt'
+          }
+        }
+        stage('Push image') {
+          when { branch 'main' }
+          steps {
+            sh '''
+              if aws ecr describe-images --repository-name quickcart-orders --image-ids imageTag="$IMAGE_TAG" > /dev/null 2>&1; then
+                echo "$IMAGE_TAG is already in ECR; not pushing again"
+              else
+                aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${IMAGE_REPO%%/*}"
+                docker push "$IMAGE_REPO:$IMAGE_TAG"
+              fi
+            '''
+          }
+        }
+      }
+      post {
+        always { cleanWs() }
+      }
+    }
+
+    stage('Deploy to dev') {
+      when { branch 'main' }
+      agent { label 'aws' }
+      options {
+        lock('quickcart-dev')
+        timeout(time: 20, unit: 'MINUTES')
+      }
+      steps {
+        sh 'scripts/stack-outputs.sh dev'
+        sh 'scripts/deploy.sh dev stable "$IMAGE_REPO:$IMAGE_TAG"'
+        sh 'scripts/smoke.sh dev "$IMAGE_TAG"'
+      }
+      post {
+        always { cleanWs() }
+      }
+    }
+
+    stage('Approve production') {
+      when { branch 'main' }
+      options { timeout(time: 1, unit: 'HOURS') }
+      input {
+        message 'Dev passed its smoke test. Start the production canary?'
+        ok 'Start the canary'
+        submitter 'admin'
+      }
+      steps {
+        echo "Approved: ${env.IMAGE_TAG} goes to production"
+      }
+    }
+
+    stage('Canary to production') {
+      when { branch 'main' }
+      agent { label 'aws' }
+      options {
+        lock('quickcart-prod')
+        timeout(time: 45, unit: 'MINUTES')
+      }
+      steps {
+        sh 'scripts/stack-outputs.sh prod'
+        sh 'scripts/canary.sh prod "$IMAGE_REPO:$IMAGE_TAG"'
+        sh 'scripts/smoke.sh prod "$IMAGE_TAG"'
+      }
+      post {
+        always { cleanWs() }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "Build ${env.BUILD_NUMBER} of ${env.BRANCH_NAME} passed."
+    }
+    failure {
+      echo "Build ${env.BUILD_NUMBER} of ${env.BRANCH_NAME} failed. Open the stage that failed and read its log from the bottom up."
+    }
+  }
+}
+```
+
+Every directive is explained in [The Jenkinsfile](/lessons/jenkinsfile/). What each one does **here**:
+
+| Line | What it does | Why |
+|---|---|---|
+| `agent none` at the top | no stage holds an agent unless it asks for one | the approval can wait an hour without blocking a build machine |
+| `buildDiscarder(logRotator(numToKeepStr: '30'))` | keep the last 30 builds per branch | old builds fill the controller's disk |
+| `disableConcurrentBuilds()` | one build per branch at a time; the next one queues | two releases of `main` at once would race |
+| `timestamps()` | every log line gets a time | "how long did the canary bake?" is answerable |
+| `timeout(time: 2, unit: 'HOURS')` | a stuck build is killed | a hung build blocks everything behind it |
+| `environment` | the region, account and image repository, set once | — |
+| `stage('Build and check')` → `agent { label 'aws' }` with nested `stages` | all the checks run on one agent, in one workspace | the image built in one stage is the one scanned and pushed in the next |
+| `env.IMAGE_TAG = sh(… returnStdout: true).trim()` | the short commit ID becomes the version, for every later stage | — |
+| `Lint` | Hadolint and ShellCheck run from pinned Docker images; Terraform checks formatting | — |
+| `Test` → `docker build --target test app` | runs the tests inside the build | — |
+| `Build image` → `--build-arg APP_VERSION="$IMAGE_TAG"` | stamps the version into the image, so `/health` reports it | the smoke test checks it |
+| `Scan image` → Trivy with `--exit-code 1 --severity CRITICAL --ignore-unfixed` | fails the build on a critical problem that has a fix available | problems with no fix yet would block every build |
+| `when { changeRequest() }` | the plan runs only for pull requests | — |
+| `dir("infra/envs/…")` and `-lock-timeout=5m` | plan dev and prod, waiting up to 5 minutes for a lock | — |
+| `archiveArtifacts` | the plans are saved with the build, for the reviewer | — |
+| `when { branch 'main' }` | push and release only from `main` | a pull request can never release |
+| `if aws ecr describe-images …` in `Push image` | skip the push if this version is already in ECR | the repository is immutable, so a rebuild of the same commit would fail. Now running it twice is safe |
+| `post { always { cleanWs() } }` | empty the workspace after each agent stage | stale files from one build can't leak into the next |
+| `lock('quickcart-dev')`, `lock('quickcart-prod')` | one release per environment at a time, across every job, including rollback and SQL | — |
+| `input { … submitter 'admin' }` | waits for the `admin` user to approve. Anyone else's click is refused | add more users, comma-separated |
+| `options { timeout(time: 1, unit: 'HOURS') }` on the approval | an unapproved release is abandoned after an hour | a forgotten approval would block the next release |
+| `post { success … failure … }` | a summary line at the end of every build | connect a chat notification here |
+
+</Step>
+
+<Step title="Commit and push">
+
+```sh
+cd quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `cd quickcart` | into the repository |
+
+```sh
+git init -b main
+```
+
+| Part | What it means |
+|---|---|
+| `git init` | start a repository |
+| `-b main` | call the first branch `main`, which the `Jenkinsfile` releases from |
+
+```sh
+git add .
+```
+
+| Part | What it means |
+|---|---|
+| `git add .` | stage every file, except those `.gitignore` excludes |
+
+```sh
+git commit -m "QuickCart pipeline"
+```
+
+| Part | What it means |
+|---|---|
+| `git commit -m` | record the files, with a message |
+
+```sh ph="REPO_URL"
+git remote add origin REPO_URL
+```
+
+| Part | What it means |
+|---|---|
+| `git remote add origin` | tell git where the GitHub copy lives |
+| `REPO_URL` | your repository's address: on GitHub, choose **Code** and copy the HTTPS or SSH address |
+
+```sh
+git push -u origin main
+```
+
+| Part | What it means |
+|---|---|
+| `git push -u origin main` | upload `main`, and remember `origin` as its home |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** GitHub shows the repository with `Jenkinsfile` at the top.
+
+</See>
+
+## Connect Jenkins to GitHub
+
+<Steps>
+
+<Step title="A token for Jenkins">
+
+On GitHub: **Settings > Developer settings > Personal access tokens > Fine-grained tokens > Generate new token**.
+
+| Field | Enter |
+|---|---|
+| Token name | `quickcart-jenkins` |
+| Expiration | 30 days |
+| Repository access | **Only select repositories**: `quickcart` |
+| Permissions | **Contents**: read-only; **Pull requests**: read-only; **Metadata**: read-only; **Commit statuses**: read and write |
+
+In Jenkins: **Manage Jenkins > Credentials > System > Global credentials > Add Credentials**
+
+| Field | Enter |
+|---|---|
+| Kind | **Username with password** |
+| Username | your GitHub username |
+| Password | the token |
+| ID | `github` |
+
+</Step>
+
+<Step title="A multibranch pipeline">
+
+**New Item**, name `quickcart`, **Multibranch Pipeline**, **OK**.
+
+| Field | Enter |
+|---|---|
+| Branch Sources | **Add source > GitHub** |
+| Credentials | `github` |
+| Repository HTTPS URL | your repository's HTTPS address, from GitHub's **Code** button |
+| Behaviours | keep **Discover branches** and **Discover pull requests from origin** |
+| Build Configuration | **by Jenkinsfile**, script path `Jenkinsfile` |
+| Scan Multibranch Pipeline Triggers | tick **Periodically if not otherwise run**, interval **1 minute** |
+
+Choose **Save**. Jenkins scans the repository and starts a build of `main`.
+
+<Note title="Why polling, not a webhook">
+
+A webhook would start builds the instant you push, but GitHub would need to reach Jenkins, and this Jenkins has no open port on purpose. Checking every minute costs a few API calls and keeps it closed. To use webhooks, put Jenkins behind an HTTPS load balancer that only accepts GitHub's published address ranges; [Jenkins from zero](/lessons/jenkins/) shows how.
+
+</Note>
+
+</Step>
+
+<Step title="Watch the first release">
+
+The first `main` build runs every stage: checks, push, dev, smoke test, then waits at **Approve production**. Open the build, and in the paused stage choose **Start the canary**. The canary takes about 20 minutes: two 5-minute bakes and two 2-minute waits for metrics, plus the releases.
+
+<See>
+
+In the build's log, near the end of the canary stage:
+
+```output title="Console output, roughly"
+canary passed every check: promoting
+traffic: stable 100%, canary 0%
+promoted: stable runs 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:3f9c2e1
+smoke test passed on attempt 1: {"status":"ok","version":"3f9c2e1"}
+```
+
+Your version will be your own commit's ID. Every stage is green.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `curl -k` on prod's `ecs_url` with `/health` reports your commit's short ID as the version.
+
+</See>
+
+## Add the operations jobs
+
+Each job is a plain **Pipeline** item that reads its script from the repository. For each one: **New Item**, the name, **Pipeline**, **OK**; then under **Pipeline**, **Definition** **Pipeline script from SCM**, **SCM** Git, the repository URL and `github` credentials, **Branch** `*/main`, and the **Script Path** below. Run each once with **Build Now** so Jenkins learns its parameters; that first run fails harmlessly.
+
+<Steps>
+
+<Step title="One-click rollback">
+
+Name `quickcart-rollback`, script path `jenkins/rollback.Jenkinsfile`.
+
+```groovy title="jenkins/rollback.Jenkinsfile"
+pipeline {
+  agent { label 'aws' }
+
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+    timeout(time: 20, unit: 'MINUTES')
+  }
+
+  parameters {
+    choice(name: 'ENV', choices: ['prod', 'dev'], description: 'Which environment to put back on its previous version')
+  }
+
+  environment {
+    AWS_REGION = 'us-east-1'
+  }
+
+  stages {
+    stage('Roll back') {
+      options { lock("quickcart-${params.ENV}") }
+      steps {
+        sh "scripts/stack-outputs.sh ${params.ENV}"
+        sh "scripts/rollback.sh ${params.ENV}"
+      }
+    }
+  }
+
+  post {
+    always { cleanWs() }
+  }
+}
+```
+
+| Line | What it does |
+|---|---|
+| `parameters` → `choice(name: 'ENV', choices: ['prod', 'dev'])` | the one choice: which environment. `prod` is first, because that's where rollbacks matter |
+| `lock("quickcart-${params.ENV}")` | waits for any release to that environment to finish, and blocks new ones while it runs |
+| `scripts/rollback.sh` | the script from earlier: stop any canary, then go back one revision |
+
+**Build with Parameters > ENV: prod > Build** is the whole procedure.
+
+</Step>
+
+<Step title="Safe SQL in a transaction">
+
+Someone needs to fix three orders stuck in `pending`. The dangerous way is a database client on a laptop and a typed `UPDATE`. This job does it the safe way: the SQL runs inside a transaction, a preview always rolls back, and a commit only happens if the number of rows touched matches what the preview showed. [Running SQL safely](/lessons/sql-safely/) explains why each rule exists.
+
+The database is only reachable from the app subnets, so the SQL runs as a one-off Fargate task there, with the app's security group, reading the password from the same secret the order service uses.
+
+```python title="ops/run_sql.py"
+"""Run one SQL statement in a transaction. Preview always rolls back.
+
+Commit only happens when MODE is COMMIT and the number of rows the
+statement touched is exactly EXPECTED_ROWS. Anything else rolls back.
+"""
+import os
+import sys
+
+import pymysql
+
+ALLOWED = ("UPDATE", "DELETE", "INSERT")
+
+
+def main():
+    mode = os.environ["MODE"]
+    ticket = os.environ["TICKET"]
+    expected = os.environ.get("EXPECTED_ROWS", "")
+    sql = os.environ["SQL"].strip().rstrip(";").strip()
+
+    first_word = sql.split(None, 1)[0].upper() if sql else ""
+    if first_word not in ALLOWED:
+        print(f"REFUSED: only {', '.join(ALLOWED)} are allowed, not {first_word or 'nothing'}")
+        return 2
+    if ";" in sql:
+        print("REFUSED: one statement at a time")
+        return 2
+
+    conn = pymysql.connect(
+        host=os.environ["DB_HOST"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ["DB_NAME"],
+        autocommit=False,
+        connect_timeout=10,
+        ssl_ca="/app/global-bundle.pem",
+        ssl_verify_cert=True,
+        ssl_verify_identity=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION innodb_lock_wait_timeout = 10")
+            rows = cur.execute(sql)
+        print(f"ticket {ticket}: the statement touched {rows} rows")
+        if mode == "COMMIT" and expected.isdigit() and rows == int(expected):
+            conn.commit()
+            print("COMMITTED")
+            return 0
+        conn.rollback()
+        if mode == "COMMIT":
+            print(f"ROLLED BACK: expected {expected} rows, got {rows}")
+            return 1
+        print("ROLLED BACK: preview only, nothing changed")
+        return 0
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+| Part | What it does |
+|---|---|
+| `ALLOWED` and the first-word check | only `UPDATE`, `DELETE` and `INSERT`. In MySQL, statements like `DROP` or `ALTER` commit by themselves, so no transaction could undo them |
+| `if ";" in sql` | one statement per run. A semicolon inside a quoted value is refused too: split the work instead |
+| `autocommit=False` | nothing is saved until `commit()` is called |
+| `ssl_ca`, `ssl_verify_cert`, `ssl_verify_identity` | the connection is encrypted and the server's certificate is checked against AWS's RDS certificate bundle |
+| `innodb_lock_wait_timeout = 10` | give up after 10 seconds if the rows are locked, rather than queue behind live orders |
+| `rows = cur.execute(sql)` | the number of rows the statement touched |
+| the commit rule | `COMMIT` mode **and** a matching count commits. Every other path rolls back |
+
+```dockerfile title="ops/Dockerfile"
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir pymysql==1.2.3
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /app/global-bundle.pem
+COPY run_sql.py .
+RUN chmod 644 /app/global-bundle.pem && useradd --create-home --uid 1001 ops
+USER 1001
+CMD ["python", "run_sql.py"]
+```
+
+| Line | What it does |
+|---|---|
+| `pip install … pymysql==1.2.3` | the MySQL client library, pinned |
+| `ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem` | AWS's certificate bundle for RDS, so the connection can be verified |
+| `chmod 644` | the downloaded file is readable by the non-root user |
+| `USER 1001` | runs as a normal user |
+
+The script that runs it as a task:
+
+```sh title="scripts/run-sql-task.sh"
+#!/usr/bin/env bash
+# Run ops/run_sql.py once, as a Fargate task next to the order service.
+# Usage: scripts/run-sql-task.sh ENV IMAGE
+# Reads MODE, SQL, EXPECTED_ROWS and TICKET from the environment.
+set -euo pipefail
+env="$1"
+image="$2"
+stack="stack-$env.json"
+cluster=$(jq -r '.cluster_name' "$stack")
+log_group=$(jq -r '.ops_log_group' "$stack")
+
+jq -n --arg env "$env" --arg image "$image" --arg region "$AWS_REGION" \
+  --arg role "$(jq -r '.execution_role_arn' "$stack")" \
+  --arg host "$(jq -r '.db_address' "$stack")" \
+  --arg secret "$(jq -r '.db_secret_arn' "$stack")" \
+  --arg logs "$log_group" '{
+    family: "quickcart-\($env)-ops",
+    requiresCompatibilities: ["FARGATE"], networkMode: "awsvpc",
+    cpu: "256", memory: "512", executionRoleArn: $role,
+    runtimePlatform: {operatingSystemFamily: "LINUX", cpuArchitecture: "X86_64"},
+    containerDefinitions: [{
+      name: "ops", image: $image, essential: true,
+      environment: [{name: "DB_HOST", value: $host}, {name: "DB_USER", value: "quickcart_admin"},
+                    {name: "DB_NAME", value: "quickcart"}],
+      secrets: [{name: "DB_PASSWORD", valueFrom: ($secret + ":password::")}],
+      logConfiguration: {logDriver: "awslogs", options: {
+        "awslogs-group": $logs, "awslogs-region": $region, "awslogs-stream-prefix": "ops"}}
+    }]}' > ops-task.json
+
+jq -n --arg mode "$MODE" --arg sql "$SQL" --arg rows "$EXPECTED_ROWS" --arg ticket "$TICKET" \
+  '{containerOverrides: [{name: "ops", environment: [
+     {name: "MODE", value: $mode}, {name: "SQL", value: $sql},
+     {name: "EXPECTED_ROWS", value: $rows}, {name: "TICKET", value: $ticket}]}]}' > overrides.json
+
+jq --arg sg "$(jq -r '.app_security_group_id' "$stack")" \
+  '{awsvpcConfiguration: {subnets: .app_subnet_ids, securityGroups: [$sg], assignPublicIp: "DISABLED"}}' \
+  "$stack" > network.json
+
+task_def=$(aws ecs register-task-definition --cli-input-json file://ops-task.json \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+task=$(aws ecs run-task --cluster "$cluster" --launch-type FARGATE --task-definition "$task_def" \
+  --network-configuration file://network.json --overrides file://overrides.json \
+  --query 'tasks[0].taskArn' --output text)
+echo "started $task"
+
+aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task"
+code=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
+  --query 'tasks[0].containers[0].exitCode' --output text)
+
+echo "---- output ----"
+aws logs get-log-events --log-group-name "$log_group" \
+  --log-stream-name "ops/ops/${task##*/}" --start-from-head \
+  --query 'events[].[message]' --output text
+echo "---- exit code: $code ----"
+[ "$code" = "0" ]
+```
+
+| Part | What it does |
+|---|---|
+| the first `jq -n` | builds a task definition: the ops image, the environment's execution role, the database host, and `DB_PASSWORD` from the secret. It's registered fresh each run, so it always matches the environment's current outputs |
+| the second `jq -n` | the run's parameters, passed as environment variables. `--arg` escapes the SQL safely, whatever quotes it contains |
+| the third `jq` | the network: the app subnets and security group, no public IP |
+| `run-task`, then `wait tasks-stopped` | run it once and wait until it finishes |
+| `describe-tasks … exitCode` | `0` means preview done or committed; anything else fails the build |
+| `get-log-events … "ops/ops/${task##*/}"` | print what the tool said. The log stream is named prefix, container, then task ID |
+
+And the job, named `quickcart-ops-sql`, script path `jenkins/ops-sql.Jenkinsfile`:
+
+```groovy title="jenkins/ops-sql.Jenkinsfile" ph="111122223333"
+pipeline {
+  agent { label 'aws' }
+
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+    timeout(time: 30, unit: 'MINUTES')
+  }
+
+  parameters {
+    choice(name: 'ENV', choices: ['dev', 'prod'], description: 'Which database')
+    choice(name: 'MODE', choices: ['PREVIEW', 'COMMIT'], description: 'PREVIEW always rolls back. COMMIT only commits if the row count matches EXPECTED_ROWS')
+    text(name: 'SQL', defaultValue: '', description: 'One UPDATE, DELETE or INSERT statement')
+    string(name: 'EXPECTED_ROWS', defaultValue: '', description: 'COMMIT only: the row count the preview showed')
+    string(name: 'TICKET', defaultValue: '', description: 'The ticket that asked for this change')
+  }
+
+  environment {
+    AWS_REGION = 'us-east-1'
+    OPS_REPO = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-ops"
+  }
+
+  stages {
+    stage('Check the request') {
+      steps {
+        script {
+          if (!params.TICKET?.trim()) {
+            error('A ticket is required, so every change can be traced back to a request.')
+          }
+          if (!params.SQL?.trim()) {
+            error('SQL is empty.')
+          }
+          if (params.MODE == 'COMMIT' && !(params.EXPECTED_ROWS ==~ /\d+/)) {
+            error('COMMIT needs EXPECTED_ROWS: run a PREVIEW first and copy its row count.')
+          }
+        }
+        echo "${params.MODE} on ${params.ENV} for ticket ${params.TICKET}"
+      }
+    }
+
+    stage('Second person approves') {
+      when { expression { params.MODE == 'COMMIT' && params.ENV == 'prod' } }
+      steps {
+        input(message: "Commit this change to production? Ticket ${params.TICKET}, expecting ${params.EXPECTED_ROWS} rows.", ok: 'Commit it', submitter: 'admin')
+      }
+    }
+
+    stage('Build the ops tool') {
+      steps {
+        script {
+          env.OPS_TAG = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+        }
+        sh '''
+          if ! aws ecr describe-images --repository-name quickcart-ops --image-ids imageTag="$OPS_TAG" > /dev/null 2>&1; then
+            docker build -t "$OPS_REPO:$OPS_TAG" ops
+            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${OPS_REPO%%/*}"
+            docker push "$OPS_REPO:$OPS_TAG"
+          fi
+        '''
+      }
+    }
+
+    stage('Run in a transaction') {
+      options { lock("quickcart-${params.ENV}-sql") }
+      environment {
+        MODE = "${params.MODE}"
+        SQL = "${params.SQL}"
+        EXPECTED_ROWS = "${params.EXPECTED_ROWS}"
+        TICKET = "${params.TICKET}"
+      }
+      steps {
+        sh "scripts/stack-outputs.sh ${params.ENV}"
+        sh "scripts/run-sql-task.sh ${params.ENV} \"\$OPS_REPO:\$OPS_TAG\""
+      }
+    }
+  }
+
+  post {
+    always { cleanWs() }
+  }
+}
+```
+
+| Part | What it does |
+|---|---|
+| the five `parameters` | environment, mode, the statement, the expected count and the ticket |
+| `Check the request` | refuses to start without a ticket, or a commit without a number |
+| `Second person approves` → `when` | a commit to prod waits for `admin`, who should not be the person who asked |
+| `Build the ops tool` | builds and pushes `quickcart-ops` for this commit, once |
+| `lock("quickcart-${params.ENV}-sql")` | one SQL change per database at a time |
+| `environment { SQL = "${params.SQL}" }` then `"$SQL"` in the script | the statement reaches the shell as an environment variable, never pasted into a command, so no quote in it can break out |
+
+Using it, for the three stuck orders:
+
+| Run | MODE | SQL | EXPECTED_ROWS | Result |
+|---|---|---|---|---|
+| 1 | `PREVIEW` | `UPDATE orders SET status = 'cancelled' WHERE status = 'pending' AND created_at < '2026-09-01'` | empty | `the statement touched 3 rows` then `ROLLED BACK: preview only` |
+| 2 | `COMMIT` | the same | `3` | approval, then `COMMITTED` |
+
+If rows were added between the two runs, run 2 touches 4, rolls back, and the build fails. That's the point. The `quickcart` database from Project 4 starts empty, so to practise, create a table with a few rows through a first `INSERT` run.
+
+</Step>
+
+<Step title="Log extraction for a time window">
+
+"What happened between 14:00 and 14:30?" is the first question in every incident, and answering it shouldn't need console access. Name `quickcart-ops-logs`, script path `jenkins/ops-logs.Jenkinsfile`.
+
+```sh title="scripts/extract-logs.sh"
+#!/usr/bin/env bash
+# Save every log line from one log group in a time window to logs.txt.
+# Usage: scripts/extract-logs.sh LOG_GROUP START END [FILTER]
+# START and END are UTC, like "2026-09-25 14:00".
+set -euo pipefail
+group="$1"
+start_ms=$(( $(date -u -d "$2" +%s) * 1000 ))
+end_ms=$(( $(date -u -d "$3" +%s) * 1000 ))
+filter="${4:-}"
+
+if [ "$end_ms" -le "$start_ms" ]; then
+  echo "FAILED: END must be after START"
+  exit 1
+fi
+if [ $(( end_ms - start_ms )) -gt $(( 24 * 3600 * 1000 )) ]; then
+  echo "FAILED: the window is longer than 24 hours; ask for a smaller one"
+  exit 1
+fi
+
+args=(--log-group-name "$group" --start-time "$start_ms" --end-time "$end_ms" --output json)
+if [ -n "$filter" ]; then
+  args+=(--filter-pattern "$filter")
+fi
+aws logs filter-log-events "${args[@]}" \
+  | jq -r '.events[] | "\(.timestamp / 1000 | floor | todate) \(.logStreamName) \(.message)"' > logs.txt
+echo "saved $(wc -l < logs.txt) lines from $group to logs.txt"
+```
+
+| Part | What it does |
+|---|---|
+| `date -u -d "$2" +%s` then `* 1000` | turn `2026-09-25 14:00` into milliseconds since 1970, which CloudWatch expects |
+| the two checks | refuse a window that ends before it starts, or is longer than 24 hours |
+| `args=(…)` and `args+=(--filter-pattern …)` | add the filter only if one was given |
+| `aws logs filter-log-events` | fetch every matching line. The CLI fetches every page by itself |
+| the `jq` line | one line per event: time, which task, message |
+
+```groovy title="jenkins/ops-logs.Jenkinsfile"
+pipeline {
+  agent { label 'aws' }
+
+  options {
+    timestamps()
+    timeout(time: 15, unit: 'MINUTES')
+  }
+
+  parameters {
+    choice(name: 'ENV', choices: ['prod', 'dev'], description: 'Which environment')
+    choice(name: 'SOURCE', choices: ['orders', 'orders-canary', 'ops'], description: 'Which log group')
+    string(name: 'START', defaultValue: '', description: 'UTC, like 2026-09-25 14:00')
+    string(name: 'END', defaultValue: '', description: 'UTC, like 2026-09-25 14:30. At most 24 hours after START')
+    string(name: 'FILTER', defaultValue: '', description: 'Optional CloudWatch filter pattern, like ERROR')
+  }
+
+  environment {
+    AWS_REGION = 'us-east-1'
+  }
+
+  stages {
+    stage('Extract') {
+      environment {
+        LOG_GROUP = "/ecs/quickcart-${params.ENV}-${params.SOURCE}"
+        START = "${params.START}"
+        END = "${params.END}"
+        FILTER = "${params.FILTER}"
+      }
+      steps {
+        sh 'scripts/extract-logs.sh "$LOG_GROUP" "$START" "$END" "$FILTER"'
+        archiveArtifacts artifacts: 'logs.txt'
+      }
+    }
+  }
+
+  post {
+    always { cleanWs() }
+  }
+}
+```
+
+| Part | What it does |
+|---|---|
+| `SOURCE` | the log group: the stable service, the canary or the ops tasks |
+| the stage's `environment` | the parameters reach the script as environment variables, safely quoted |
+| `archiveArtifacts artifacts: 'logs.txt'` | the file is attached to the build, to download or link in the incident notes |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** a `PREVIEW` run of `quickcart-ops-sql` against dev ends with `ROLLED BACK: preview only, nothing changed`, and a `quickcart-ops-logs` run for the last hour attaches a `logs.txt`.
+
+</See>
+
+## Write the operations runbook
+
+A runbook is what the person on call reads at 3am. Keep it in the repository, as `RUNBOOK.md`, so it changes with the code. [Runbooks](/lessons/runbooks/) explains how to write and test one. This is QuickCart's.
+
+<Steps>
+
+<Step title="Release">
+
+| | |
+|---|---|
+| **When** | any change merged to `main` |
+| **How** | merge the pull request. Approve **Approve production** in the `main` build once dev's smoke test has passed |
+| **Check** | the build is green; prod's `/health` reports the commit's short ID |
+| **If the canary aborts** | nothing to undo: traffic is already back on stable. Read the abort line in the log, then the canary's logs with `quickcart-ops-logs`, `SOURCE` `orders-canary` |
+| **Never** | release by clicking in the ECS console. The next pipeline run would not know |
+
+</Step>
+
+<Step title="Roll back">
+
+| | |
+|---|---|
+| **When** | prod misbehaves after a release that passed its canary |
+| **How** | `quickcart-rollback`, `ENV` `prod`, **Build**. About 5 minutes |
+| **Check** | `/health` reports the previous version; the 5xx alarm returns to OK |
+| **Then** | revert the bad commit in git, so the next merge doesn't release it again |
+
+</Step>
+
+<Step title="Change data">
+
+| | |
+|---|---|
+| **When** | a ticket asks for a data fix |
+| **How** | `quickcart-ops-sql` in `PREVIEW`; check the count is what the ticket expects; run again in `COMMIT` with that count; a second person approves prod |
+| **Check** | the log says `COMMITTED` |
+| **Never** | `DROP`, `ALTER` or `TRUNCATE` through this job; it refuses them. Schema changes go through a reviewed migration |
+
+</Step>
+
+<Step title="Investigate">
+
+| | |
+|---|---|
+| **When** | an alarm fires, or someone reports a problem at a time |
+| **How** | `quickcart-ops-logs` with the environment, the source and a window around the time. Add `FILTER` `ERROR` to narrow it |
+| **Then** | [Where to look first](/lessons/where-to-look-first/) |
+
+</Step>
+
+<Step title="When Jenkins itself is broken">
+
+| Symptom | Do |
+|---|---|
+| a build waits for `aws` forever | **Manage Jenkins > Nodes**: reconnect `aws-agent`. If the instance is gone, `terraform apply` in `ci/` rebuilds it, and the node reconnects |
+| a lock is stuck after a killed build | **Lockable Resources**: **Unlock** it, after checking no release is running |
+| the controller is lost | restore the newest snapshot tagged `Backup = jenkins-home` as a volume and attach it to a new controller. You lose at most a day of build history. Everything that matters is in git |
+| an urgent rollback with Jenkins down | run `scripts/stack-outputs.sh prod` then `scripts/rollback.sh prod` from a laptop with admin access. The pipeline's scripts work anywhere |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `RUNBOOK.md` is committed, and you've followed each procedure once, in dev, with a watch in your hand. Write each one's time into it.
+
+</See>
+
+## Prove it
+
+The claim: a commit reaches production with nobody touching the console, and a bad one is stopped by itself.
+
+<Steps>
+
+<Step title="A pull request is checked, not released">
+
+Make a branch, change the `/` page's JSON in `app/app.py` (for example, add `"team": "quickcart"`), push it and open a pull request.
+
+<See>
+
+Within a couple of minutes, a `PR-1` job in Jenkins: checks passed, two plans attached (`No changes` in each), no push, no deploy. GitHub shows the check on the pull request.
+
+</See>
+
+</Step>
+
+<Step title="A good merge reaches production">
+
+Merge the pull request. Approve when asked. Time it from the merge to the last green stage.
+
+<See>
+
+Every stage green. Prod's `/` shows `"team":"quickcart"`, and nobody opened the AWS console.
+
+</See>
+
+</Step>
+
+<Step title="A bad merge is stopped by the canary">
+
+In `app/app.py`, make `/orders` fail: change `return jsonify(version=VERSION, count=len(ORDERS), orders=ORDERS)` to `return jsonify(error="broken"), 500`. Merge it through a pull request, and approve.
+
+<See>
+
+Dev's smoke test passes, because it only checks `/health`. The canary then fails its first check, because `canary.sh` sends its test traffic to `/orders`:
+
+```output title="The canary stage's log ends with lines like"
+canary since 2026-09-25T14:02:07Z: 61 requests, 61 server errors
+ABORT: error rate above 1%
+traffic: stable 100%, canary 0%
+rolled back: all traffic is on the stable version, the canary is scaled to 0
+```
+
+Your times and counts will differ. The build is red, and prod's `/orders` still works: only a tenth of production traffic met the bad version, for five minutes.
+
+</See>
+
+Revert the commit with another pull request. That's the fix, and it goes through the same pipeline.
+
+</Step>
+
+</Steps>
+
+Fill in the evidence:
+
+| Test | Your result | Pass mark |
+|---|---|---|
+| Pull request: checks and plans, no release | | green; nothing pushed |
+| Merge to production, commit to last green stage | your minutes | no console, one approval click |
+| Broken canary | | aborted at 10%; stable untouched |
+| Rollback job, click to stable | your minutes | under 10 minutes |
+| SQL preview then commit | | counts match; commit only after approval |
+| Access keys in Jenkins, the repository or the agent | | none |
+
+## Troubleshooting
+
+<Mistake title="the build waits for an agent forever">
+
+```output title="The build log shows"
+Still waiting to schedule task
+There are no nodes with the label 'aws'
+```
+
+**Why:** the agent isn't connected, or its label isn't exactly `aws`.
+
+**The fix:** **Manage Jenkins > Nodes > aws-agent > Log**. `Connection refused` or a timeout means the agent security group: it must allow port 22 from the controller's group. `Authentication failed` means the key: check the credential's username is `jenkins`.
+
+</Mistake>
+
+<Mistake title="docker: permission denied on the agent">
+
+```output title="The Lint or Test stage fails with"
+permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+```
+
+**Why:** the `jenkins` user isn't in the `docker` group, or the agent connected before the group change took effect.
+
+**The fix:** in an SSM shell on the agent, `sudo usermod -aG docker jenkins`. Then in Jenkins, disconnect and reconnect `aws-agent`, so it starts a new session with the new group.
+
+</Mistake>
+
+<Mistake title="the push is refused because the tag exists">
+
+```output title="The Push image stage fails with a message containing"
+tag invalid: The image tag '3f9c2e1' already exists in the 'quickcart-orders' repository and cannot be overwritten because the repository is immutable.
+```
+
+**Why:** the same commit was built twice, and the check before the push was removed or failed silently.
+
+**The fix:** keep the `describe-images` check in the `Push image` stage. That check is what makes rerunning a build safe.
+
+</Mistake>
+
+<Mistake title="registering the task definition is refused">
+
+```output title="deploy.sh fails with a message like"
+An error occurred (AccessDeniedException) when calling the RegisterTaskDefinition operation: User: arn:aws:sts::111122223333:assumed-role/quickcart-jenkins-agent/i-0example12345678 is not authorized to perform: iam:PassRole on resource: arn:aws:iam::111122223333:role/quickcart-dev-ecs-execution
+```
+
+**Why:** the agent's `PassRole` permission doesn't match the execution role's name. The `quickcart-*-ecs-execution` pattern must match what Project 4 created.
+
+**The fix:** check the role's name in the task definition, fix the pattern in `ci/iam.tf`, and `terraform apply` in `ci/`.
+
+</Mistake>
+
+<Mistake title="the canary aborts with too few requests">
+
+```output title="The canary stage ends with"
+ABORT: only 12 requests reached the canary
+```
+
+**Why:** 10% of the test traffic wasn't enough in five minutes, usually because each request was slow or the canary target joined late.
+
+**The fix:** a minimum is correct: a canary nobody used proves nothing. Set `BAKE_SECONDS` higher in the canary stage's environment, or lower the minimum, and write down why. Don't remove the check.
+
+</Mistake>
+
+<Mistake title="the SQL task can't connect to the database">
+
+```output title="The ops task's output shows a message like"
+pymysql.err.OperationalError: (2003, "Can't connect to MySQL server on 'quickcart-dev-db.abcdefghijkl.us-east-1.rds.amazonaws.com' (timed out)")
+```
+
+**Why:** the task isn't in the app security group, so the database's security group doesn't let it in. That happens if `run-sql-task.sh` was changed to use a different group.
+
+**The fix:** the network file must use `app_security_group_id` from the stack's outputs: the only group the database accepts on port 3306.
+
+</Mistake>
+
+<Mistake title="Session Manager won't open a session">
+
+```output title="aws ssm start-session stops with"
+SessionManagerPlugin is not found. Please refer to SessionManager Documentation here:
+```
+
+**Why:** the AWS CLI needs a separate plugin for Session Manager.
+
+**The fix:** `brew install --cask session-manager-plugin`, then open a new terminal window.
+
+</Mistake>
+
+## Clean up
+
+Production first: it costs the most.
+
+<Steps>
+
+<Step title="Destroy prod and dev">
+
+Follow [Project 4's clean-up](/projects/04-everything-as-code/#clean-up) for `prod`, including turning its deletion protection off first, then for `dev`. Task definition revisions the pipeline registered are left behind as inactive entries; they cost nothing.
+
+</Step>
+
+<Step title="Destroy Jenkins">
+
+```sh
+cd ci
+```
+
+| Part | What it means |
+|---|---|
+| `cd ci` | from the top of the repository, into the Jenkins folder |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | delete both instances, their roles, the SSH key parameter and the backup policy |
+
+<See>
+
+`Destroy complete!`. Snapshots the backup policy already took are **not** deleted with it.
+
+</See>
+
+</Step>
+
+<Step title="Delete the snapshots and the token">
+
+In **EC2 > Snapshots**, filter by the tag `Backup` and delete every `jenkins-home` snapshot. On GitHub, delete the `quickcart-jenkins` token: **Settings > Developer settings > Personal access tokens**.
+
+</Step>
+
+<Step title="Destroy the shared layer">
+
+In `infra/shared`, run `terraform destroy`. It deletes the `quickcart-orders` and `quickcart-ops` repositories in both regions, with every image.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Check both regions, **US East (N. Virginia)** and **US West (Oregon)**:
+
+| Where | Should show |
+|---|---|
+| EC2 > Instances | nothing running from QuickCart |
+| EC2 > Snapshots and Volumes | nothing tagged `Project = quickcart` |
+| ECS > Clusters, RDS > Databases, EC2 > Load Balancers | nothing |
+| VPC > NAT gateways, EC2 > Elastic IPs | nothing active |
+| ECR > Repositories | nothing starting `quickcart-` |
+| Systems Manager > Parameter Store | no `/quickcart/` parameters |
+
+<See>
+
+All empty. The state bucket is the only thing left; empty and delete it as [Terraform state](/lessons/terraform-state/) shows if you've finished the course.
+
+</See>
+
+</Step>
+
+</Steps>

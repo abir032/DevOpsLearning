@@ -1,0 +1,113 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import { ORDER, href, lessonHref, moduleHref, lessonBySlug, type FlatLesson } from "../../data/curriculum";
+import { PARTS } from "../../data/parts";
+import { readySlugs } from "../../lib/lessons";
+import { lessonComponents } from "../../components/lesson";
+
+export function getStaticPaths() {
+  return ORDER.map((l) => ({ params: { slug: l.slug } }));
+}
+
+const { slug } = Astro.params as { slug: string };
+const lesson = lessonBySlug(slug)!;
+const m = lesson.module;
+const entry = (await getCollection("lessons")).find((e) => e.id === slug);
+const ready = await readySlugs();
+const i = ORDER.findIndex((l) => l.slug === slug);
+const prev: FlatLesson | undefined = ORDER[i - 1];
+const next: FlatLesson | undefined = ORDER[i + 1];
+const rendered = entry ? await render(entry) : null;
+const Content = rendered?.Content;
+const before = entry?.data.before.map((s) => lessonBySlug(s)!).filter(Boolean) ?? [];
+const readyInModule = m.lessons.filter((l) => ready.has(l.slug));
+const finished = ORDER.filter((l) => ready.has(l.slug) && l.slug !== slug);
+---
+<Base title={lesson.title} description={lesson.sum} current={{ module: m.slug, stop: slug }} track={m.track}>
+  <div class="page">
+    <div class="page-grid">
+      <article class="read" data-pagefind-body data-pagefind-meta={`track:${m.track}`}>
+        <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+          <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span>
+          <a href={moduleHref(m)}>{`${m.id} – ${m.title}`}</a><span class="sep" aria-hidden="true">/</span>
+          <span aria-current="page">{lesson.title}</span>
+        </nav>
+        <header class="lesson-head">
+          <h1 data-pagefind-meta="title">{lesson.title}</h1>
+          <p class="summary">{lesson.sum}</p>
+          {entry && (
+            <dl class="lesson-meta" data-pagefind-ignore>
+              <div><dt>Time</dt><dd>{entry.data.time}</dd></div>
+              <div><dt>Level</dt><dd>{entry.data.level}</dd></div>
+              <div><dt>Read first</dt><dd>
+                {before.length
+                  ? before.map((b, n) => <>{n > 0 && ", "}<a href={lessonHref(b.slug)}>{b.title}</a></>)
+                  : "Nothing — you can start here"}
+              </dd></div>
+            </dl>
+          )}
+        </header>
+
+        {Content ? (
+          <div class="prose">
+            <Content components={lessonComponents} />
+          </div>
+          <div class="done-bar" data-pagefind-ignore>
+            <p>Finished the build and the quiz? Mark it done to fill in its stop on the route map.</p>
+            <button class="btn line" type="button" data-done-toggle={slug} aria-pressed="false">Mark as done</button>
+          </div>
+        ) : (
+          <div class="soon-box">
+            <h2>This lesson is being written</h2>
+            <p>It will follow the same six parts as every finished lesson: QuickCart's problem first, the idea in plain words, an interactive picture, a hands-on build, a quiz and a cheat sheet.</p>
+            {readyInModule.length > 0 && <p>Already finished in this module:</p>}
+            {readyInModule.length > 0 && <div class="btns">{readyInModule.map((l) => <a class="btn" href={lessonHref(l.slug)}>{l.title}</a>)}</div>}
+            {readyInModule.length === 0 && finished.length > 0 && <p>Meanwhile, see how a finished lesson works:</p>}
+            {readyInModule.length === 0 && <div class="btns">{finished.slice(0, 2).map((l) => <a class="btn" href={lessonHref(l.slug)}>{l.title}</a>)}</div>}
+          </div>
+        )}
+
+        <nav class="pager" aria-label="Previous and next lesson" data-pagefind-ignore>
+          {prev ? <a href={lessonHref(prev.slug)}><small>Previous</small><b>{prev.title}</b></a> : <span></span>}
+          {next ? <a class="next" href={lessonHref(next.slug)}><small>Next</small><b>{next.title}</b></a>
+                : <a class="next" href={href("/projects/")}><small>Next</small><b>The projects</b></a>}
+        </nav>
+      </article>
+
+      {Content && (
+        <div class="toc-col" data-pagefind-ignore>
+          <nav class="toc" aria-label="On this page">
+            <div class="h">On this page</div>
+            <ol>
+              {PARTS.map(([id, name]) => <li data-for={id}><a href={`#${id}`}>{name}</a></li>)}
+            </ol>
+            <button class="btn line" type="button" data-done-toggle={slug} aria-pressed="false">Mark as done</button>
+          </nav>
+        </div>
+      )}
+    </div>
+  </div>
+</Base>
+
+<script>
+  import { onPage } from "../../scripts/page";
+
+  /* The "on this page" tracker: fill the dot of the part being read. */
+  onPage(() => {
+    const items = [...document.querySelectorAll<HTMLElement>(".toc li")];
+    const parts = [...document.querySelectorAll<HTMLElement>(".part")];
+    if (!items.length || !parts.length) return;
+    const update = () => {
+      const line = window.innerHeight * 0.3;
+      let cur = parts[0].id;
+      for (const p of parts) if (p.getBoundingClientRect().top <= line) cur = p.id;
+      items.forEach((li) => li.classList.toggle("on", li.dataset.for === cur));
+    };
+    let raf = 0;
+    const onScroll = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(update); };
+    addEventListener("scroll", onScroll, { passive: true });
+    update();
+    return () => removeEventListener("scroll", onScroll);
+  });
+</script>

@@ -1,0 +1,235 @@
+---
+/*
+ * What the cloud is: owning servers vs renting them by the hour.
+ * Teaches: if you own servers you pay for your peak all day, every day.
+ * If you rent, you pay for what each hour actually needs.
+ * All prices are illustrative, not real AWS prices.
+ */
+const X0 = 60, X1 = 744, BASE = 250, TOP = 30, MAX = 16;
+const SLOT = (X1 - X0) / 24;
+const hours = Array.from({ length: 24 }, (_, h) => h);
+const ticks = [0, 4, 8, 12, 16];
+const yOf = (v: number) => BASE - (v / MAX) * (BASE - TOP);
+---
+<div class="viz" data-track="cloud" data-viz="own-vs-rent">
+  <div class="viz-controls">
+    <span class="lbl" id="ovr-t-lbl">A day of orders</span>
+    <div class="seg wide" role="group" aria-labelledby="ovr-t-lbl">
+      <button type="button" data-pattern="steady" aria-pressed="true">Steady</button>
+      <button type="button" data-pattern="meals" aria-pressed="false">Lunch and dinner rush</button>
+      <button type="button" data-pattern="viral" aria-pressed="false">Viral launch day</button>
+    </div>
+    <span class="ovr-grp">
+      <span class="lbl" id="ovr-o-lbl">Servers you own</span>
+      <span class="seg" role="group" aria-labelledby="ovr-o-lbl">
+        <button type="button" data-own="4" aria-pressed="true">4</button>
+        <button type="button" data-own="8" aria-pressed="false">8</button>
+        <button type="button" data-own="16" aria-pressed="false">16</button>
+      </span>
+    </span>
+    <button class="btn line" type="button" data-act="play">Play the day</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole day</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 760 300" role="img" aria-labelledby="ovr-title">
+      <title id="ovr-title">A bar chart of how many servers QuickCart needs in each hour of one day, with a dashed line showing how many servers it owns. Space between a bar and the line is capacity paid for but unused. Any part of a bar above the line is orders turned away.</title>
+      {ticks.map((t) => (
+        <g>
+          <line class="ovr-grid" x1={X0} x2={X1} y1={yOf(t)} y2={yOf(t)} />
+          <text class="vz-s" x={X0 - 8} y={yOf(t) + 4} text-anchor="end">{t}</text>
+        </g>
+      ))}
+      <text class="vz-label" x="8" y="18">Servers needed</text>
+      {hours.map((h) => (
+        <g data-h={h}>
+          <rect class="ovr-idle" x={X0 + h * SLOT + 3} width={SLOT - 6} y={BASE} height="0" />
+          <rect class="ovr-use" x={X0 + h * SLOT + 3} width={SLOT - 6} y={BASE} height="0" />
+          <rect class="ovr-drop" x={X0 + h * SLOT + 3} width={SLOT - 6} y={BASE} height="0" />
+        </g>
+      ))}
+      {[0, 3, 6, 9, 12, 15, 18, 21].map((h) => (
+        <text class="vz-s" x={X0 + h * SLOT + SLOT / 2} y={BASE + 18} text-anchor="middle">{String(h).padStart(2, "0")}:00</text>
+      ))}
+      <line data-n="own" class="ovr-own" x1={X0} x2={X1} y1={yOf(4)} y2={yOf(4)} />
+      <text data-n="own-l" class="ovr-own-l" x={X1} y={yOf(4) - 6} text-anchor="end">you own 4</text>
+      <line data-n="head" class="ovr-head" x1={X0} x2={X0} y1={TOP - 6} y2={BASE} opacity="0" />
+      <g class="ovr-key">
+        <rect class="ovr-use" x="210" y="282" width="12" height="12" /><text class="vz-s" x="228" y="292">used</text>
+        <rect class="ovr-idle" x="280" y="282" width="12" height="12" /><text class="vz-s" x="298" y="292">owned but idle</text>
+        <rect class="ovr-drop" x="400" y="282" width="12" height="12" /><text class="vz-s" x="418" y="292">orders turned away</text>
+      </g>
+    </svg>
+  </div>
+  <div class="ovr-sum">
+    <div class="ovr-col" data-n="col-own">
+      <p class="ovr-h">Own <span data-n="own-n">4</span> servers</p>
+      <p class="ovr-big" data-n="own-cost">$230 a month</p>
+      <p data-n="own-idle">24 idle server-hours a day</p>
+      <p data-n="own-drop">0 orders turned away a day</p>
+    </div>
+    <div class="ovr-col" data-n="col-rent">
+      <p class="ovr-h">Rent what each hour needs</p>
+      <p class="ovr-big" data-n="rent-cost">$216 a month</p>
+      <p>0 idle server-hours</p>
+      <p>0 orders turned away</p>
+    </div>
+  </div>
+  <p class="viz-hint">Illustrative prices: an owned server works out at $0.08 an hour over its life; a rented one costs $0.10 an hour. Each server handles 100 orders an hour. A month is 30 days like this one.</p>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Pick a day and how many servers you own. Then choose <b>Play the day</b>.</div>
+</div>
+
+<style is:global>
+  [data-viz="own-vs-rent"] .ovr-grp { display: inline-flex; align-items: center; gap: 10px; }
+  [data-viz="own-vs-rent"] .ovr-grid { stroke: var(--rule); stroke-width: 1; }
+  [data-viz="own-vs-rent"] .ovr-use { fill: var(--cloud); }
+  [data-viz="own-vs-rent"] .ovr-idle { fill: var(--sunk); stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+  [data-viz="own-vs-rent"] .ovr-drop { fill: var(--bad); }
+  [data-viz="own-vs-rent"] [data-h].dim rect { opacity: .25; }
+  [data-viz="own-vs-rent"] .ovr-own { stroke: var(--ink); stroke-width: 2; stroke-dasharray: 8 5; }
+  [data-viz="own-vs-rent"] .ovr-own-l { font-family: var(--font); font-size: 12.5px; font-weight: 800; fill: var(--ink); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+  [data-viz="own-vs-rent"] .ovr-head { stroke: var(--ink-2); stroke-width: 2; }
+  [data-viz="own-vs-rent"] .ovr-sum { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 4px 16px 12px; }
+  [data-viz="own-vs-rent"] .ovr-col { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 14px; }
+  [data-viz="own-vs-rent"] .ovr-col.win { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="own-vs-rent"] .ovr-col p { margin: 0; font-size: 14.5px; color: var(--ink-2); }
+  [data-viz="own-vs-rent"] .ovr-col .ovr-h { font-weight: 800; color: var(--ink); }
+  [data-viz="own-vs-rent"] .ovr-col .ovr-big { font-size: 22px; font-weight: 800; color: var(--ink); line-height: 1.3; }
+  [data-viz="own-vs-rent"] .ovr-col .bad { color: var(--bad); font-weight: 700; }
+  @media (max-width: 520px) { [data-viz="own-vs-rent"] .ovr-sum { grid-template-columns: 1fr; } }
+</style>
+
+<script>
+  import { beat, press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  const X0 = 60, X1 = 744, BASE = 250, TOP = 30, MAX = 16;
+  const SLOT = (X1 - X0) / 24;
+  const yOf = (v: number) => BASE - (v / MAX) * (BASE - TOP);
+  const OWN_RATE = 0.08, RENT_RATE = 0.10, ORDERS = 100, DAYS = 30;
+
+  const PATTERNS: Record<string, { name: string; need: number[] }> = {
+    steady: { name: "a steady day", need: Array(24).fill(3) },
+    meals: { name: "a day with a lunch and a dinner rush", need: [1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4, 6, 7, 6, 4, 3, 3, 4, 7, 8, 6, 3, 2, 1] },
+    viral: { name: "launch day, when a video about QuickCart goes viral", need: [1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4, 6, 7, 6, 4, 3, 5, 9, 14, 16, 12, 6, 3, 2] },
+  };
+  const money = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
+  const hh = (h: number) => String(h).padStart(2, "0") + ":00";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="own-vs-rent"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const groups = [...root.querySelectorAll<SVGGElement>("[data-h]")];
+      const pBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-pattern]")];
+      const oBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-own]")];
+      const playBtn = root.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+      const head = q<SVGLineElement>("head");
+      let pattern = "steady";
+      let own = 4;
+      let run = 0;
+
+      function stats() {
+        const need = PATTERNS[pattern].need;
+        const used = need.reduce((a, n) => a + n, 0);
+        const idle = need.reduce((a, n) => a + Math.max(0, own - n), 0);
+        const dropped = need.reduce((a, n) => a + Math.max(0, n - own), 0) * ORDERS;
+        return {
+          ownCost: own * 24 * DAYS * OWN_RATE,
+          rentCost: used * DAYS * RENT_RATE,
+          idle, dropped,
+        };
+      }
+      function setBar(h: number, n: number) {
+        const [idle, use, drop] = [...groups[h].querySelectorAll("rect")];
+        const inCap = Math.min(n, own);
+        use.setAttribute("y", String(yOf(inCap)));
+        use.setAttribute("height", String(BASE - yOf(inCap)));
+        idle.setAttribute("height", String(n < own ? yOf(n) - yOf(own) : 0));
+        idle.setAttribute("y", String(yOf(own)));
+        drop.setAttribute("y", String(yOf(n)));
+        drop.setAttribute("height", String(n > own ? yOf(own) - yOf(n) : 0));
+      }
+      function draw() {
+        const need = PATTERNS[pattern].need;
+        need.forEach((n, h) => setBar(h, n));
+        groups.forEach((g) => g.classList.remove("dim"));
+        head.setAttribute("opacity", "0");
+        q("own").setAttribute("y1", String(yOf(own)));
+        q("own").setAttribute("y2", String(yOf(own)));
+        q("own-l").setAttribute("y", String(yOf(own) - 6));
+        q("own-l").textContent = `you own ${own}`;
+        const s = stats();
+        q("own-n").textContent = String(own);
+        q("own-cost").textContent = money(s.ownCost) + " a month";
+        q("rent-cost").textContent = money(s.rentCost) + " a month";
+        q("own-idle").textContent =`${s.idle} idle server-hours a day`;
+        const d = q<HTMLElement>("own-drop");
+        d.textContent = `${s.dropped.toLocaleString("en-US")} orders turned away a day`;
+        d.className = s.dropped ? "bad" : "";
+        const ownWins = s.ownCost < s.rentCost && !s.dropped;
+        q("col-own").classList.toggle("win", ownWins);
+        q("col-rent").classList.toggle("win", !ownWins);
+      }
+      function summary() {
+        const s = stats();
+        const p = PATTERNS[pattern];
+        const peak = Math.max(...p.need);
+        let msg = `On ${p.name}, owning ${own} servers costs <b>${money(s.ownCost)}</b> a month and renting costs <b>${money(s.rentCost)}</b>. `;
+        if (s.dropped) msg += `At the peak you need ${peak} servers but own ${own}, so <b>${s.dropped.toLocaleString("en-US")} orders a day are turned away</b>. To stop that, you'd have to own ${peak} and leave most of them idle most of the day.`;
+        else if (s.ownCost < s.rentCost) msg += "With a flat, predictable load, owning, or committing to a long-term discount, can be cheaper. The cloud wins when load changes.";
+        else msg += `You never turn orders away, but you pay for <b>${s.idle} idle server-hours every day</b>. Renting pays only for the hours each server is needed.`;
+        return msg;
+      }
+      function reset() {
+        run++;
+        playBtn.disabled = false;
+        draw();
+        tell(say, "Changed", summary(), stats().dropped ? "bad" : "");
+      }
+
+      async function play() {
+        const me = ++run;
+        const live = () => me === run;
+        playBtn.disabled = true;
+        draw();
+        if (reduced()) {
+          tell(say, "The whole day", summary(), stats().dropped ? "bad" : "good");
+          playBtn.disabled = false;
+          return;
+        }
+        const need = PATTERNS[pattern].need;
+        groups.forEach((g) => g.classList.add("dim"));
+        head.setAttribute("opacity", "1");
+        for (let h = 0; h < 24; h++) {
+          groups[h].classList.remove("dim");
+          const hx = X0 + (h + 1) * SLOT;
+          head.setAttribute("x1", String(hx));
+          head.setAttribute("x2", String(hx));
+          const n = need[h];
+          const note = n > own ? `needs ${n} servers but you own ${own}: <b>${(n - own) * ORDERS} orders turned away</b> this hour.`
+            : n < own ? `needs ${n} of your ${own} servers. <b>${own - n} sit idle</b>, still paid for.`
+            : `needs exactly the ${own} servers you own.`;
+          tell(say, hh(h), `QuickCart ${note} Renting would pay for ${n}.`, n > own ? "bad" : "");
+          await beat(n > own || h === 12 || h === 19 ? 520 : 170);
+          if (!live()) return;
+        }
+        head.setAttribute("opacity", "0");
+        tell(say, "End of the day", summary(), stats().dropped ? "bad" : "good");
+        playBtn.disabled = false;
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.pattern) { pattern = b.dataset.pattern; press(pBtns, (x) => x === b); reset(); }
+        else if (b.dataset.own) { own = Number(b.dataset.own); press(oBtns, (x) => x === b); reset(); }
+        else if (b.dataset.act === "play") play();
+      });
+      draw();
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

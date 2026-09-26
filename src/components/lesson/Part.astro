@@ -1,0 +1,15 @@
+---
+/* One of the six parts of a lesson. The order and names live in data/parts.ts. */
+import { PARTS, type PartId } from "../../data/parts";
+interface Props { id: PartId }
+const { id } = Astro.props;
+const n = PARTS.findIndex((p) => p[0] === id);
+if (n < 0) throw new Error(`Unknown lesson part "${id}"`);
+---
+<section class="part" id={id} aria-labelledby={`h-${id}`} data-part={id}>
+  <div class="part-head">
+    <span class="part-num" aria-hidden="true">{n + 1}</span>
+    <h2 id={`h-${id}`}><span class="sr">Part {n + 1}: </span>{PARTS[n][1]}</h2>
+  </div>
+  <slot />
+</section>

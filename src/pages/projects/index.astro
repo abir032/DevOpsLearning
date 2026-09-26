@@ -1,0 +1,42 @@
+---
+import Base from "../../layouts/Base.astro";
+import { PROJECTS, PROJECTS_MODULE, href, projectHref } from "../../data/curriculum";
+import { readySlugs } from "../../lib/lessons";
+const ready = await readySlugs();
+const m = PROJECTS_MODULE;
+---
+<Base title="Projects" description={m.blurb} current={{ module: m.slug, page: "projects" }} track={m.track}>
+  <div class="page">
+    <div class="read" data-pagefind-body>
+      <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+        <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">Projects</span>
+      </nav>
+      <header class="mod-hero">
+        <span class="num">After the modules</span>
+        <h1>Projects</h1>
+        <p>Five builds that put the modules together. Each one is a step-by-step guide with a cost badge, checkpoints, troubleshooting from real mistakes, and a full clean-up.</p>
+      </header>
+      <h2 class="sr">The five projects</h2>
+      <ol class="lesson-list">
+        {PROJECTS.map((p) => (
+          <li class:list={[{ soon: !ready.has(p.slug) }]}>
+            <span class="ld" aria-hidden="true"><span></span></span>
+            <div><a href={projectHref(p.slug)}>Project {p.n}: {p.title}</a><span class="ls">{p.sum}</span></div>
+            {ready.has(p.slug) ? <span class="tag ready">Ready</span> : <span class="tag soon">Being written</span>}
+          </li>
+        ))}
+      </ol>
+      <h2 class="section-title" style="margin-top:40px">Placeholder values used in every project</h2>
+      <p>Wherever a project needs a value that is different for you, it uses one of these. Replace it with your own.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Placeholder</th><th>What it stands for</th><th>Where to find yours</th></tr></thead>
+        <tbody>
+          <tr><td><code>111122223333</code></td><td>Your AWS account ID</td><td>The account menu, top right of the AWS console</td></tr>
+          <tr><td><code>us-east-1</code></td><td>The region</td><td>Keep it, unless you choose another region on purpose</td></tr>
+          <tr><td><code>example.com</code></td><td>A domain name</td><td>A domain you own, or use a self-signed certificate instead — each project explains the trade-off</td></tr>
+          <tr><td><code>quickcart-tfstate-111122223333</code></td><td>The Terraform state bucket</td><td><code>quickcart-tfstate-</code> plus your account ID</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</Base>

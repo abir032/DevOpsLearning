@@ -1,0 +1,273 @@
+---
+/*
+ * Subnets and CIDR: a subnet planner for one 10.0.0.0/16 VPC.
+ * Teaches: the number after the slash fixes bits; the rest decide the size.
+ * Blocks must start on their own boundary and must never overlap.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="cidr-planner">
+  <div class="viz-controls">
+    <span class="lbl" id="cp-size-lbl">Subnet size</span>
+    <div class="seg" role="group" aria-labelledby="cp-size-lbl">
+      <button type="button" data-size="20" aria-pressed="false">/20</button>
+      <button type="button" data-size="24" aria-pressed="true">/24</button>
+      <button type="button" data-size="26" aria-pressed="false">/26</button>
+      <button type="button" data-size="28" aria-pressed="false">/28</button>
+    </div>
+    <label class="cp-field"><span class="lbl">Starts at</span>
+      <input type="text" data-n="start" value="10.0.2.0" inputmode="decimal" spellcheck="false" autocomplete="off" aria-describedby="cp-hint" />
+    </label>
+    <button class="btn line" type="button" data-act="add">Add subnet</button>
+    <button class="btn" type="button" data-act="next">Add the next free block</button>
+    <button class="btn" type="button" data-act="reset">Start again</button>
+  </div>
+  <p class="viz-hint" id="cp-hint">The VPC is 10.0.0.0/16. Type where a subnet starts, pick a size, and add it. Try 10.0.1.0 at /20 to see what goes wrong.</p>
+  <div class="viz-stage">
+    <div class="cp-bits" data-n="bits" aria-hidden="true"></div>
+    <dl class="cp-facts" data-n="facts"></dl>
+    <div class="cp-map">
+      <div class="cp-map-h" aria-hidden="true">The whole VPC, 10.0.0.0/16. Each square is one /24 (256 addresses). Each row is one /20.</div>
+      <div class="cp-grid" data-n="grid" aria-hidden="true"></div>
+    </div>
+    <h3 class="cp-list-h" id="cp-list-h">Subnets in the plan</h3>
+    <ul class="cp-list" data-n="list" aria-labelledby="cp-list-h"></ul>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>QuickCart's plan starts with three /24 subnets. Choose <b>Show</b> on one to see its bits, or add your own.</div>
+</div>
+
+<style is:global>
+  [data-viz="cidr-planner"] .cp-field { display: inline-flex; align-items: center; gap: 8px; }
+  [data-viz="cidr-planner"] .cp-field input { font-family: var(--mono); font-size: 14px; width: 9.5em; padding: 7px 9px; border: 1px solid var(--rule-2); border-radius: 8px; background: var(--surface); color: var(--ink); }
+  [data-viz="cidr-planner"] .viz-hint { margin: 10px 0 0; }
+  [data-viz="cidr-planner"] .viz-stage { padding: 12px 16px 8px; }
+  [data-viz="cidr-planner"] .cp-bits { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: flex-end; font-family: var(--mono); }
+  [data-viz="cidr-planner"] .cp-oct { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  [data-viz="cidr-planner"] .cp-oct .dec { font-size: 14px; font-weight: 700; color: var(--ink); }
+  [data-viz="cidr-planner"] .cp-oct .row { display: flex; gap: 1px; }
+  [data-viz="cidr-planner"] .cp-oct .b { display: inline-block; width: 15px; text-align: center; font-size: 13px; line-height: 22px; border-radius: 3px; }
+  [data-viz="cidr-planner"] .cp-oct .b.fix { background: var(--cloud); color: var(--on-cloud); }
+  [data-viz="cidr-planner"] .cp-oct .b.free { background: var(--sunk); color: var(--ink-2); border: 1px dashed var(--rule-2); line-height: 20px; }
+  [data-viz="cidr-planner"] .cp-dot { font-size: 18px; font-weight: 700; color: var(--ink-3); padding-bottom: 2px; }
+  [data-viz="cidr-planner"] .cp-key { flex-basis: 100%; font-family: var(--font); font-size: 13.5px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  [data-viz="cidr-planner"] .cp-key i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  [data-viz="cidr-planner"] .cp-key .kf { background: var(--cloud); }
+  [data-viz="cidr-planner"] .cp-key .kr { background: var(--sunk); border: 1px dashed var(--rule-2); }
+  [data-viz="cidr-planner"] .cp-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin: 14px 0 12px; }
+  [data-viz="cidr-planner"] .cp-facts div { border-left: 3px solid var(--cloud); padding-left: 9px; }
+  [data-viz="cidr-planner"] .cp-facts dt { font-size: 13px; color: var(--ink-2); font-weight: 700; }
+  [data-viz="cidr-planner"] .cp-facts dd { margin: 0; font-family: var(--mono); font-size: 13.5px; color: var(--ink); overflow-wrap: anywhere; }
+  [data-viz="cidr-planner"] .cp-map-h { font-size: 13px; color: var(--ink-2); margin-bottom: 6px; }
+  [data-viz="cidr-planner"] .cp-grid { display: grid; grid-template-columns: 5.2em repeat(16, minmax(12px, 1fr)); gap: 2px; max-width: 440px; }
+  [data-viz="cidr-planner"] .cp-grid .rl { font-family: var(--mono); font-size: 11px; color: var(--ink-3); align-self: center; white-space: nowrap; }
+  [data-viz="cidr-planner"] .cp-grid .c { position: relative; aspect-ratio: 1; min-height: 12px; background: var(--sunk); border: 1px solid var(--rule); border-radius: 2px; overflow: hidden; }
+  [data-viz="cidr-planner"] .cp-grid .c .f { position: absolute; left: 0; top: 0; bottom: 0; background: var(--cloud); }
+  [data-viz="cidr-planner"] .cp-grid .c.sel .f { background: var(--ok); }
+  [data-viz="cidr-planner"] .cp-grid .c.bad { background: var(--bad); border-color: var(--bad); }
+  [data-viz="cidr-planner"] .cp-grid .c.bad .f { display: none; }
+  [data-viz="cidr-planner"] .cp-list-h { font-size: 15px; margin: 16px 0 6px; }
+  [data-viz="cidr-planner"] .cp-list { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  [data-viz="cidr-planner"] .cp-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 7px 10px; border: 1px solid var(--rule); border-radius: 8px; background: var(--bg); font-size: 14px; }
+  [data-viz="cidr-planner"] .cp-list li.sel { border-color: var(--ok); }
+  [data-viz="cidr-planner"] .cp-list li.bad { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="cidr-planner"] .cp-list code { font-size: 13.5px; font-weight: 700; }
+  [data-viz="cidr-planner"] .cp-list .meta { color: var(--ink-2); flex: 1 1 180px; }
+  [data-viz="cidr-planner"] .cp-list .warn { color: var(--bad); font-weight: 700; flex-basis: 100%; }
+  [data-viz="cidr-planner"] .cp-list .acts { display: flex; gap: 6px; margin-left: auto; }
+  [data-viz="cidr-planner"] .cp-list .btn { padding: 4px 10px; font-size: 13.5px; }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  /* Addresses are handled as plain numbers: 10.0.0.0 is 167772160. */
+  const VPC = 10 * 2 ** 24;
+  const VPC_SIZE = 2 ** 16;
+  const toIp = (n: number) => [24, 16, 8, 0].map((s) => Math.floor(n / 2 ** s) % 256).join(".");
+  function parseIp(s: string): number | null {
+    const m = /^\s*(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\s*$/.exec(s);
+    if (!m) return null;
+    const p = m.slice(1).map(Number);
+    if (p.some((x) => x > 255)) return null;
+    return ((p[0] * 256 + p[1]) * 256 + p[2]) * 256 + p[3];
+  }
+  const fmt = (n: number) => n.toLocaleString("en-US");
+
+  interface Sub { start: number; bits: number; name: string }
+  const size = (s: Sub) => 2 ** (32 - s.bits);
+  const cidr = (s: Sub) => `${toIp(s.start)}/${s.bits}`;
+  const overlaps = (a: Sub, b: Sub) => a.start < b.start + size(b) && b.start < a.start + size(a);
+
+  const START: Sub[] = [
+    { start: VPC + 1 * 256, bits: 24, name: "public-a" },
+    { start: VPC + 11 * 256, bits: 24, name: "app-a" },
+    { start: VPC + 21 * 256, bits: 24, name: "data-a" },
+  ];
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="cidr-planner"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const bitsEl = q<HTMLElement>("bits");
+    const facts = q<HTMLElement>("facts");
+    const grid = q<HTMLElement>("grid");
+    const list = q<HTMLUListElement>("list");
+    const input = q<HTMLInputElement>("start");
+    const sizeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-size]")];
+    let bits = 24;
+    let subs: Sub[] = START.map((s) => ({ ...s }));
+    let sel = 0;
+    let count = 0;
+
+    /* Build the 16 x 16 map once: one square per /24 in the VPC. */
+    const cells: HTMLElement[] = [];
+    for (let r = 0; r < 16; r++) {
+      const l = document.createElement("span");
+      l.className = "rl";
+      l.textContent = `10.0.${r * 16}`;
+      grid.append(l);
+      for (let c = 0; c < 16; c++) {
+        const d = document.createElement("span");
+        d.className = "c";
+        d.innerHTML = '<span class="f"></span>';
+        grid.append(d);
+        cells.push(d);
+      }
+    }
+
+    function drawBits(s: Sub) {
+      const oct = [24, 16, 8, 0].map((sh) => Math.floor(s.start / 2 ** sh) % 256);
+      let html = "";
+      oct.forEach((o, i) => {
+        const b = o.toString(2).padStart(8, "0");
+        html += `<span class="cp-oct"><span class="dec">${o}</span><span class="row">`;
+        for (let j = 0; j < 8; j++) html += `<span class="b ${i * 8 + j < s.bits ? "fix" : "free"}">${b[j]}</span>`;
+        html += "</span></span>";
+        if (i < 3) html += '<span class="cp-dot">.</span>';
+      });
+      html += `<span class="cp-key"><span><i class="kf"></i>${s.bits} fixed bits: the network</span><span><i class="kr"></i>${32 - s.bits} free bits: the addresses inside it</span></span>`;
+      bitsEl.innerHTML = html;
+      const n = size(s);
+      const last = s.start + n - 1;
+      facts.innerHTML =
+        `<div><dt>Block</dt><dd>${cidr(s)}</dd></div>` +
+        `<div><dt>Addresses</dt><dd>2<sup>${32 - s.bits}</sup> = ${fmt(n)}</dd></div>` +
+        `<div><dt>Usable in AWS</dt><dd>${fmt(n)} − 5 = ${fmt(n - 5)}</dd></div>` +
+        `<div><dt>Range</dt><dd>${toIp(s.start)} to ${toIp(last)}</dd></div>` +
+        `<div><dt>AWS keeps</dt><dd>${toIp(s.start)} to ${toIp(s.start + 3)}, and ${toIp(last)}</dd></div>`;
+    }
+
+    function badPairs() {
+      const bad = new Set<number>();
+      for (let i = 0; i < subs.length; i++) for (let j = i + 1; j < subs.length; j++) if (overlaps(subs[i], subs[j])) { bad.add(i); bad.add(j); }
+      return bad;
+    }
+
+    function render() {
+      const bad = badPairs();
+      /* the map: how much of each /24 square is used, and where two subnets clash */
+      cells.forEach((cell, k) => {
+        const a = VPC + k * 256, b = a + 256;
+        let used = 0, clash = false, mine = false;
+        const inCell = subs.map((s, i) => ({ s, i })).filter(({ s }) => s.start < b && a < s.start + size(s));
+        for (const { s, i } of inCell) {
+          used += Math.min(b, s.start + size(s)) - Math.max(a, s.start);
+          if (i === sel) mine = true;
+        }
+        for (let x = 0; x < inCell.length; x++) for (let y = x + 1; y < inCell.length; y++) if (overlaps(inCell[x].s, inCell[y].s)) clash = true;
+        cell.className = "c" + (clash ? " bad" : "") + (mine ? " sel" : "");
+        (cell.firstChild as HTMLElement).style.width = Math.min(100, (used / 256) * 100) + "%";
+      });
+      list.innerHTML = subs.map((s, i) => {
+        const clash = subs.filter((o, j) => j !== i && overlaps(s, o)).map(cidr);
+        return `<li class="${bad.has(i) ? "bad" : i === sel ? "sel" : ""}">` +
+          `<code>${cidr(s)}</code><span class="meta">${s.name}: ${fmt(size(s))} addresses, ${fmt(size(s) - 5)} usable</span>` +
+          `<span class="acts"><button type="button" class="btn" data-show="${i}" aria-label="Show ${cidr(s)}">Show</button>` +
+          `<button type="button" class="btn" data-del="${i}" aria-label="Remove ${cidr(s)}">Remove</button></span>` +
+          (clash.length ? `<span class="warn">Overlaps ${clash.join(", ")}. AWS would refuse to create it.</span>` : "") +
+          "</li>";
+      }).join("");
+      if (subs[sel]) drawBits(subs[sel]);
+      else { bitsEl.innerHTML = ""; facts.innerHTML = ""; }
+    }
+
+    function add(s: Sub) {
+      subs.push(s);
+      sel = subs.length - 1;
+      render();
+      const clash = subs.slice(0, -1).filter((o) => overlaps(s, o));
+      if (clash.length) {
+        tell(say, "Overlap", `<b>${cidr(s)}</b> covers addresses that <b>${clash.map(cidr).join(", ")}</b> already use. Two subnets can't share an address, or the VPC wouldn't know where to deliver it. AWS rejects this. Remove one of them.`, "bad");
+      } else {
+        tell(say, `Added ${cidr(s)}`, `${s.bits} bits are fixed and ${32 - s.bits} are free, so it holds 2<sup>${32 - s.bits}</sup> = <b>${fmt(size(s))}</b> addresses. AWS keeps 5 in every subnet, so <b>${fmt(size(s) - 5)}</b> are usable.`, "good");
+      }
+    }
+
+    function addTyped() {
+      const ip = parseIp(input.value);
+      if (ip === null) {
+        tell(say, "Not an address", "Type an address as four numbers from 0 to 255 with dots between them, like <code>10.0.2.0</code>.", "bad");
+        return;
+      }
+      if (ip < VPC || ip >= VPC + VPC_SIZE) {
+        tell(say, "Outside the VPC", `<code>${toIp(ip)}</code> isn't inside 10.0.0.0/16. Every subnet must be a slice of the VPC's own range, so it has to start with <code>10.0.</code>`, "bad");
+        return;
+      }
+      const n = 2 ** (32 - bits);
+      if (ip % n !== 0) {
+        const down = ip - (ip % n);
+        tell(say, "Not on a boundary", `A /${bits} holds ${fmt(n)} addresses, so it must start on a multiple of ${fmt(n)}. <code>${toIp(ip)}/${bits}</code> doesn't, and AWS rejects it. The /${bits} that contains ${toIp(ip)} starts at <b>${toIp(down)}</b>. Change the address and try again.`, "bad");
+        return;
+      }
+      add({ start: ip, bits, name: `yours-${++count}` });
+    }
+
+    function addNext() {
+      const n = 2 ** (32 - bits);
+      for (let a = VPC; a < VPC + VPC_SIZE; a += n) {
+        const s = { start: a, bits, name: `yours-${count + 1}` };
+        if (!subs.some((o) => overlaps(s, o))) {
+          count++;
+          input.value = toIp(a);
+          add(s);
+          return;
+        }
+      }
+      tell(say, "The VPC is full", `There is no free /${bits} left anywhere in 10.0.0.0/16. Remove a subnet, or pick a smaller size.`, "bad");
+    }
+
+    function setSize(b: number) {
+      bits = b;
+      press(sizeBtns, (x) => x.dataset.size === String(b));
+      const n = 2 ** (32 - b);
+      tell(say, `Size /${b}`, `A /${b} fixes ${b} bits and leaves ${32 - b} free: 2<sup>${32 - b}</sup> = <b>${fmt(n)}</b> addresses, ${fmt(n - 5)} usable. It must start on a multiple of ${fmt(n)}.`);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.size) setSize(Number(b.dataset.size));
+      else if (b.dataset.show) {
+        sel = Number(b.dataset.show);
+        render();
+        const s = subs[sel];
+        tell(say, `Showing ${cidr(s)}`, `The first ${s.bits} bits are fixed: every address in this subnet starts with them. The last ${32 - s.bits} bits can be anything, which gives ${fmt(size(s))} addresses.`);
+      } else if (b.dataset.del) {
+        const [gone] = subs.splice(Number(b.dataset.del), 1);
+        sel = Math.min(sel, subs.length - 1);
+        render();
+        tell(say, "Removed", `<code>${cidr(gone)}</code> is out of the plan. ${badPairs().size ? "Something still overlaps." : "Nothing in the plan overlaps now."}`, badPairs().size ? "bad" : "good");
+        root.querySelector<HTMLButtonElement>('[data-act="add"]')!.focus();
+      } else if (b.dataset.act === "add") addTyped();
+      else if (b.dataset.act === "next") addNext();
+      else if (b.dataset.act === "reset") {
+        subs = START.map((s) => ({ ...s })); sel = 0; count = 0; input.value = "10.0.2.0";
+        setSize(24); render();
+        tell(say, "Ready", "Back to QuickCart's three /24 subnets.");
+      }
+    });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTyped(); } });
+
+    render();
+  }));
+</script>

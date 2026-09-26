@@ -1,0 +1,20 @@
+[
+  {
+    "term": "VPC endpoint",
+    "def": "A private way from inside your VPC to an AWS service such as S3 or Secrets Manager, without going through the internet or a NAT gateway. A gateway endpoint is a route; an interface endpoint is a private address in your subnet.",
+    "lesson": "routing",
+    "match": ["VPC endpoint", "VPC endpoints", "interface endpoint", "gateway endpoint"]
+  },
+  {
+    "term": "Session Manager",
+    "def": "A way to open a shell on a server from the AWS console, with no SSH key and no open inbound port. The server needs an IAM role and a route to Systems Manager.",
+    "lesson": "ec2",
+    "match": ["Session Manager"]
+  },
+  {
+    "term": "Network ACL",
+    "def": "A stateless firewall on a whole subnet. Unlike a security group, it can deny traffic, and replies need their own rule.",
+    "lesson": "security-groups",
+    "match": ["network ACL", "network ACLs"]
+  }
+]

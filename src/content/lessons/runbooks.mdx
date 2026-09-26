@@ -1,0 +1,383 @@
+---
+time: 30 minutes
+level: Beginner
+before: [alarms, where-to-look-first]
+cost: free
+quiz:
+  - q: Which runbook step is written well?
+    answer: 2
+    options:
+      - t: "Check the logs."
+        why: Which logs? For what? The person reading it at 3am has to work all of that out under pressure.
+      - t: "Investigate the database and fix any issues."
+        why: That's a goal, not a step. It doesn't say what to look at or what "fixed" looks like.
+      - t: "Run the saved Logs Insights query checkout-errors-by-type on /quickcart/orders for the last 30 minutes. If the top error_type is OperationalError, go to step 5."
+        why: It names exactly what to run and where, and says what to do with the answer. Anyone on the team could follow it.
+      - t: "Ask Theo — he knows how this works."
+        why: A runbook exists so that nobody has to wake Theo. And one day Theo will be on holiday.
+  - q: Why write down the rollback in a runbook, not just the fix?
+    answer: 0
+    options:
+      - t: Because the fix might make things worse, and you need a known way back
+        why: Every step that changes something should say how to undo it. Under pressure, working out a reversal on the spot is how small incidents become big ones.
+      - t: Because AWS requires it
+        why: AWS has no such rule. It's good practice, not a requirement.
+      - t: Because rollbacks are always faster than fixes
+        why: Often, but not always. The point is having a tested way back, whichever is faster.
+      - t: It isn't needed if the steps are written carefully
+        why: Careful steps still meet surprises. A way back is what makes it safe to try.
+  - q: Where should the link to the runbook live, so the person on call finds it fastest?
+    answer: 3
+    options:
+      - t: In a shared drive folder called Runbooks
+        why: That works, but someone woken at 3am has to remember it exists and search for it.
+      - t: In the team chat, pinned
+        why: Pinned messages get buried and go out of date.
+      - t: In the code's README only
+        why: Keeping runbooks with the code is good, but the person needs a direct link at the moment the alarm fires.
+      - t: In the alarm's description, so it arrives in the notification
+        why: The alarm is the trigger. Putting the link in its description means the first thing the person reads contains the first step.
+  - q: A runbook was written a year ago and never run. What should you assume?
+    answer: 1
+    options:
+      - t: It still works — nothing important has changed
+        why: A year of changes — renamed resources, new permissions, moved dashboards — breaks runbooks quietly.
+      - t: Some steps are probably wrong, and the only way to find out is a timed dry run
+        why: Links rot, names change and permissions move. A dry run with a clock finds the gaps before a real incident does.
+      - t: It should be deleted
+        why: The knowledge in it is still useful. Test it and fix it.
+      - t: It only matters for new team members
+        why: Everyone reads a runbook differently at 3am than at 3pm.
+  - q: What does "Last tested" on a runbook tell the reader?
+    answer: 2
+    options:
+      - t: When it was first written
+        why: That's the creation date. A runbook can be old and still recently tested.
+      - t: Who is allowed to use it
+        why: That's the owner or the access section.
+      - t: How far to trust it — a runbook tested last month is far safer than one tested two years ago
+        why: The date is a warning label. An old date means "expect surprises".
+      - t: When the next incident will happen
+        why: Nobody knows that.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the long rollback">
+
+A bad release broke checkout at 11pm. Everyone knew the fix was to roll back. Theo had done it twice before — but Theo was on holiday.
+
+Noor, on call, found a chat message from months earlier describing the steps. The second step referred to a server that no longer existed. The third needed a permission her role didn't have. She woke Sam, who had the permission but had never done a rollback. Together they worked it out.
+
+The rollback took four minutes of actual work. It took fifty minutes to get there.
+
+</Story>
+
+<Case>
+
+On 28 February 2017, a large part of Amazon S3 in the us-east-1 region stopped working for several hours, taking many websites with it. AWS's public summary explained that an engineer, following an established playbook, ran a command to remove a small number of servers. One of the inputs was typed wrong, and far more servers were removed than intended.
+
+AWS's fixes included changing the tool so it removes capacity more slowly, and refuses to go below a safe minimum. The procedure existed and was followed. What it lacked was a guard against one mistyped value.
+
+</Case>
+
+A runbook turns "someone who knows" into "anyone on call". This lesson is about writing one that works when it's needed, and proving that it does.
+
+</Part>
+
+<Part id="idea">
+
+A **runbook** is a written procedure for one specific situation, detailed enough that anyone on the team could follow it at 3am, half awake, without asking anyone.
+
+It is not documentation of how the system works. It's a checklist for one job: "checkout returns 5xx", "the database disk is nearly full", "roll back a release".
+
+### The parts of a good runbook
+
+| Part | What it says | Why |
+|---|---|---|
+| **Trigger** | Which alarm or symptom sends you here | So you know you're in the right runbook |
+| **Impact** | What customers experience while this is happening | So you know how urgent it is, and what to tell people |
+| **Steps** | Numbered, exact actions: what to open, what to run, what to look for | So nobody has to think about *how* under pressure |
+| **Verification** | How to know it's fixed, as a measurable test | So you don't stop too early |
+| **Rollback** | How to undo each step that changes something | So a wrong step doesn't make things worse |
+| **Escalation** | Who to call if it isn't working, and when | So nobody struggles alone for an hour |
+| **Owner** | The team that keeps it up to date | So someone fixes it when it goes stale |
+| **Last tested** | The date of the last timed dry run, and how long it took | So the reader knows how much to trust it |
+
+### Exact steps, not good intentions
+
+| Vague | Exact |
+|---|---|
+| Check the dashboard | Open the `quickcart-checkout` dashboard (link). Is the 5xx graph above 1%? |
+| Look in the logs | Run the saved Logs Insights query `checkout-errors-by-type` for the last 30 minutes |
+| Check the target group | **EC2 → Target Groups → quickcart-checkout-tg → Targets**. Are all targets **Healthy**? |
+| Roll back | Run the `quickcart-rollback` job with `VERSION` set to the previous version, shown on the job's last successful run |
+| Make sure it works | Done when the 5xx alarm is **OK** and the 5xx rate stays under 1% for 5 minutes |
+
+Every exact step names **where**, **what**, and **what to do with the answer**. Each step that makes a change also says how to undo it.
+
+<Key>A runbook is only as good as its last timed test.</Key>
+
+### Test it, and time it
+
+A runbook nobody has run is a guess, like an alarm nobody has seen fire. Test it with a **dry run**:
+
+| Kind of test | How | Finds |
+|---|---|---|
+| Read-through | Someone who didn't write it reads each step aloud and says what they'd do | Vague steps, missing names, assumptions |
+| Timed dry run | Follow it for real, in a staging environment, with a stopwatch | Dead links, missing permissions, slow steps |
+| Game day | Break something on purpose in staging, and hand the on-call person only the alarm | Whether the whole chain works: alarm, notification, runbook, fix |
+
+After each test: fix every gap you found, write down the time it took, and update **Last tested**. If it took 37 minutes and your target is 15, the runbook isn't finished.
+
+### Keep them where people will find them
+
+- **Link each runbook from its alarm.** Put the link in the alarm's description; it's included in the notification, so the first thing the on-call person reads contains the first step.
+- **Keep runbooks in the repository**, as Markdown next to the code. Changes are reviewed like code, and the history shows who changed what.
+- **Automate the steps that never change.** A rollback that is always the same five commands should be one pipeline job. The runbook then says "run this job", and the job can't mistype a value. [Canary from a pipeline](/lessons/canary-pipeline/) builds one.
+
+### A complete example: checkout returns 5xx
+
+This is QuickCart's runbook for its most important alarm. Use it as a model.
+
+**Runbook: checkout returns 5xx**
+
+| Field | Value |
+|---|---|
+| Trigger | Alarm `quickcart-target-5xx` or `quickcart-alb-5xx` is in ALARM |
+| Impact | Some or all customers can't place orders. They see "Something went wrong" at checkout |
+| Owner | Platform team |
+| Target time | Service restored within 15 minutes of the alarm |
+| Last tested | Last month, dry run in staging: 14 minutes |
+| Escalation | If not improving after 20 minutes, call the second on-call. If customers can't pay at all, tell the support lead |
+
+**Step 1: confirm it's real (2 minutes).** Open the `quickcart-checkout` dashboard. If the 5xx rate is above 1%, it's real: carry on. If it's zero and the alarm has already returned to OK, note it in the alarm review and stop.
+
+**Step 2: is the load balancer happy with the servers? (1 minute).**
+
+<ConsolePath path="EC2 > Load Balancing > Target Groups > quickcart-checkout-tg > Targets" />
+
+| You see | Means | Go to |
+|---|---|---|
+| All targets **Healthy** | The servers are up; the errors come from the app | Step 3 |
+| Some or all **Unhealthy**, reason `Target.Timeout` | The load balancer can't reach them: a security group or network problem | [Where to look first](/lessons/where-to-look-first/), network path |
+| Some or all **Unhealthy**, other reasons | The app is failing its health check | Step 4 — something may have been deployed |
+
+**Step 3: what are the errors? (2 minutes).**
+
+<ConsolePath path="CloudWatch > Logs Insights" />
+
+Choose the log group `/quickcart/orders`, set the range to **30m**, and run:
+
+```sql title="Logs Insights query"
+filter level = "ERROR"
+| stats count() as errors, avg(latency_ms) as avg_ms by error_type
+| sort errors desc
+```
+
+| Part | What it means |
+|---|---|
+| `filter level = "ERROR"` | only error lines |
+| `\| stats count() as errors, avg(latency_ms) as avg_ms` | count them and average their response time |
+| `by error_type` | one row per kind of error |
+| `\| sort errors desc` | the most common first |
+
+| Top `error_type` | Means | Go to |
+|---|---|---|
+| `OperationalError`, around 3,000 ms | The app can't connect to the database: usually its security group | Check `quickcart-db-sg` allows 3306 from `quickcart-app-sg`, then CloudTrail for who changed it |
+| `ProgrammingError`, a few ms | The database answered with an error, such as a missing table: usually a migration | Step 4 |
+| Anything else | A code problem | Step 4 |
+
+**Step 4: what changed? (2 minutes).** Look at the last two runs of the deploy pipeline. Then open **CloudTrail → Event history** with **Read only** set to `false` for the last hour. If a deploy went out in the hour before the alarm, go to step 5.
+
+**Step 5: roll back (3 minutes).** Run the `quickcart-rollback` job with `VERSION` set to the version before the latest, shown on the job's last successful run. The on-call role has permission to run it.
+
+- **To undo this step:** run the same job with the newer version. Only do this once the cause is fixed.
+
+**Step 6: verify (5 minutes).** It's fixed when **both** are true:
+
+- the 5xx alarm is back to **OK**, and
+- the 5xx rate on the dashboard stays under 1% for 5 minutes in a row.
+
+Then post in the incident channel: what happened, what you did, and the times. A [postmortem](/lessons/real-incidents/) follows within two working days.
+
+</Part>
+
+<Part id="see">
+
+Below is the checkout runbook as it was first written: from memory, never tested. Run it one step at a time and watch the clock. Then switch to the version written after the dry run and run it again.
+
+<RunbookDryRun />
+
+**What to notice:** the steps are the same six in both versions. What changed is that each one got exact names, a link that works, a saved query, a tested permission and a clear finish line. None of those gaps was visible until someone ran the runbook with a clock.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">you'll write a document and time yourself. Nothing is created in AWS.</Cost>
+
+You'll write a runbook for one QuickCart alarm, then dry-run it with a stopwatch and fix what you find. About 30 minutes. You don't need anything running: a read-through dry run works on paper, and it finds most gaps.
+
+<Steps>
+
+<Step title="Pick one alarm">
+
+Choose one alarm from [Alarms that actually fire](/lessons/alarms/), other than the 5xx one, which has an example above. Good choices:
+
+| Alarm | Situation |
+|---|---|
+| `quickcart-unhealthy-hosts` | A server is failing its health checks |
+| `quickcart-db-connections` | The database is running out of connections |
+| `quickcart-db-storage` | The database disk is nearly full |
+
+</Step>
+
+<Step title="Write it from the template">
+
+Create a file called `runbooks/` followed by a short name, such as `runbooks/db-storage.md`, and copy this template into it:
+
+```text title="runbooks/db-storage.md"
+# Runbook: <what is happening>
+
+| Field | Value |
+|---|---|
+| Trigger | <the alarm name, and its condition> |
+| Impact | <what customers experience> |
+| Owner | <the team> |
+| Target time | <restored within N minutes of the alarm> |
+| Last tested | never |
+| Escalation | <who to call, and after how long> |
+
+## Step 1: confirm it's real (<N> minutes)
+<exactly what to open, and what number means it's real>
+
+## Step 2: <name> (<N> minutes)
+<where to go, what to run, what to look for>
+<what each possible answer means, and which step to go to>
+
+## Step 3: fix (<N> minutes)
+<the exact action>
+To undo this step: <the exact way back>
+
+## Step 4: verify (<N> minutes)
+Fixed when: <a measurable test, and for how long>
+```
+
+Replace everything in angle brackets. For each step, write how many minutes you think it will take.
+
+<See>
+
+A runbook of four to six steps. Every step names a place, an action and what to do with the answer. Every step that changes something has a way back.
+
+</See>
+
+</Step>
+
+<Step title="Read it through as a stranger">
+
+Read each step aloud, and for each one ask:
+
+| Question | If the answer is no |
+|---|---|
+| Would someone who's never seen this system know exactly where to click? | Add the console path or the link |
+| Does it say what to do with each possible answer? | Add the branches |
+| Could the on-call person do it with their own permissions? | Note the permission needed, and check it |
+| Is "fixed" something you can measure? | Replace it with a number and a duration |
+
+Mark every gap you find.
+
+</Step>
+
+<Step title="Dry-run it with a stopwatch">
+
+Start a stopwatch on your phone. Pretend the alarm has just fired, and follow your runbook step by step. If you have the environment from [A self-healing environment](/projects/02-self-healing-environment/) or a staging copy, do the steps for real. If not, open each console page the step names and find each thing it mentions, without changing anything.
+
+Write down how long each step really took next to your estimate.
+
+<See>
+
+At least one step took much longer than you expected. That's normal on a first run, and it's exactly what the dry run is for.
+
+</See>
+
+</Step>
+
+<Step title="Fix the gaps and record the test">
+
+For every step that was slow or unclear, make it exact. Then update the header:
+
+| Field | Enter |
+|---|---|
+| Last tested | today's date, `dry run` or `read-through`, and the total time |
+
+If the total is over your target time, run it again after the fixes.
+
+</Step>
+
+<Step title="Link it from the alarm">
+
+When the alarm exists, put the runbook's link in its description:
+
+<ConsolePath path="CloudWatch > Alarms > All alarms > the alarm > Actions > Edit" />
+
+Choose **Next** until you reach **Add name and description**.
+
+| Field | Enter |
+|---|---|
+| Alarm description | One line on what it means, then `Runbook:` and the link, such as `https://example.com/runbooks/db-storage` |
+
+<See>
+
+The link in the alarm's details. The next notification will include it.
+
+</See>
+
+If you deleted your alarms after the last lesson, keep the description ready for when you build them again in the projects.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing was created in AWS, so there's nothing to delete. Keep your runbook file: put it in the repository next to your QuickCart code, where you'll use it in [A self-healing environment](/projects/02-self-healing-environment/).
+
+<See>
+
+One tested runbook, with a real date in **Last tested**.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Part or practice | In one line |
+|---|---|
+| Runbook | Exact steps for one situation, followable at 3am by anyone |
+| Trigger | The alarm that sends you here |
+| Impact | What customers see |
+| Steps | Where, what, and what to do with the answer |
+| Verification | A measurable "fixed", with a duration |
+| Rollback | How to undo each step that changes something |
+| Escalation | Who to call, and after how long |
+| Owner | Who keeps it up to date |
+| Last tested | The date and time of the last dry run. Trust it accordingly |
+| Dry run | Follow it with a stopwatch; fix every gap |
+| Link from the alarm | Put the runbook link in the alarm description |
+| Automate the fixed parts | A rollback is a job, not five commands to type |
+
+</Cheat>
+
+</Part>

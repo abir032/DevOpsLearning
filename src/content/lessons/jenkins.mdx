@@ -1,0 +1,971 @@
+---
+time: 75 minutes
+level: Intermediate
+before: [ec2, iam, first-resource]
+cost: paid
+quiz:
+  - q: QuickCart's Jenkins has 2 executors on the controller and no agents. A large image build makes the web UI freeze for everyone. What is the right fix?
+    answer: 2
+    options:
+      - t: Give the controller a bigger instance
+        why: That buys time, but builds still share the machine with the scheduler, the UI and every stored secret. The next big build causes the same problem.
+      - t: Add 2 more executors to the controller
+        why: More executors means more builds competing on the same machine. It makes the freeze more likely, not less.
+      - t: Set the controller's executors to 0 and run builds on agents
+        why: The controller then only schedules and stores results. A heavy build can only slow down the agent it runs on.
+      - t: Restart Jenkins every night
+        why: A restart clears the symptom for a while. The cause, builds on the controller, is still there.
+  - q: Why does a build that runs on the controller put secrets at risk?
+    answer: 0
+    options:
+      - t: It runs as the same user as Jenkins, so it can read JENKINS_HOME, including the stored credentials and the key that decrypts them
+        why: Right. On an agent, a build only gets the credentials its pipeline asks for. On the controller, it's sitting next to all of them.
+      - t: Builds on the controller send their logs to the internet
+        why: Logs stay in JENKINS_HOME wherever the build runs.
+      - t: The controller turns off credential masking
+        why: Masking works the same on every node. The risk is what the build can read from disk.
+      - t: It doesn't. The controller is the safest place to run builds
+        why: It's the most dangerous place, because it holds everything.
+  - q: Why does the Terraform in this lesson give the Jenkins instance no inbound security group rules at all?
+    answer: 1
+    options:
+      - t: It's a mistake. You need port 22 open to manage it
+        why: Session Manager replaces SSH. The SSM agent on the instance makes an outbound connection to AWS, so nothing has to be open.
+      - t: Session Manager reaches it through an outbound connection, so nothing on the internet can connect to Jenkins at all
+        why: Right. You get a shell and a port forward through AWS, controlled by IAM. An exposed Jenkins login page is exactly what attackers scan for.
+      - t: Security groups don't apply to EC2 instances
+        why: They do. A security group is the firewall on every instance.
+      - t: Jenkins opens its own port in the security group when it starts
+        why: Nothing on the instance can change its own security group unless you give it permission to, and you shouldn't.
+  - q: The Jenkins instance is terminated by accident. Which backup gets QuickCart back fastest, with its jobs, build history and credentials?
+    answer: 3
+    options:
+      - t: The Jenkinsfiles in git
+        why: They rebuild the pipelines, but not the build history, the credentials or the controller's settings.
+      - t: A list of the plugins that were installed
+        why: Useful for rebuilding, but it holds no configuration, jobs or credentials.
+      - t: Nothing. Jenkins can't be restored
+        why: It can, as long as JENKINS_HOME was backed up.
+      - t: A recent snapshot of the volume that holds JENKINS_HOME
+        why: A snapshot is a copy of the whole disk. A new instance built from it comes back with every job, build and credential, including the key that decrypts them.
+  - q: A pipeline prints a secret with sh "echo ${TOKEN}" in double quotes. What's wrong?
+    answer: 1
+    options:
+      - t: Nothing. The log masks it
+        why: Masking hides the value in the log, but the value was already put into the command by Groovy before the shell ran. It can show up in places masking doesn't cover, such as the process list on the agent.
+      - t: Groovy puts the secret into the command text before the shell runs it. Single quotes let the shell read it from the environment instead
+        why: Right. Jenkins even warns about it. With single quotes, the command text says $TOKEN, and only the shell sees the value.
+      - t: Double quotes are a syntax error in a Jenkinsfile
+        why: They are valid. They switch on Groovy's string interpolation, which is the problem.
+      - t: The credential ID is wrong
+        why: The build would fail with a different error if the ID didn't exist.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first build server">
+
+Theo set up QuickCart's first Jenkins on a single server. He clicked through the setup, installed a handful of plugins and made the first jobs in the web page. Builds ran on the server itself, two at a time.
+
+It worked for months. Then the team added a job that built container images. Whenever it ran, the Jenkins page took a minute to load, and other builds sat in the queue even though nothing seemed busy.
+
+A few weeks later, someone cleaning up old servers terminated the wrong one. Every job, every build log, and every stored password went with it. Nobody had written down how Jenkins was set up. It took Theo two days to rebuild it from memory, and it was never quite the same.
+
+</Story>
+
+Both problems come from how Jenkins was set up, not from Jenkins itself: builds ran on the machine that runs everything else, and the only copy of its configuration was on one disk.
+
+<Case title="An exposed Jenkins is a known target">
+
+In January 2024, the Jenkins project disclosed a serious flaw, CVE-2024-23897. It let an attacker read files from the Jenkins server through its command-line interface, in many setups without even logging in. Those files can include the secrets Jenkins needs to decrypt its stored credentials.
+
+Public exploit code appeared within days. Security researchers found many thousands of Jenkins servers reachable from the internet that were still unpatched weeks later. In August 2024 the US cybersecurity agency CISA listed the flaw as exploited in real attacks, including a ransomware attack.
+
+A build server holds the keys to production. If it's reachable from the internet, it will be tried.
+
+</Case>
+
+This lesson sets Jenkins up the way QuickCart should have from the start: builds on agents, the controller built by Terraform, reachable only through AWS, with its secrets in one place and a backup you've tested.
+
+</Part>
+
+<Part id="idea">
+
+**Jenkins** is a server that runs your pipelines. Something happens (a push to git, a timer, someone pressing a button) and Jenkins runs the steps you wrote down: test the code, build an image, deploy it. It's free, open source, and has been around since 2011, so you'll meet it in a lot of companies.
+
+A Jenkins setup has two kinds of machine.
+
+| Part | What it does | QuickCart has |
+|---|---|---|
+| **Controller** | The brain. Serves the web page, decides which build runs where, stores every job, build log and credential | One, on EC2 |
+| **Agent** | The hands. A machine that runs builds when the controller tells it to | Several, added and removed as needed |
+| **Executor** | A slot on a machine for one build at a time. An agent with 2 executors runs 2 builds at once | 2 per agent, 0 on the controller |
+| **Label** | A tag on an agent, like `linux` or `docker`. A pipeline asks for a label, and any agent with it can run the build | `linux` |
+| **Queue** | Builds waiting for a free executor with the right label | Hopefully short |
+
+The controller used to be called the *master*, and you'll still see that word in old guides. Today the controller's own executors are called the **built-in node**.
+
+<YouKnow title="You already know this: the main thread">
+
+In an app, the main thread draws the screen and handles every tap. If you do a big download or decode a large image on it, the whole app freezes. So you move heavy work to a background thread, and the main thread only coordinates.
+
+The Jenkins controller is the main thread. Agents are the background threads. A build on the controller is heavy work on the main thread: everyone's Jenkins freezes while it runs.
+
+</YouKnow>
+
+<Key>The controller decides and remembers. Agents do the work. Give the controller zero executors.</Key>
+
+### Why builds must not run on the controller
+
+| Reason | What goes wrong |
+|---|---|
+| **Performance** | A heavy build uses the CPU and memory that the scheduler and the web page need. Every other build and every user slows down |
+| **Security** | A build on the controller runs as the same user as Jenkins. It can read `JENKINS_HOME`, where every credential and the key that decrypts them are kept. Anyone who can change a Jenkinsfile could read them all |
+| **Stability** | A build that fills the disk fills the controller's disk. Jenkins stops saving anything |
+
+A fresh install gives the controller 2 executors so you can try things out. The first thing to do on a real Jenkins is set that to 0.
+
+### Where agents come from
+
+| Kind | How it works | When it fits |
+|---|---|---|
+| **Permanent agent** | A server you run all the time, which connects to the controller | A small team with steady work. What you'll set up in the lab |
+| **On demand, on EC2** | The **Amazon EC2** plugin starts an EC2 instance when builds are waiting, and stops it when it has been idle for a while | Work that comes in bursts; you pay only while builds run |
+| **On demand, on Kubernetes** | The **Kubernetes** plugin starts a pod for each build and deletes it afterwards | Teams that already run a Kubernetes cluster |
+| **A container per build** | With the **Docker Pipeline** plugin, a pipeline says `agent { docker { image 'node:22' } }` and the agent runs that build inside the container | Each project needs different tools; the agent only needs Docker |
+
+Whichever you choose, the idea is the same: agents are **cattle, not pets**. Any agent can be thrown away and replaced. Nothing important lives on one.
+
+### Running the controller on AWS
+
+The controller is the one machine that isn't disposable, so it gets the most care. QuickCart's is built by Terraform, so it can be rebuilt the same way every time.
+
+| Decision | QuickCart's choice | Why |
+|---|---|---|
+| Where it runs | One EC2 instance | Jenkins runs one controller at a time; it doesn't spread across servers |
+| How Jenkins is installed | The official container image, `jenkins/jenkins`, pinned to an LTS version | Upgrading is changing one version number. LTS (long-term support) versions get fixes for longer |
+| How people reach it | **Session Manager**, which is part of AWS Systems Manager. No SSH, no open ports | Access is controlled by IAM and logged. Nothing on the internet can reach the login page |
+| How it gets AWS permissions | An **instance role**, not access keys | The permissions come with the machine and rotate automatically. There's no key to leak |
+| Where its data lives | `JENKINS_HOME` on an encrypted EBS volume | It survives a restart, and it can be snapshotted |
+
+Later, when GitHub needs to reach Jenkins to announce a push, you put a load balancer with HTTPS in front of it. [Continuous integration](/lessons/continuous-integration/) covers that.
+
+### Plugins
+
+Almost everything Jenkins does comes from plugins. These are the ones QuickCart uses:
+
+| Plugin | What it adds |
+|---|---|
+| **Pipeline** | Jenkinsfiles: pipelines written as code. Installs a group of plugins together |
+| **Git** | Checking code out of a git repository |
+| **GitHub Branch Source** | A job per branch and pull request, found automatically |
+| **Credentials** and **Credentials Binding** | The credentials store, and `withCredentials` to use a secret in a build |
+| **Pipeline: AWS Steps** | `withAWS`, to run steps with an AWS role |
+| **Amazon EC2** or **Kubernetes** | Agents started on demand |
+| **Docker Pipeline** | `agent { docker { image 'node:22' } }` |
+| **Timestamper** | A time on every line of a build log |
+| **AnsiColor** | Coloured output from tools that print colour codes |
+| **Configuration as Code** | The whole Jenkins setup in one YAML file |
+
+Every plugin is code running inside the controller, with full access to it. Install only what you need, and keep them updated: most Jenkins security advisories are about plugins, not Jenkins itself.
+
+**Pin them.** In the web page, **Manage Jenkins** → **Plugins** installs the newest version of each plugin. For a controller you can rebuild, list them in a file and bake them into your own image instead:
+
+```text title="plugins.txt"
+configuration-as-code
+workflow-aggregator
+git
+github-branch-source
+credentials-binding
+pipeline-aws
+timestamper
+ansicolor
+ec2
+thinBackup
+```
+
+```dockerfile title="Dockerfile"
+FROM jenkins/jenkins:2.568.3-lts-jdk21
+COPY --chown=jenkins:jenkins plugins.txt /usr/share/jenkins/ref/plugins.txt
+RUN jenkins-plugin-cli --plugin-file /usr/share/jenkins/ref/plugins.txt
+```
+
+| Line | What it does |
+|---|---|
+| `FROM jenkins/jenkins:2.568.3-lts-jdk21` | Start from the official image: this LTS version of Jenkins, running on Java 21 |
+| `COPY … plugins.txt …` | Put the list in the place the official image expects. `--chown` makes the `jenkins` user own it |
+| `RUN jenkins-plugin-cli …` | A tool in the official image that downloads every plugin in the list, and the plugins they depend on |
+
+Each name in `plugins.txt` is a plugin's ID, which is shown on its page in **Manage Jenkins** → **Plugins**. A plain ID takes the newest version. Once you have a set that works, write versions too, like `git:5.7.0`, so a rebuild gives exactly the same plugins. That version number is only an example; use the ones your working Jenkins shows.
+
+### The credentials store
+
+Pipelines need secrets: a token for GitHub, a password for a registry. They go in the **credentials store**, never in a Jenkinsfile. A pipeline refers to a secret by its **ID**, and Jenkins hands over the value only while that step runs, hiding it in the log as `****`.
+
+| Kind | Holds | Example |
+|---|---|---|
+| Secret text | One secret value | A GitHub token for posting comments |
+| Username with password | A pair | A registry login |
+| SSH Username with private key | A private key | Checking out a repository over SSH |
+| Secret file | A whole file | A `kubeconfig` for a cluster |
+
+Every credential also has a **scope**. **Global** means pipelines can use it. **System** means only Jenkins itself can use it, for example to connect agents. You can also keep credentials inside a **folder**, so only the jobs in that folder can use them. That's how you stop a test job from using the production deploy key.
+
+Jenkins stores credentials encrypted in `JENKINS_HOME`. The key that decrypts them is in `JENKINS_HOME/secrets/`. That's why builds must stay off the controller, and why a backup of `JENKINS_HOME` must be protected like a password.
+
+**For AWS, store nothing.** An agent on EC2 gets permissions from its instance role. A pipeline that needs different permissions assumes a role with `withAWS`. [Continuous delivery](/lessons/continuous-delivery/) shows both. A long-lived AWS access key in Jenkins is the first thing an attacker looks for.
+
+### What to back up
+
+Everything Jenkins knows lives in one folder, `JENKINS_HOME`. In the lab it's `/var/lib/jenkins-home` on the instance, and `/var/jenkins_home` inside the container.
+
+| In JENKINS_HOME | What it is | Lose it and |
+|---|---|---|
+| `config.xml` and other `*.xml` | Jenkins' own settings | You rebuild the setup by hand |
+| `jobs/` | Every job's settings and its build history | Build history and logs are gone |
+| `credentials.xml` | Stored credentials, encrypted | Every secret must be entered again |
+| `secrets/` | The keys that decrypt them | The credentials above can never be decrypted |
+| `plugins/` | Installed plugins | Reinstall them from your list |
+| `workspace/` | Checked-out code for recent builds | Nothing. It's rebuilt on the next build |
+
+There are three ways to protect it. Most teams use the first two together.
+
+| Way | What it does | Good for |
+|---|---|---|
+| **EBS snapshots**, scheduled with **AWS Backup** | A copy of the whole disk, every night. AWS Backup can pick volumes by tag and keep 30 days of copies | Getting everything back, fast |
+| **The ThinBackup plugin** | Copies the settings, jobs and credentials to another folder on a schedule. That folder can then be copied to S3 | Going back to yesterday's version of one job |
+| **Configuration as code** | Jenkins' settings in YAML, and every pipeline in a Jenkinsfile, all in git | Rebuilding a clean Jenkins from nothing, and seeing who changed what |
+
+A backup you've never restored is a hope, not a backup. Try a restore before you need one.
+
+### Jenkins Configuration as Code
+
+Clicking through **Manage Jenkins** leaves no record of what was changed or why. The **Configuration as Code** plugin, usually called **JCasC**, reads the whole setup from a YAML file when Jenkins starts:
+
+```yaml title="jenkins.yaml"
+jenkins:
+  systemMessage: "QuickCart CI. Set up by jenkins.yaml: changes made here are lost on restart."
+  numExecutors: 0
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+unclassified:
+  location:
+    url: "https://jenkins.example.com/"
+```
+
+| Setting | What it does |
+|---|---|
+| `systemMessage` | A banner at the top of every page. Here it warns people that clicking changes won't last |
+| `numExecutors: 0` | No builds on the controller, as code |
+| `securityRealm` → `local` | Jenkins keeps its own list of users. Larger teams connect a company login instead |
+| `allowsSignup: false` | Nobody can create their own account |
+| `password: "${JENKINS_ADMIN_PASSWORD}"` | JCasC fills this in from an environment variable of that name, so the password isn't in the file |
+| `loggedInUsersCanDoAnything` | Anyone logged in can do anything. Fine for a small team; larger teams use **Matrix Authorization Strategy** to give each person only what they need |
+| `allowAnonymousRead: false` | Visitors who aren't logged in see nothing |
+| `unclassified` → `location` → `url` | The address Jenkins uses in links and in messages to GitHub |
+
+Point Jenkins at the file with an environment variable, `CASC_JENKINS_CONFIG=/path/to/jenkins.yaml`. **Manage Jenkins** → **Configuration as Code** also has **View Configuration**, which shows the YAML for the Jenkins you already have. That's the easiest way to start.
+
+### Security basics
+
+| Do | Why |
+|---|---|
+| Keep the controller off the internet. Use Session Manager, a VPN, or a load balancer that allows only the sources you expect | Exposed Jenkins servers are scanned for and attacked constantly |
+| Turn off sign-up and anonymous read | A Jenkins page can reveal code, logs and the names of your servers |
+| Update Jenkins and plugins every month | Security fixes arrive constantly, mostly for plugins |
+| Zero executors on the controller | Builds can't read its secrets |
+| Limit who can change jobs and Jenkinsfiles | Changing a pipeline means you can use every credential it can use |
+| Treat **Manage Jenkins** → **Script Console** as root access | It runs any code on the controller. Only administrators can open it; keep that list short |
+| Use roles for AWS, not stored keys | There's nothing to steal |
+
+</Part>
+
+<Part id="see">
+
+Below is a Jenkins controller with one agent. Queue a few builds and watch who picks them up. Add an agent. Then give the controller 2 executors, like a fresh install, and queue two heavy builds.
+
+<JenkinsSched />
+
+**What to notice:** with 0 executors on the controller, a busy Jenkins only means a longer queue, and the fix is another agent. With executors on the controller, one heavy build can stall the scheduler, so free agents sit idle while everyone waits.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $1.20 a day in us-east-1 while the instance runs: a t3.medium, its disk and its public IP address. Prices change; check the EC2 pricing page. Destroy it when you finish.</Cost>
+
+<Note title="This lab leaves a server running">
+
+The EC2 instance costs money every hour until you destroy it, even while you're not using it. The last step removes everything. If you stop part-way, run `terraform destroy` in the lab folder anyway.
+
+</Note>
+
+You'll build a Jenkins controller on EC2 with Terraform, reach it without opening a single port, connect an agent, run a build that uses a stored secret, and take a backup. About 60 minutes.
+
+You need Terraform 1.10 or later and a working AWS login in your terminal, as set up in [Set up your Mac](/lessons/mac-setup/). You also need the **Session Manager plugin** for the AWS CLI, which lets your Mac open a tunnel to the instance:
+
+```sh
+brew install --cask session-manager-plugin
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | install software with Homebrew |
+| `--cask` | this one is a packaged app rather than a command-line formula |
+| `session-manager-plugin` | the plugin the AWS CLI uses for Session Manager |
+
+```sh
+session-manager-plugin
+```
+
+| Part | What it means |
+|---|---|
+| `session-manager-plugin` | run the plugin on its own, just to check it's installed |
+
+```output
+The Session Manager plugin was installed successfully. Use the AWS CLI to start a session.
+```
+
+<Steps>
+
+<Step title="Write the Terraform for the controller">
+
+Make a folder called `quickcart-jenkins` and move into it:
+
+```sh
+mkdir quickcart-jenkins
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-jenkins` | its name |
+
+```sh
+cd quickcart-jenkins
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory, so every later command runs in here |
+| `quickcart-jenkins` | the folder you just made |
+
+Create `main.tf`:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+}
+
+resource "aws_security_group" "jenkins" {
+  name        = "quickcart-jenkins"
+  description = "Jenkins controller: nothing in, everything out"
+  vpc_id      = data.aws_vpc.default.id
+}
+
+resource "aws_vpc_security_group_egress_rule" "all_out" {
+  security_group_id = aws_security_group.jenkins.id
+  description       = "Pull images and plugins, reach Session Manager"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_iam_role" "jenkins" {
+  name = "quickcart-jenkins-controller"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.jenkins.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "jenkins" {
+  name = "quickcart-jenkins-controller"
+  role = aws_iam_role.jenkins.name
+}
+
+resource "aws_instance" "jenkins" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.medium"
+  vpc_security_group_ids      = [aws_security_group.jenkins.id]
+  iam_instance_profile        = aws_iam_instance_profile.jenkins.name
+  associate_public_ip_address = true
+  user_data_replace_on_change = true
+
+  metadata_options {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = <<-EOT
+    #!/bin/bash
+    set -euo pipefail
+    dnf install -y docker
+    systemctl enable --now docker
+    mkdir -p /var/lib/jenkins-home
+    chown 1000:1000 /var/lib/jenkins-home
+    docker network create jenkins
+    docker run -d --name jenkins --restart unless-stopped --network jenkins -p 127.0.0.1:8080:8080 -v /var/lib/jenkins-home:/var/jenkins_home jenkins/jenkins:2.568.3-lts-jdk21
+  EOT
+
+  tags = {
+    Name    = "quickcart-jenkins"
+    Project = "quickcart"
+  }
+}
+
+output "instance_id" {
+  description = "Use this with Session Manager"
+  value       = aws_instance.jenkins.id
+}
+```
+
+#### The settings, one block at a time
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version` | Refuse to run on Terraform older than 1.10 | An old Terraform might fail later with a confusing error | When you rely on a newer feature |
+| `required_providers` → `aws` | Use the `hashicorp/aws` plugin, any 6.x version | Terraform picks the newest, which may one day bring breaking changes | When you deliberately upgrade |
+| `provider "aws"` → `region` | Build everything in us-east-1 | Terraform uses the region from your AWS login settings | To build somewhere else |
+| `data "aws_vpc" "default"` → `default = true` | Look up your account's **default VPC**, which every account has in every region unless someone deleted it | Required, to find the VPC | In a real setup, use your own VPC with a private subnet |
+| `data "aws_ami" "al2023"` | Look up a machine image to start from | — | — |
+| `most_recent = true` | If several images match, take the newest | Terraform fails when more than one matches | Never. You want the latest security fixes |
+| `owners = ["amazon"]` | Only accept images published by AWS itself | Required. Without it, anyone's image with a matching name could be picked | Never for a server like this |
+| `filter` → `name`, `values` | Match Amazon Linux 2023 images for 64-bit Intel and AMD processors. `*` stands for the date part of the name | Every image from Amazon would match | Use `arm64` in the pattern for Graviton instances, which cost less |
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_security_group` → `name` | The firewall's name in AWS | Terraform makes up a name | Never after creation; it forces a new one |
+| `description` | A note for people reading the console | AWS writes `Managed by Terraform` | Never after creation; it forces a new one |
+| `vpc_id` | Which VPC the firewall belongs to. It must match the instance's | It goes in the default VPC anyway, but saying so is clearer | When you use your own VPC |
+| **No ingress rules** | Nothing may connect in. Not SSH, not port 8080, nothing | This *is* leaving it out, on purpose | When a load balancer needs to reach Jenkins for webhooks. Then allow only the load balancer's security group |
+| `aws_vpc_security_group_egress_rule` → `security_group_id` | Which firewall this rule belongs to | Required | — |
+| `description` | A note on the rule | No note | — |
+| `ip_protocol = "-1"` | Every protocol and port | Required | Narrow it to port 443 if your network team asks |
+| `cidr_ipv4 = "0.0.0.0/0"` | To anywhere. The instance must reach Docker Hub, the Jenkins plugin site and Session Manager | Required | Use VPC endpoints and a proxy in a locked-down network |
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_iam_role` → `name` | The role the instance will use | Terraform makes up a name | — |
+| `assume_role_policy` | Who may use the role: only the EC2 service, on behalf of an instance. `jsonencode` turns the Terraform map into the JSON that IAM expects | Required | Never for an instance role |
+| `aws_iam_role_policy_attachment` → `role`, `policy_arn` | Give the role AWS's managed policy **AmazonSSMManagedInstanceCore**: the permissions the SSM agent needs so Session Manager works | Session Manager can't reach the instance, and you have no way in | Add more policies here, such as pushing to ECR, when builds need them |
+| `aws_iam_instance_profile` → `name`, `role` | The container that attaches a role to an EC2 instance. EC2 can't use a role directly | The instance can't get the role | Never |
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `ami` | Start from the Amazon Linux 2023 image found above. It comes with the SSM agent installed | Required | — |
+| `instance_type = "t3.medium"` | 2 vCPUs and 4 GiB of memory. Jenkins alone wants about 2 GiB | Required | Bigger if the web page gets slow with many jobs. Never to make room for builds |
+| `vpc_security_group_ids` | Use the no-way-in firewall | The VPC's default security group, which may allow more | — |
+| `iam_instance_profile` | Attach the role | The instance has no AWS permissions and Session Manager can't reach it | — |
+| `associate_public_ip_address = true` | Give it a public address, so it can reach the internet from the default VPC. The security group still lets nothing in | In the default VPC it usually gets one anyway, but that depends on a subnet setting | In a private subnet with a NAT gateway, set this to `false` |
+| `user_data_replace_on_change = true` | If the start-up script changes, build a new instance, because the script only ever runs on the first boot | Changing the script would do nothing to the running instance | Never for a server built from its script |
+| `metadata_options` → `http_tokens = "required"` | Only accept the newer, safer way of asking the instance for its role's credentials, called IMDSv2 | Older requests are also accepted, which some attacks rely on | Never |
+| `http_put_response_hop_limit = 2` | Let containers on the instance reach the instance's credentials too. Each network hop uses one, and a container adds one | With the default of 1, a container, such as an agent, can't use the instance role | Set it to 1 if no container should get the instance's permissions |
+| `root_block_device` → `volume_size = 30` | A 30 GiB disk. Build history and plugins grow over time | 8 GiB, which fills up quickly | Bigger if you keep many builds |
+| `volume_type = "gp3"` | The current general-purpose SSD type, cheaper than the older `gp2` | Depends on the image; may be `gp2` | Rarely |
+| `encrypted = true` | Encrypt the disk and its snapshots | Depends on your account's default | Never. `JENKINS_HOME` holds secrets |
+| `tags` → `Name`, `Project` | `Name` is what the console shows in the instance list | A nameless instance | Add `Backup = daily` when AWS Backup picks instances by tag |
+| `output "instance_id"` | Print the instance ID after apply. You'll need it to open a tunnel | You'd look it up in the console | — |
+
+#### The start-up script, line by line
+
+`user_data` runs once, as root, the first time the instance boots. `<<-EOT` and `EOT` mark the start and end of a block of text in Terraform.
+
+| Line | What it does |
+|---|---|
+| `#!/bin/bash` | Run this script with bash |
+| `set -euo pipefail` | Stop at the first command that fails, instead of carrying on half-set-up |
+| `dnf install -y docker` | Install Docker with Amazon Linux's package manager. `-y` answers yes |
+| `systemctl enable --now docker` | Start Docker now, and on every boot |
+| `mkdir -p /var/lib/jenkins-home` | The folder that will be `JENKINS_HOME`, on the instance's disk |
+| `chown 1000:1000 /var/lib/jenkins-home` | The official image runs Jenkins as user number 1000. It must own the folder to write to it |
+| `docker network create jenkins` | A private Docker network, so an agent container can reach the controller by the name `jenkins` |
+| `docker run -d --name jenkins` | Start the controller in the background, named `jenkins` |
+| `--restart unless-stopped` | Start it again after a crash or a reboot |
+| `--network jenkins` | Join the private network |
+| `-p 127.0.0.1:8080:8080` | Publish Jenkins' web port **only on the instance's own loopback address**. Even with a firewall mistake, nothing outside the instance could reach it. Session Manager connects from inside |
+| `-v /var/lib/jenkins-home:/var/jenkins_home` | Keep `JENKINS_HOME` on the instance's disk, so it survives the container being replaced |
+| `jenkins/jenkins:2.568.3-lts-jdk21` | The official image, pinned to one LTS version. To upgrade, change this, and back up first |
+
+</Step>
+
+<Step title="Build it">
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | download the AWS provider and prepare the folder |
+
+```output
+Terraform has been successfully initialized!
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan, show the plan, and build it once you type `yes` |
+
+Type `yes` when asked.
+
+```output
+Plan: 6 to add, 0 to change, 0 to destroy.
+
+Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+instance_id = "i-0a1b2c3d4e5f6789"
+```
+
+Your instance ID will be different. Keep it; the next steps call it `INSTANCE_ID`. The instance needs about three minutes to install Docker and start Jenkins.
+
+<Mistake title="there is no default VPC">
+
+```output title="Terraform stops with"
+Error: no matching EC2 VPC found
+```
+
+**Why:** someone deleted the default VPC in this region. Some companies do that on purpose.
+
+**The fix:** you can create a new default VPC in the console: **VPC** → **Your VPCs** → **Actions** → **Create default VPC**. At work, ask which VPC and subnet to use, and put their IDs in the code instead of the lookup.
+
+</Mistake>
+
+</Step>
+
+<Step title="Get the one-time admin password">
+
+Open a shell on the instance in your browser. Session Manager does this through AWS, with no SSH key and no open port.
+
+<ConsolePath path="EC2 > Instances > quickcart-jenkins > Connect" />
+
+| Field | Enter |
+|---|---|
+| Tab | **Session Manager** |
+
+Choose **Connect**. A terminal opens in a new browser tab.
+
+<Mistake title="the Session Manager tab says it can't connect">
+
+```output title="The Connect page shows"
+SSM Agent is not online
+```
+
+**Why:** either the instance is still starting, or it has no instance role with the Session Manager permissions.
+
+**The fix:** wait two minutes and reload. If it still fails, check **EC2** → **Instances** → your instance → **Security** tab → **IAM Role** says `quickcart-jenkins-controller`.
+
+</Mistake>
+
+In the browser terminal, check Jenkins is running:
+
+```sh
+sudo docker ps
+```
+
+| Part | What it means |
+|---|---|
+| `sudo` | run as the administrator; Session Manager logs you in as a normal user |
+| `docker ps` | list running containers |
+
+```output
+CONTAINER ID   IMAGE                               COMMAND                  CREATED         STATUS         PORTS                                NAMES
+3f2a9c1d7b4e   jenkins/jenkins:2.568.3-lts-jdk21   "/usr/bin/tini -- /u…"   2 minutes ago   Up 2 minutes   127.0.0.1:8080->8080/tcp, 50000/tcp   jenkins
+```
+
+Your ID and times will differ. Then print the password Jenkins created on its first start:
+
+```sh
+sudo cat /var/lib/jenkins-home/secrets/initialAdminPassword
+```
+
+| Part | What it means |
+|---|---|
+| `sudo cat` | print a file, as the administrator |
+| `/var/lib/jenkins-home/…` | `JENKINS_HOME` on the instance's disk |
+| `secrets/initialAdminPassword` | a one-time password, used only to unlock the setup page |
+
+```output
+3b9e5c07a1d24f6e8c2b0d9a7f41e635
+```
+
+Yours is different. Copy it. Leave this browser tab open; you'll use it again.
+
+<Mistake title="the password file isn't there yet">
+
+```output
+cat: /var/lib/jenkins-home/secrets/initialAdminPassword: No such file or directory
+```
+
+**Why:** Jenkins takes a minute to start the first time, and creates the file only when it's ready.
+
+**The fix:** run `sudo docker logs jenkins`, wait until it prints `Jenkins is fully up and running`, then try again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Open a tunnel to Jenkins from your Mac">
+
+The console can give you a shell, but it has no button for forwarding a port to your own browser, so this step uses the AWS CLI. In a terminal on your Mac:
+
+```sh ph="INSTANCE_ID"
+aws ssm start-session --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080
+```
+
+| Part | What it means |
+|---|---|
+| `aws ssm start-session` | start a Session Manager session |
+| `--target INSTANCE_ID` | which instance. Replace it with the `instance_id` Terraform printed |
+| `--document-name AWS-StartPortForwardingSession` | the kind of session: forward a port, rather than open a shell |
+| `--parameters portNumber=8080` | the port on the instance, where Jenkins listens |
+| `localPortNumber=8080` | the port on your Mac |
+
+```output
+Starting session with SessionId: quickcart-admin-0f1e2d3c4b5a69788
+Port 8080 opened for sessionId quickcart-admin-0f1e2d3c4b5a69788.
+Waiting for connections...
+```
+
+Leave it running. Open `http://localhost:8080` in your browser. Your Mac passes it through the tunnel, AWS passes it to the SSM agent on the instance, and the agent connects to Jenkins on the instance's loopback address.
+
+<Mistake title="the session won't start">
+
+```output title="The AWS CLI prints a message that starts with"
+SessionManagerPlugin is not found.
+```
+
+**Why:** the plugin isn't installed, or your terminal was open before you installed it.
+
+**The fix:** run the `brew install --cask session-manager-plugin` command above, then open a new terminal window.
+
+</Mistake>
+
+</Step>
+
+<Step title="Finish the setup in the browser">
+
+Go through the setup pages:
+
+| Page | Do this |
+|---|---|
+| **Unlock Jenkins** | Paste the one-time password. Choose **Continue** |
+| **Customize Jenkins** | **Install suggested plugins**. It takes a few minutes |
+| **Create First Admin User** | Choose a username and a long password. Store them in your password manager |
+| **Instance Configuration** | Leave **Jenkins URL** as `http://localhost:8080/`. Choose **Save and Finish** |
+
+Choose **Start using Jenkins**.
+
+<See>
+
+The Jenkins dashboard, with **Welcome to Jenkins!** in the middle.
+
+</See>
+
+</Step>
+
+<Step title="Take the builds off the controller">
+
+Go to **Manage Jenkins** → **Nodes** → **Built-In Node** → **Configure**.
+
+| Field | Enter |
+|---|---|
+| Number of executors | `0` |
+
+Choose **Save**.
+
+<See>
+
+Back on the dashboard, the **Build Executor Status** panel on the left no longer lists any executors for the built-in node.
+
+</See>
+
+</Step>
+
+<Step title="Store a secret">
+
+Go to **Manage Jenkins** → **Credentials** → **System** → **Global credentials (unrestricted)** → **Add Credentials**. Choose the kind **Secret text**, then:
+
+| Field | Enter |
+|---|---|
+| Scope | **Global** |
+| Secret | `not-a-real-token-123` |
+| ID | `quickcart-demo-token` |
+| Description | `Demo token for the Jenkins lesson` |
+
+Choose **Create**.
+
+<See>
+
+`quickcart-demo-token` in the list. The value itself is never shown again. Anyone with permission can replace it, but nobody can read it back in the web page.
+
+</See>
+
+</Step>
+
+<Step title="Create a job and watch it wait">
+
+From the dashboard, choose **New Item**.
+
+| Field | Enter |
+|---|---|
+| Enter an item name | `hello-agent` |
+| Type | **Pipeline** |
+
+Choose **OK**. Scroll to **Pipeline**, leave **Definition** as **Pipeline script**, and paste this into **Script**:
+
+```groovy title="Pipeline script"
+pipeline {
+    agent { label 'linux' }
+    stages {
+        stage('Where am I?') {
+            steps {
+                sh 'hostname'
+                sh 'whoami'
+            }
+        }
+        stage('Use a secret') {
+            steps {
+                withCredentials([string(credentialsId: 'quickcart-demo-token', variable: 'DEMO_TOKEN')]) {
+                    sh 'echo "The token is $DEMO_TOKEN"'
+                }
+            }
+        }
+    }
+}
+```
+
+| Line | What it means |
+|---|---|
+| `agent { label 'linux' }` | run on any agent labelled `linux` |
+| `stage('Where am I?')` | a named step of the pipeline. `hostname` and `whoami` show which machine and which user ran it |
+| `withCredentials([...])` | fetch a credential from the store, only for the steps inside the braces |
+| `string(credentialsId: 'quickcart-demo-token', variable: 'DEMO_TOKEN')` | a Secret text credential, put into an environment variable called `DEMO_TOKEN` |
+| `sh 'echo "The token is $DEMO_TOKEN"'` | print it, to see what Jenkins does with it. The **single** quotes matter; see the mistake below |
+
+[The Jenkinsfile](/lessons/jenkinsfile/) explains every part of a pipeline. Choose **Save**, then **Build Now**.
+
+<See>
+
+Under **Builds**, build **#1** waits with a clock icon. Hold the pointer over it, or open it: Jenkins says there are no nodes with the label `linux`. There is no agent yet, and the controller now refuses to run builds. That's correct.
+
+</See>
+
+</Step>
+
+<Step title="Connect an agent">
+
+Go to **Manage Jenkins** → **Nodes** → **New Node**.
+
+| Field | Enter |
+|---|---|
+| Node name | `agent-1` |
+| Type | **Permanent Agent** |
+
+Choose **Create**, then:
+
+| Field | Enter |
+|---|---|
+| Number of executors | `2` |
+| Remote root directory | `/home/jenkins/agent` |
+| Labels | `linux` |
+| Usage | **Use this node as much as possible** |
+| Launch method | **Launch agent by connecting it to the controller** |
+
+Choose **Save**, then open **agent-1** in the list. Jenkins shows the commands to start the agent. Copy the long **secret** from them: the 64-character value after `-secret`. The next command calls it `AGENT_SECRET`.
+
+In a real setup, the agent is a separate EC2 instance. To keep this lab to one server, you'll run it as a second container on the same instance. Go back to the **Session Manager browser tab** and run:
+
+```sh ph="AGENT_SECRET"
+sudo docker run -d --name agent-1 --init --network jenkins -e JENKINS_URL=http://jenkins:8080/ -e JENKINS_AGENT_NAME=agent-1 -e JENKINS_SECRET=AGENT_SECRET -e JENKINS_WEB_SOCKET=true -e JENKINS_AGENT_WORKDIR=/home/jenkins/agent jenkins/inbound-agent
+```
+
+| Part | What it means |
+|---|---|
+| `sudo docker run -d` | start a container in the background |
+| `--name agent-1` | call the container `agent-1` |
+| `--init` | add a tiny process that tidies up finished processes. Recommended for agent containers |
+| `--network jenkins` | join the same private network as the controller |
+| `-e JENKINS_URL=http://jenkins:8080/` | where the controller is. On this network, `jenkins` is the controller container's name |
+| `-e JENKINS_AGENT_NAME=agent-1` | which node in Jenkins this agent is |
+| `-e JENKINS_SECRET=AGENT_SECRET` | proves it's allowed to be that node. Replace it with the secret you copied |
+| `-e JENKINS_WEB_SOCKET=true` | connect over the same port as the web page, so no extra port is needed |
+| `-e JENKINS_AGENT_WORKDIR=/home/jenkins/agent` | where the agent keeps its files |
+| `jenkins/inbound-agent` | the official image for an agent that connects to its controller |
+
+<See>
+
+Within a few seconds, build **#1** starts by itself. Its **Console Output** says `Running on agent-1`, then prints the agent container's hostname, the user `jenkins`, and then:
+
+</See>
+
+```output title="The console output includes"
+The token is ****
+```
+
+Jenkins replaced the secret with `****` in the log, because it knows the value it handed over.
+
+<Mistake title="the secret put in double quotes">
+
+If the step is written as `sh "echo The token is ${DEMO_TOKEN}"`, the build still works, but Jenkins prints a warning:
+
+```output title="The console output includes"
+Warning: A secret was passed to "sh" using Groovy String interpolation, which is insecure.
+```
+
+**Why:** in double quotes, Groovy puts the secret's value into the command text *before* the shell runs it. The command, secret included, can then appear in places masking doesn't reach, such as the agent's list of running processes.
+
+**The fix:** single quotes, and `$DEMO_TOKEN` without braces or with them, so the **shell** reads the value from its environment. Groovy never sees it.
+
+</Mistake>
+
+<Mistake title="the agent never comes online">
+
+Run `sudo docker logs agent-1` in the Session Manager tab. If it shows `Incorrect secret` or a `403` error, the secret or the name doesn't match the node.
+
+**Why:** each secret belongs to one node name. A typo in either is refused.
+
+**The fix:** remove the container with `sudo docker rm -f agent-1`, copy the secret again from the **agent-1** page, and run the command again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Back up JENKINS_HOME">
+
+`JENKINS_HOME` is on the instance's disk, so a snapshot of that disk is a complete backup.
+
+<ConsolePath path="EC2 > Snapshots > Create snapshot" />
+
+| Field | Enter |
+|---|---|
+| Resource type | **Instance** |
+| Instance ID | the `quickcart-jenkins` instance |
+| Description | `quickcart-jenkins backup` |
+
+Choose **Create snapshot**.
+
+<See>
+
+A snapshot in the list with **Snapshot status: Pending**, then **Completed** after a few minutes.
+
+</See>
+
+To restore it, you'd create a volume from this snapshot and start a new instance with it. For a real controller, don't take snapshots by hand: in **AWS Backup**, create a backup plan with a daily rule that keeps 30 days, and assign it to resources with a tag such as `Backup = daily`. And once a quarter, restore one and check Jenkins starts from it.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+In the Mac terminal running the tunnel, press **Ctrl+C** to close it.
+
+Delete the snapshot first. Terraform didn't create it, so `destroy` won't remove it.
+
+<ConsolePath path="EC2 > Snapshots > quickcart-jenkins backup > Actions > Delete snapshot" />
+
+Then, in the `quickcart-jenkins` folder:
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove everything in the state, once you type `yes` |
+
+```output
+Destroy complete! Resources: 6 destroyed.
+```
+
+<See>
+
+In **EC2** → **Instances**, `quickcart-jenkins` shows **Terminated**. It disappears from the list after about an hour.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Thing | Remember |
+|---|---|
+| Controller | Schedules, stores, serves the UI. **0 executors** |
+| Agent | Runs builds. Disposable. Picked by **label** |
+| Agents on demand | **Amazon EC2** plugin or **Kubernetes** plugin |
+| Reaching the controller | Session Manager: `aws ssm start-session --target INSTANCE_ID --document-name AWS-StartPortForwardingSession --parameters portNumber=8080,localPortNumber=8080` |
+| AWS permissions | Instance role, or `withAWS(role: …)`. Never stored keys |
+| Secrets | Credentials store, used with `withCredentials`, in **single** quotes |
+| Credential scope | Global for pipelines, System for Jenkins itself, folders to fence them off |
+| `JENKINS_HOME` | Everything. `secrets/` decrypts `credentials.xml` |
+| Backups | Nightly EBS snapshots with AWS Backup; ThinBackup for settings; restore one every quarter |
+| Setup as code | `jenkins.yaml` with the Configuration as Code plugin; `plugins.txt` in your own image |
+| Security | Not on the internet, no anonymous read, update monthly, short admin list |
+
+</Cheat>
+
+</Part>

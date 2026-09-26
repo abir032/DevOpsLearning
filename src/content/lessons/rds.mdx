@@ -1,0 +1,503 @@
+---
+time: 50 minutes
+level: Intermediate
+before: [vpc, security-groups]
+cost: paid
+quiz:
+  - q: QuickCart's database is Multi-AZ. Where does the reporting dashboard send its heavy queries, so they don't slow down orders?
+    answer: 3
+    options:
+      - t: To the Multi-AZ standby, which is sitting idle anyway
+        why: You can't connect to a Multi-AZ standby. It only receives copies of writes, ready to take over.
+      - t: To the primary, because Multi-AZ doubles its capacity
+        why: Multi-AZ adds a spare, not capacity. The primary does all the work either way.
+      - t: To a snapshot
+        why: A snapshot is a backup file. To query it you'd first have to restore it into a new database.
+      - t: To a read replica, a separate copy with its own endpoint that you can query
+        why: Read replicas exist to take read load. They are a little behind the primary, which is fine for reports.
+  - q: What does Multi-AZ protect QuickCart from?
+    answer: 1
+    options:
+      - t: Someone running DELETE on the orders table by mistake
+        why: The delete is copied to the standby straight away. Multi-AZ copies mistakes as faithfully as anything else. Backups are what bring deleted data back.
+      - t: The primary's server or its whole zone failing — RDS switches to the standby in another zone
+        why: That's its one job. The endpoint name moves to the standby, usually within one to two minutes.
+      - t: Slow queries
+        why: The standby does no work until a failover, so it can't make anything faster.
+      - t: Running out of storage
+        why: The standby has the same storage as the primary, so it fills up at the same rate.
+  - q: At 14:05 someone drops a table. You restore to a point in time of 14:04. What do you get?
+    answer: 2
+    options:
+      - t: The existing database rolled back to 14:04, at the same endpoint
+        why: A restore never overwrites the database you have. That's deliberate — you might need something from it.
+      - t: The table on its own, put back into the existing database
+        why: RDS restores whole databases, not single tables. Copying the table back across is up to you.
+      - t: A new database instance, as it was at 14:04, with its own new endpoint
+        why: Every restore makes a new instance. You copy what you need from it, or point the app at its endpoint, then delete whichever one you no longer want.
+      - t: Nothing, unless you took a manual snapshot at 14:04
+        why: Point-in-time restore uses the automated backups and transaction logs. No manual snapshot is needed.
+  - q: The database sits in a subnet that has a route to the internet gateway, but was created with Public access set to No. Can someone on the internet connect to it?
+    answer: 0
+    options:
+      - t: No. It has no public IP address, so there's no address on the internet to connect to
+        why: With Public access set to No, the endpoint resolves only to a private address. In a real build you'd still use private subnets, so there are two things in the way, not one.
+      - t: Yes, because the subnet is public
+        why: A route to the internet only matters for something that has a public address. This database doesn't.
+      - t: Yes, if they know the endpoint name
+        why: The name leads to a private address, which can't be reached from the internet.
+      - t: Only on port 3306
+        why: The port doesn't matter. There's no public address to connect to at all.
+  - q: You need to raise max_connections. The database uses the default parameter group. What do you do?
+    answer: 1
+    options:
+      - t: Edit the default parameter group
+        why: Default parameter groups can't be edited. AWS shares them across every database of that engine version.
+      - t: Create a custom parameter group, change the setting there, and attach it to the database
+        why: That's the only way. Some settings take effect straight away; others need a reboot, and the console tells you which.
+      - t: Connect with SQL and run SET GLOBAL max_connections
+        why: RDS doesn't give you the privilege to change global settings that way. Parameter groups are how you change them.
+      - t: Choose a bigger instance class; the setting can't be changed
+        why: A bigger instance does raise the default, but you can also change it directly with a custom parameter group.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, running its own database">
+
+QuickCart's first database was MySQL, installed by hand on an EC2 server by Leo. Every night a script saved a copy of the data — to a folder on the same server.
+
+For a while this was fine. Then the server's disk failed. The database was gone, and so was every copy of it, because they were all on that one disk. Leo rebuilt the orders from payment receipts over two days.
+
+Even before that night, the database took real work: security updates, disk space alerts, a restart that took the app down every time.
+
+</Story>
+
+<Case title="A very common mistake: the backups went with the database">
+
+Someone deletes an RDS database they believe is no longer needed, or deletes the wrong one. They know RDS takes automatic backups, so it feels safe.
+
+But automated backups belong to the database. Unless you choose to keep them when you delete it, **they are deleted along with it**. The only copies that survive are manual snapshots, and many teams have never taken one. The lesson people learn the hard way: a backup you have never restored, and never checked will outlive the thing it protects, is only a hope.
+
+</Case>
+
+QuickCart needs a database it doesn't have to patch, with backups that work and a copy in a second zone. That's what RDS is for.
+
+</Part>
+
+<Part id="idea">
+
+**RDS** — Relational Database Service — runs a database server for you. You pick the engine, like MySQL or PostgreSQL, and a size. AWS runs the machine, installs the software, patches it in a window you choose, takes backups, and replaces broken hardware. You get a database to connect to.
+
+| Job | Your own server | RDS |
+|---|---|---|
+| Install and upgrade the database | You | AWS, in a maintenance window you choose |
+| Daily backups | Your script, if it works | Automatic, kept for up to 35 days |
+| Restore to a moment in time | Hard | A few clicks |
+| A copy in another zone that takes over | Weeks of work | One setting: Multi-AZ |
+| Tables, queries, users, indexes | You | Still you |
+
+You still design the tables and write the SQL. You just stop being the database server's caretaker.
+
+<Key>RDS runs the database for you. Multi-AZ keeps it running when a zone fails; backups bring back what was lost. Neither one replaces the other.</Key>
+
+### You connect by name, not by address
+
+Every RDS database gets an **endpoint**: a DNS name like `quickcart-db.c1a2b3c4d5e6.us-east-1.rds.amazonaws.com`, and a port — 3306 for MySQL. Your app connects to that name. Behind it, the actual server can change. That's what makes failover work without touching your app's settings.
+
+### Where it lives
+
+A database belongs in private subnets, as the [VPC lesson](/lessons/vpc/) explained. Three settings put it there:
+
+| Setting | What it does | QuickCart's choice |
+|---|---|---|
+| **DB subnet group** | The list of subnets RDS may put the database in. Must cover at least two availability zones, even for a single database, so a standby or a replacement has somewhere to go | The two private database subnets, one per zone |
+| **Public access** | Whether the database gets a public IP address | **No**. Always |
+| **Security group** | Who may connect | Port 3306, only from the app servers' security group. See [security groups](/lessons/security-groups/) |
+
+### Multi-AZ: a standby in another zone
+
+With **Multi-AZ**, RDS keeps a second copy of the database, the **standby**, in another zone. Every write goes to both, and the app's write isn't confirmed until the standby has it too. That's called **synchronous** replication.
+
+You can't connect to the standby. It waits. If the primary fails — its server, its storage, or its whole zone — RDS **fails over**:
+
+| Step | What happens |
+|---|---|
+| 1 | Connections to the old primary drop. The app sees errors like `Lost connection to MySQL server` |
+| 2 | RDS promotes the standby to be the primary. It already has every committed write |
+| 3 | RDS points the endpoint's DNS name at the new primary |
+| 4 | The app reconnects to the same name, and reaches the new primary |
+
+AWS says this typically takes **60 to 120 seconds**. Your app must be ready for it: it has to reconnect when a connection breaks, not crash or hold on to the dead one. Multi-AZ costs **roughly double**, because you pay for two database servers.
+
+<Note title="Some new accounts can't choose Multi-AZ">
+
+Some free and new-account plans restrict RDS to the free-tier template: the **Production** and **Dev/Test** templates are greyed out, and Multi-AZ can't be chosen. That's an account limit, not something you did wrong. If it happens to you, build Single-AZ — and be honest about what that proves. Your app servers may survive losing a zone, but the database won't: if its zone goes, so does the site.
+
+</Note>
+
+### Read replicas: copies you can query
+
+A **read replica** is a copy you **can** connect to, with its own endpoint. Use it to take read-only work off the primary, like reports and dashboards.
+
+Replicas are **asynchronous**: the primary doesn't wait for them, so they can be a little behind. That's called replica lag.
+
+| | Multi-AZ standby | Read replica |
+|---|---|---|
+| Purpose | Stay up when something fails | Spread out read work |
+| Can you query it? | No | Yes, read-only |
+| Copying | Synchronous: never behind | Asynchronous: can lag |
+| When the primary fails | Takes over automatically | Nothing, unless you promote it by hand |
+| Endpoint | Shares the database's endpoint | Its own |
+
+They solve different problems, and you can have both.
+
+### Backups: bringing back what was lost
+
+Multi-AZ copies **everything** to the standby — including mistakes. Drop a table, and the standby drops it too, a millisecond later. For mistakes you need backups.
+
+| Kind | How it's made | Kept for | What it gives you |
+|---|---|---|---|
+| **Automated backups** | A daily snapshot, plus the database's change log, saved every few minutes | 1 to 35 days — the **retention period** you choose | **Point-in-time restore**: the database as it was at any second in that window, up to about five minutes ago |
+| **Manual snapshots** | You take one, whenever you like | Until you delete it — even after the database is deleted | The database exactly as it was at that moment |
+
+Take a manual snapshot before anything risky, like a big data change or an upgrade.
+
+<Note title="A restore never rewinds your database">
+
+People open **Restore to point in time** expecting their database to go back in time. Instead, the form asks for a new **DB instance identifier**. Every restore creates a **new** database, with a new endpoint. The original is left alone, because you might still need something from it.
+
+So plan for it: either copy the lost rows from the restored database back into the original, or point the app at the new endpoint. Then delete whichever one you don't need, because both are billed.
+
+</Note>
+
+### Settings: parameter groups
+
+A database engine has hundreds of settings, like `max_connections` — how many connections it accepts at once. On RDS you can't change them with SQL. They live in a **parameter group** attached to the database.
+
+Every database starts with a **default** parameter group, which **can't be edited**. To change a setting, you create your own parameter group, change it there, and attach it. Some settings apply at once; others, called static, need a reboot. The console marks which is which.
+
+### Encryption
+
+Tick **Enable encryption** when you create the database. It encrypts the storage, the backups, the snapshots and any replicas. It's on by default, and it costs nothing extra with the AWS-managed key.
+
+You can't switch encryption on for an existing database. You'd have to copy a snapshot with encryption on and restore it as a new database. So choose it at the start.
+
+</Part>
+
+<Part id="see">
+
+QuickCart's API connects to its database by endpoint name. **Fail zone a** and watch what happens with Multi-AZ. Then switch to **Single-AZ** and fail the zone again.
+
+<RdsFailover />
+
+**What to notice:** with Multi-AZ, the API's settings never changed. It kept connecting to the same name, and the name started leading somewhere else. That's why you always connect by the endpoint name, and why your app must reconnect when a connection drops.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">a `db.t4g.micro` MySQL database, at about $0.016 an hour Single-AZ in us-east-1, plus 20 GiB of storage at about $0.115 per GiB a month. About $0.10 for a two-hour lab. Multi-AZ roughly doubles the hourly price. If your account is still in the free tier, it may cost nothing. Prices change; check the RDS pricing page.</Cost>
+
+<Note title="This lab leaves things behind if you let it">
+
+A database bills every hour it exists, even when nobody uses it. Deleting it doesn't delete **manual snapshots**, which are billed for storage until you delete them. The clean-up step removes the database, the snapshot and the subnet group. Do it the same day.
+
+</Note>
+
+You'll create a private MySQL database the way QuickCart would, look at its backups, take a snapshot, and see what a restore creates. About 40 minutes, including 10 to 20 minutes waiting for the database. The next lesson, [Running SQL safely](/lessons/sql-safely/), connects to a database like this one.
+
+This lab uses your account's **default VPC** to keep it cheap. Its subnets have a route to the internet gateway, which a real build wouldn't use for a database — you'd use the private database subnets from [What is a VPC?](/lessons/vpc/). The database will still be unreachable from the internet: **Public access: No** means it gets no public address, and its security group admits only QuickCart's app servers.
+
+Check the region selector says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create two security groups">
+
+First a group for the app servers. It needs no rules yet; the database's group will point at it.
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-app-sg` |
+| Description | `QuickCart app servers` |
+| VPC | the default VPC |
+| Inbound rules | none |
+
+Choose **Create security group**. Then create the database's group:
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-db-sg` |
+| Description | `QuickCart database` |
+| VPC | the default VPC |
+| Inbound rule: Type | **MYSQL/Aurora** — this fills in TCP port 3306 |
+| Inbound rule: Source | **Custom**, then choose `quickcart-app-sg` from the list |
+
+<See>
+
+`quickcart-db-sg` with one inbound rule: port **3306** from **sg-…** (`quickcart-app-sg`). Not from an IP range, and never from `0.0.0.0/0`. Only servers wearing the app group can connect.
+
+</See>
+
+</Step>
+
+<Step title="Create the DB subnet group">
+
+<ConsolePath path="Aurora and RDS > Subnet groups > Create DB subnet group" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-db-subnets` |
+| Description | `QuickCart database subnets` |
+| VPC | the default VPC |
+| Availability Zones | **us-east-1a** and **us-east-1b** |
+| Subnets | the one subnet listed for each of those two zones |
+
+Choose **Create**.
+
+<Mistake title="picking subnets in only one zone">
+
+```output title="Creating the subnet group fails with"
+DB Subnet Group doesn't meet Availability Zone (AZ) coverage requirement. Current AZ coverage: us-east-1a. Add subnets to cover at least 2 AZs.
+```
+
+**Why:** RDS always wants somewhere to put a standby or a replacement in another zone, even for a Single-AZ database. The exact wording of the message may differ.
+
+**The fix:** add a subnet from a second zone.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the database">
+
+<ConsolePath path="Aurora and RDS > Databases > Create database" />
+
+The form is long. Everything not listed here, leave as it is.
+
+| Field | Enter |
+|---|---|
+| Choose a database creation method | **Standard create** |
+| Engine type | **MySQL** |
+| Engine version | the version the console selects — a current MySQL 8 release |
+| Templates | **Free tier** if it's offered; otherwise **Dev/Test** |
+| Availability and durability | **Single-AZ DB instance deployment**. See the note below about Multi-AZ |
+| DB instance identifier | `quickcart-db` |
+| Master username | `admin` |
+| Credentials management | **Self managed** |
+| Master password | a long password you make up. Save it in your password manager |
+| DB instance class | **Burstable classes**, then `db.t4g.micro` (or `db.t3.micro` if that's what's offered) |
+| Storage type | **General Purpose SSD (gp3)** |
+| Allocated storage | `20` GiB |
+| Enable storage autoscaling | untick it, under **Additional storage configuration** |
+| Compute resource | **Don't connect to an EC2 compute resource** |
+| Virtual private cloud (VPC) | the default VPC |
+| DB subnet group | `quickcart-db-subnets` |
+| Public access | **No** |
+| VPC security group | **Choose existing**: `quickcart-db-sg`. Remove `default` |
+| Database authentication | **Password authentication** |
+
+Then open **Additional configuration**, lower down:
+
+| Field | Enter |
+|---|---|
+| Initial database name | `quickcart` |
+| DB parameter group | leave the default |
+| Enable automated backups | ticked |
+| Backup retention period | `1` day |
+| Enable encryption | ticked, with the default key `(default) aws/rds` |
+| Enable deletion protection | unticked, so you can delete it at the end. Tick it for real databases |
+
+Check the **Estimated monthly costs** box at the bottom, then choose **Create database**.
+
+<See>
+
+`quickcart-db` in the list with **Status: Creating**. It takes 10 to 20 minutes to become **Available**.
+
+</See>
+
+<Mistake title="a password with the wrong characters">
+
+```output title="The form shows"
+Master password must be at least eight characters long, and can't include the characters / (slash), ' (single quote), " (double quote), @ (at sign), or space.
+```
+
+**Why:** those characters cause trouble in connection strings, so RDS refuses them. The exact wording may differ.
+
+**The fix:** use a long password made of letters, numbers and other punctuation. If a password generator suggests one with those characters, change it.
+
+</Mistake>
+
+<Mistake title="skipping Initial database name">
+
+It sits in a collapsed section, so it's easy to miss. The server is created with no database in it, and an hour later the app fails with:
+
+```output
+ERROR 1049 (42000): Unknown database 'quickcart'
+```
+
+**Why:** a MySQL server can hold many databases. Without an initial name, RDS creates the server and leaves it empty.
+
+**The fix:** connect and run `CREATE DATABASE quickcart;` — or fill in the field when you create the database.
+
+</Mistake>
+
+<Note title="If Multi-AZ is available to you">
+
+You can choose **Multi-AZ DB instance deployment** instead, and try a real failover in the optional step below. It roughly doubles the cost, and creation takes a little longer.
+
+</Note>
+
+</Step>
+
+<Step title="Read what you built">
+
+When the status is **Available**, open `quickcart-db`.
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Connectivity & security" />
+
+<See>
+
+- **Endpoint**: a name like `quickcart-db.c1a2b3c4d5e6.us-east-1.rds.amazonaws.com`. Yours will have different letters in the middle.
+- **Port**: `3306`.
+- **Publicly accessible**: **No**.
+- **VPC security groups**: `quickcart-db-sg`.
+
+</See>
+
+Now open the **Maintenance & backups** tab.
+
+<See>
+
+- **Automated backups**: **Enabled (1 Day)**.
+- **Latest restore time**: a few minutes ago. That's how far forward a point-in-time restore can reach.
+
+</See>
+
+On the **Configuration** tab, **Multi-AZ** says **No** — unless you chose it.
+
+</Step>
+
+<Step title="Take a manual snapshot">
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Actions > Take snapshot" />
+
+| Field | Enter |
+|---|---|
+| Snapshot type | **DB instance** |
+| Snapshot name | `quickcart-db-before-change` |
+
+Choose **Take snapshot**.
+
+<See>
+
+**Snapshots → Manual** lists `quickcart-db-before-change` with **Status: Creating**, then **Available** after a few minutes. It will stay until you delete it, even if the database is deleted.
+
+</See>
+
+</Step>
+
+<Step title="See what a point-in-time restore would create">
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Actions > Restore to point in time" />
+
+<See>
+
+A choice between **Latest restorable time** and **Custom date and time**, and further down, a required field: **DB instance identifier**. The restore makes a **new** database with its own name and endpoint. It never rewinds `quickcart-db` itself.
+
+</See>
+
+Choose **Cancel**. Restoring would create, and bill for, a second database. In a real recovery you'd go ahead, copy back what you need, then delete the database you no longer want.
+
+</Step>
+
+<Step title="Optional: fail over a Multi-AZ database">
+
+Only if your database is Multi-AZ. It isn't possible on a Single-AZ one: the **Reboot with failover** option doesn't appear.
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Actions > Reboot" />
+
+Tick **Reboot with failover?** and choose **Confirm**. Then open the database's **Logs & events** tab and scroll to **Recent events**.
+
+```output title="Within a couple of minutes, events like"
+Multi-AZ instance failover started.
+Multi-AZ instance failover completed.
+```
+
+<See>
+
+On the **Configuration** tab, the **Availability zone** has changed to the other zone. The endpoint name hasn't. Anything connecting by that name reaches the new primary.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+**1. Delete the database.**
+
+<ConsolePath path="Aurora and RDS > Databases > quickcart-db > Actions > Delete" />
+
+| Field | Enter |
+|---|---|
+| Create final snapshot | untick |
+| Retain automated backups | untick |
+| Acknowledgement | tick the box that says automated backups will no longer be available |
+| Confirmation | type `delete me` |
+
+Choose **Delete**. It takes several minutes.
+
+**2. Delete the manual snapshot.** It isn't deleted with the database.
+
+<ConsolePath path="Aurora and RDS > Snapshots > Manual > quickcart-db-before-change > Actions > Delete snapshot" />
+
+**3. Delete the subnet group**, once the database has gone completely.
+
+<ConsolePath path="Aurora and RDS > Subnet groups > quickcart-db-subnets > Delete" />
+
+**4. Delete the security groups**: `quickcart-db-sg` first, because its rule refers to `quickcart-app-sg`. Then `quickcart-app-sg`. Keep them if you're going straight on to the next lesson.
+
+<See>
+
+**Databases**, **Snapshots → Manual** and **Subnet groups** all empty of anything `quickcart`. Nothing left billing.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| RDS | AWS runs the database server; you still own the tables and the SQL |
+| Endpoint | The DNS name you connect to. Never use an IP address |
+| DB subnet group | The private subnets RDS may use. At least two zones |
+| Public access | Always **No** |
+| Security group | Port 3306 only from the app servers' group |
+| Multi-AZ | Synchronous standby in another zone. Failover in about 60–120 s. You can't query it |
+| Read replica | Asynchronous copy you can query. Its own endpoint. Can lag |
+| Automated backups | Daily snapshot plus change logs. Restore to any second, 1–35 days back |
+| Manual snapshot | Kept until you delete it. Take one before anything risky |
+| Restore | Always creates a new database with a new endpoint |
+| Parameter group | Engine settings. The default can't be edited; make your own |
+| Encryption | Choose at creation. Can't be switched on later in place |
+| Clean up | Delete the database, then its snapshots and subnet group |
+
+</Cheat>
+
+</Part>

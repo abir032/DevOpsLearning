@@ -1,0 +1,215 @@
+---
+/*
+ * Project 1: the finished network, with five traffic traces.
+ * Teaches: which route-table line each kind of traffic uses, and where the
+ * one-NAT design makes zone b depend on zone a.
+ */
+---
+<div class="viz" data-track="cloud" data-viz="network-by-hand">
+  <div class="viz-controls">
+    <span class="lbl" id="nbh-lbl">Follow the traffic</span>
+    <div class="nbh-acts" role="group" aria-labelledby="nbh-lbl">
+      <button class="btn" type="button" data-t="update">Server downloads an update</button>
+      <button class="btn" type="button" data-t="secret">Server reads a secret</button>
+      <button class="btn" type="button" data-t="s3">Server reads from S3</button>
+      <button class="btn" type="button" data-t="zoneb">Zone b downloads an update</button>
+      <button class="btn" type="button" data-t="attack">The internet tries the data subnet</button>
+      <button class="btn" type="button" data-t="reset">Reset</button>
+    </div>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole network</p>
+  <div class="viz-stage" tabindex="0" role="group" aria-label="The network diagram. Scrolls sideways on small screens.">
+    <svg viewBox="0 0 850 565" role="img" aria-labelledby="nbh-title">
+      <title id="nbh-title">The network from Project 1. Outside the VPC: the internet, and AWS services such as S3, Secrets Manager and Systems Manager. The VPC, 10.0.0.0/16, spans two zones. Each zone has a public subnet, an app subnet and a data subnet. An internet gateway is the VPC's door to the internet. One NAT gateway sits in public subnet a. Each app subnet holds interface endpoints. The app route tables send 0.0.0.0/0 to the NAT gateway and S3 traffic to a gateway endpoint. The data subnets have only the local route.</title>
+
+      <rect data-n="inet" class="vz-node" x="16" y="60" width="134" height="56" rx="10" />
+      <text class="vz-t" x="83" y="84" text-anchor="middle">The internet</text>
+      <text class="vz-s" x="83" y="101" text-anchor="middle">package mirrors, bots</text>
+
+      <rect data-n="aws" class="vz-node" x="16" y="398" width="134" height="84" rx="10" />
+      <text class="vz-t" x="83" y="424" text-anchor="middle">AWS services</text>
+      <text class="vz-s" x="83" y="442" text-anchor="middle">S3</text>
+      <text class="vz-s" x="83" y="457" text-anchor="middle">Secrets Manager</text>
+      <text class="vz-s" x="83" y="472" text-anchor="middle">Systems Manager</text>
+
+      <rect class="vz-vpc" x="200" y="18" width="636" height="534" rx="14" />
+      <text class="vz-label" x="224" y="40">quickcart-vpc · 10.0.0.0/16</text>
+      <line class="nbh-zone" x1="530" y1="46" x2="530" y2="542" />
+      <text class="vz-label" x="500" y="40" text-anchor="end">us-east-1a</text>
+      <text class="vz-label" x="560" y="40">us-east-1b</text>
+
+      <rect class="vz-sub pub" x="226" y="52" width="290" height="120" rx="10" />
+      <text class="vz-s" x="238" y="70" font-weight="700">quickcart-public-a · 10.0.1.0/24</text>
+      <rect data-n="nat" class="vz-node" x="300" y="85" width="140" height="46" rx="8" />
+      <text class="vz-t" x="370" y="105" text-anchor="middle">NAT gateway</text>
+      <text class="vz-s" x="370" y="121" text-anchor="middle">with an Elastic IP</text>
+      <text class="vz-r" x="238" y="160">0.0.0.0/0 → internet gateway</text>
+
+      <rect class="vz-sub pub" x="544" y="52" width="280" height="120" rx="10" />
+      <text class="vz-s" x="556" y="70" font-weight="700">quickcart-public-b · 10.0.2.0/24</text>
+      <text class="vz-s" x="556" y="112">Project 2 puts the load</text>
+      <text class="vz-s" x="556" y="127">balancer in both public subnets</text>
+      <text class="vz-r" x="556" y="160">0.0.0.0/0 → internet gateway</text>
+
+      <rect class="vz-sub" x="226" y="196" width="290" height="170" rx="10" />
+      <text class="vz-s" x="238" y="214" font-weight="700">quickcart-app-a · 10.0.11.0/24</text>
+      <rect data-n="srv" class="vz-node" x="250" y="225" width="120" height="46" rx="8" />
+      <text class="vz-t" x="310" y="245" text-anchor="middle">Test server</text>
+      <text class="vz-s" x="310" y="261" text-anchor="middle">no public IP</text>
+      <rect data-n="enia" class="vz-node" x="390" y="225" width="105" height="46" rx="8" />
+      <text class="vz-t" x="442" y="245" text-anchor="middle">Endpoints</text>
+      <text class="vz-s" x="442" y="261" text-anchor="middle">4 interface</text>
+      <text class="vz-r" x="238" y="334">0.0.0.0/0 → NAT gateway</text>
+      <text class="vz-r" x="238" y="350">S3 prefix list → gateway endpoint</text>
+
+      <rect class="vz-sub" x="544" y="196" width="280" height="170" rx="10" />
+      <text class="vz-s" x="556" y="214" font-weight="700">quickcart-app-b · 10.0.12.0/24</text>
+      <rect data-n="srvb" class="vz-node nbh-future" x="570" y="225" width="120" height="46" rx="8" />
+      <text class="vz-t" x="630" y="245" text-anchor="middle">A server</text>
+      <text class="vz-s" x="630" y="261" text-anchor="middle">in Project 2</text>
+      <rect data-n="enib" class="vz-node" x="705" y="225" width="95" height="46" rx="8" />
+      <text class="vz-t" x="752" y="245" text-anchor="middle">Endpoints</text>
+      <text class="vz-s" x="752" y="261" text-anchor="middle">4 interface</text>
+      <text data-n="rtb" class="vz-r" x="556" y="334">0.0.0.0/0 → NAT gateway (zone a)</text>
+      <text class="vz-r" x="556" y="350">S3 prefix list → gateway endpoint</text>
+
+      <rect data-n="data" class="vz-sub" x="226" y="404" width="290" height="132" rx="10" />
+      <text class="vz-s" x="238" y="422" font-weight="700">quickcart-data-a · 10.0.21.0/24</text>
+      <text class="vz-s" x="238" y="466">The database goes here in Project 2</text>
+      <text class="vz-r" x="238" y="522">local only: no way in or out</text>
+
+      <rect class="vz-sub" x="544" y="404" width="280" height="132" rx="10" />
+      <text class="vz-s" x="556" y="422" font-weight="700">quickcart-data-b · 10.0.22.0/24</text>
+      <text class="vz-r" x="556" y="522">local only: no way in or out</text>
+
+      <path class="vz-wire" d="M150 88 L200 120" />
+      <path class="vz-wire" d="M214 116 L300 108" />
+      <path class="vz-wire" d="M310 225 L370 131" />
+      <path class="vz-wire" d="M630 225 L440 115" />
+      <path class="vz-wire nbh-awsnet" d="M150 430 L162 383 L760 383" />
+      <path class="vz-wire nbh-awsnet" d="M442 271 L442 383" /><path class="vz-wire nbh-awsnet" d="M752 271 L752 383" /><path class="vz-wire nbh-awsnet" d="M310 271 L310 383" />
+      <text class="vz-s nbh-net" x="470" y="378">AWS's private network, never the internet</text>
+
+      <rect class="vz-igw" x="186" y="96" width="28" height="48" rx="5" />
+      <path class="vz-igw-bars" d="M193 106v28M200 106v28M207 106v28" />
+      <text class="vz-s" x="200" y="160" text-anchor="middle" font-weight="700">internet</text>
+      <text class="vz-s" x="200" y="174" text-anchor="middle" font-weight="700">gateway</text>
+
+      <g data-n="x" opacity="0"><line class="vz-x" x1="250" y1="424" x2="268" y2="442" /><line class="vz-x" x1="268" y1="424" x2="250" y2="442" /></g>
+      <circle data-n="dot" class="vz-dot" r="8" cx="310" cy="248" opacity="0" />
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Choose a kind of traffic to follow it through the network you will build.</div>
+</div>
+
+<script>
+  import { beat, moveDot, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Pt = [number, number];
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="network-by-hand"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const dot = q<SVGCircleElement>("dot");
+    const x = q<SVGGElement>("x");
+    const nodes = ["inet", "aws", "nat", "srv", "srvb", "enia", "data"].map((n) => q<SVGElement>(n));
+    const [inet, aws, nat, srv, srvb, enia, data] = nodes;
+    const acts = [...root.querySelectorAll<HTMLButtonElement>("[data-t]")].filter((b) => b.dataset.t !== "reset");
+    let run = 0;
+
+    function clear() {
+      nodes.forEach((n) => n.classList.remove("lit", "hit", "okk"));
+      data.setAttribute("class", "vz-sub");
+      dot.setAttribute("opacity", "0");
+      dot.setAttribute("class", "vz-dot");
+      x.setAttribute("opacity", "0");
+    }
+    function busy(on: boolean) { acts.forEach((b) => (b.disabled = on)); }
+
+    const OUT: Pt[] = [[300, 108], [200, 120], [150, 88]];
+
+    async function trace(kind: string) {
+      const me = ++run;
+      const live = () => me === run;
+      busy(true); clear();
+      const go = async (pts: Pt[], speed?: number) => { await moveDot(dot, pts, speed); return live(); };
+
+      if (kind === "update") {
+        srv.classList.add("lit");
+        tell(say, "Step 1 of 4", "The test server asks for a package from the internet. Its subnet's route table has no exact match, so the catch-all line applies: <code>0.0.0.0/0 → NAT gateway</code>.");
+        if (!(await go([[310, 225], [370, 131]]))) return;
+        nat.classList.add("lit");
+        tell(say, "Step 2 of 4", "The <b>NAT gateway</b> swaps the server's private address for its own Elastic IP, and remembers the swap so the reply can find its way back.");
+        await beat(600); if (!live()) return;
+        tell(say, "Step 3 of 4", "The public subnet's route table sends it on: <code>0.0.0.0/0 → internet gateway</code>.");
+        if (!(await go(OUT))) return;
+        inet.classList.add("okk");
+        dot.setAttribute("class", "vz-dot back");
+        if (!(await go([[150, 88], [200, 120], [300, 108], [370, 131], [310, 225]], 520))) return;
+        srv.classList.replace("lit", "okk");
+        tell(say, "Step 4 of 4: done", "The reply comes back the same way. The server reached out, but nothing on the internet can start a connection to it: it has no public address, and its subnet has no route from the internet gateway.", "good");
+      } else if (kind === "secret") {
+        srv.classList.add("lit");
+        tell(say, "Step 1 of 3", "The server asks for <code>secretsmanager.us-east-1.amazonaws.com</code>. Because the endpoint has <b>private DNS</b> turned on, that name now resolves to a private address in this subnet.");
+        if (!(await go([[370, 248], [390, 248]]))) return;
+        enia.classList.add("lit");
+        tell(say, "Step 2 of 3", "The address belongs to the <b>interface endpoint</b>. The <code>local</code> route delivers it, and the endpoints' security group allows port 443 from the app security group.");
+        await beat(500);
+        if (!(await go([[442, 271], [442, 383], [162, 383], [150, 420]]))) return;
+        aws.classList.add("okk");
+        tell(say, "Step 3 of 3: done", "The request reaches Secrets Manager over AWS's own network. It never touched the NAT gateway or the internet, so it still works if the NAT is down.", "good");
+      } else if (kind === "s3") {
+        srv.classList.add("lit");
+        tell(say, "Step 1 of 2", "The server asks S3 for a file. S3's addresses match a more specific line than the catch-all: the <b>S3 prefix list → gateway endpoint</b> route that the endpoint added to this route table.");
+        await beat(500);
+        if (!(await go([[310, 271], [310, 383], [162, 383], [150, 420]]))) return;
+        aws.classList.add("okk");
+        tell(say, "Step 2 of 2: done", "It goes straight to S3 on AWS's network. A gateway endpoint is only a route, it costs nothing, and it keeps S3 traffic off the NAT gateway, which charges per gigabyte.", "good");
+      } else if (kind === "zoneb") {
+        srvb.classList.add("lit");
+        tell(say, "Step 1 of 3", "A server in <b>zone b</b> asks for a package. Its route table also says <code>0.0.0.0/0 → NAT gateway</code>, and there's only one NAT gateway: in <b>zone a</b>.");
+        if (!(await go([[630, 225], [440, 115]]))) return;
+        nat.classList.add("lit");
+        tell(say, "Step 2 of 3", "So zone b's traffic crosses into zone a. It works, but zone b now <b>depends on zone a</b> for its way out.");
+        await beat(600);
+        if (!(await go(OUT))) return;
+        inet.classList.add("okk");
+        tell(say, "Step 3 of 3: a trade-off", "It reached the internet. If zone a failed, zone b's servers would lose the internet, but they would still reach Secrets Manager, S3 and Systems Manager through the endpoints. A second NAT gateway in zone b removes the dependency, for about $1 more a day.", "");
+      } else if (kind === "attack") {
+        dot.setAttribute("class", "vz-dot bot");
+        inet.classList.add("hit");
+        tell(say, "Step 1 of 3", "A bot on the internet tries to reach an address in the data subnet.");
+        if (!(await go([[150, 88], [200, 120]]))) return;
+        tell(say, "Step 2 of 3", "It arrives at the internet gateway. Nothing in the data subnet has a public address, so there's nothing for the gateway to deliver it to.");
+        await beat(600);
+        if (!(await go([[200, 120], [259, 433]]))) return;
+        x.setAttribute("opacity", "1");
+        data.setAttribute("class", "vz-sub pub");
+        tell(say, "Step 3 of 3: blocked", "<b>No way in.</b> The data subnets' route table has only the <code>local</code> route, so it can't even send a reply back out. Even inside the VPC, the database's security group will only accept the app security group, on one port.", "good");
+      }
+      dot.setAttribute("class", "vz-dot");
+      busy(false);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-t]");
+      if (!b || b.disabled) return;
+      if (b.dataset.t === "reset") {
+        run++; busy(false); clear();
+        tell(say, "Ready", "Choose a kind of traffic to follow it through the network you will build.");
+      } else trace(b.dataset.t!);
+    });
+    return () => { run++; };
+  }));
+</script>
+
+<style is:global>
+  [data-viz="network-by-hand"] .nbh-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+  [data-viz="network-by-hand"] .nbh-zone { stroke: var(--rule-2); stroke-width: 1.5; stroke-dasharray: 2 5; }
+  [data-viz="network-by-hand"] .nbh-awsnet { stroke: var(--cloud); opacity: .55; }
+  [data-viz="network-by-hand"] .nbh-net { fill: var(--cloud-t); font-weight: 700; }
+  [data-viz="network-by-hand"] .nbh-future { stroke-dasharray: 5 4; }
+  [data-viz="network-by-hand"] .viz-stage svg { min-width: 700px; }
+</style>

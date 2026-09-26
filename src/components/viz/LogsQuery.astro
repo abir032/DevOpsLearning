@@ -1,0 +1,102 @@
+---
+/*
+ * Logs and metrics: a Logs Insights-style query over sample logs.
+ * Teaches: structured logs answer questions that plain text can't.
+ */
+import { START, queryText, resultHtml, sayHtml } from "../../scripts/logs-query-viz";
+const first = sayHtml(START);
+---
+<div class="viz" data-track="cloud" data-viz="logs-query">
+  <div class="viz-controls">
+    <div class="lq-ctl">
+      <span class="lbl" id="lq-fmt">The app writes</span>
+      <div class="seg" role="group" aria-labelledby="lq-fmt">
+        <button type="button" data-k="fmt" data-v="plain" aria-pressed="false">Plain text</button>
+        <button type="button" data-k="fmt" data-v="json" aria-pressed="true">Structured JSON</button>
+      </div>
+    </div>
+    <div class="lq-ctl">
+      <span class="lbl" id="lq-level">level</span>
+      <div class="seg" role="group" aria-labelledby="lq-level">
+        <button type="button" data-k="level" data-v="any" aria-pressed="true">Any</button>
+        <button type="button" data-k="level" data-v="ERROR" aria-pressed="false">ERROR</button>
+      </div>
+    </div>
+    <div class="lq-ctl">
+      <span class="lbl" id="lq-err">error_type</span>
+      <div class="seg wide" role="group" aria-labelledby="lq-err">
+        <button type="button" data-k="err" data-v="any" aria-pressed="true">Any</button>
+        <button type="button" data-k="err" data-v="OperationalError" aria-pressed="false">OperationalError</button>
+        <button type="button" data-k="err" data-v="ProgrammingError" aria-pressed="false">ProgrammingError</button>
+      </div>
+    </div>
+    <div class="lq-ctl">
+      <span class="lbl" id="lq-group">Show</span>
+      <div class="seg wide" role="group" aria-labelledby="lq-group">
+        <button type="button" data-k="group" data-v="lines" aria-pressed="true">Matching lines</button>
+        <button type="button" data-k="group" data-v="err" aria-pressed="false">Count by error_type</button>
+        <button type="button" data-k="group" data-v="inst" aria-pressed="false">Count by server</button>
+      </div>
+    </div>
+  </div>
+  <div class="lq-body">
+    <div class="lq-q">
+      <div class="lq-h">The query</div>
+      <pre class="plan-out lq-code" aria-label="Logs Insights query" set:html={queryText(START)} />
+    </div>
+    <div class="lq-r">
+      <div class="lq-h">Results from the log group <code>/quickcart/orders</code></div>
+      <div class="lq-res" tabindex="0" role="region" aria-label="Query results" set:html={resultHtml(START)} />
+    </div>
+  </div>
+  <div class={"viz-say" + (first.tone ? " " + first.tone : "")} aria-live="polite" set:html={first.html} />
+</div>
+
+<style is:global>
+  [data-viz="logs-query"] .viz-controls { align-items: flex-start; }
+  [data-viz="logs-query"] .lq-ctl { display: flex; flex-direction: column; gap: 5px; }
+  [data-viz="logs-query"] .lq-body { padding: 14px 16px 6px; display: grid; gap: 12px; }
+  [data-viz="logs-query"] .lq-h { font-size: 13.5px; font-weight: 700; color: var(--ink-2); margin-bottom: 6px; }
+  [data-viz="logs-query"] .lq-code { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  [data-viz="logs-query"] .lq-res { border: 1px solid var(--rule); border-radius: 10px; background: var(--bg); max-height: 360px; overflow: auto; }
+  [data-viz="logs-query"] .lq-lines { list-style: none; margin: 0; padding: 0; }
+  [data-viz="logs-query"] .lq-l { display: flex; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--rule); font-size: 12.5px; }
+  [data-viz="logs-query"] .lq-l:last-child { border-bottom: 0; }
+  [data-viz="logs-query"] .lq-l code { font-family: var(--mono); background: none; padding: 0; overflow-wrap: anywhere; color: var(--ink); }
+  [data-viz="logs-query"] .lq-l.err { background: var(--bad-bg); }
+  [data-viz="logs-query"] .lq-t { font-family: var(--mono); color: var(--ink-3); flex: none; }
+  [data-viz="logs-query"] .lq-tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+  [data-viz="logs-query"] .lq-tbl th { text-align: left; padding: 8px 12px; background: var(--sunk); color: var(--ink-2); font-size: 13px; border-bottom: 1px solid var(--rule); }
+  [data-viz="logs-query"] .lq-tbl td { padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+  [data-viz="logs-query"] .lq-none { margin: 0; padding: 14px; font-size: 14.5px; color: var(--ink-2); }
+</style>
+
+<script>
+  import { START, queryText, resultHtml, sayHtml, type Q } from "../../scripts/logs-query-viz";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="logs-query"]').forEach((root) => {
+    if (!once(root)) return;
+    const code = root.querySelector<HTMLElement>(".lq-code")!;
+    const res = root.querySelector<HTMLElement>(".lq-res")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-k]")];
+    const q: Q = { ...START };
+
+    function render() {
+      press(btns, (b) => (q as unknown as Record<string, string>)[b.dataset.k!] === b.dataset.v);
+      code.textContent = queryText(q);
+      res.innerHTML = resultHtml(q);
+      const s = sayHtml(q);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = s.html;
+    }
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-k]");
+      if (!b) return;
+      (q as unknown as Record<string, string>)[b.dataset.k!] = b.dataset.v!;
+      render();
+    });
+  }));
+</script>

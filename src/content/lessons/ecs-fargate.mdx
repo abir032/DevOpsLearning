@@ -1,0 +1,700 @@
+---
+time: 60 minutes
+level: Intermediate
+before: [ecr, load-balancers, security-groups]
+cost: paid
+quiz:
+  - q: A new task stops within a minute of starting, and its log stream in CloudWatch is empty. Where do you look first?
+    answer: 2
+    options:
+      - t: The application's logs
+        why: There are none. The app never started, so it never wrote anything.
+      - t: The load balancer's access logs
+        why: The task never got as far as receiving traffic.
+      - t: The stopped task's stopped reason
+        why: When ECS can't even start a task — no image, no permission, no route to ECR — it writes why on the stopped task. That's where the answer is.
+      - t: The EC2 instances list
+        why: On Fargate there are no instances of yours to look at.
+  - q: The order service needs to read a file from S3 while it runs. Which role gets that permission?
+    answer: 1
+    options:
+      - t: The execution role
+        why: The execution role is used by ECS before your app starts — to pull the image and send logs. Your code doesn't use it.
+      - t: The task role
+        why: The task role is what your code's AWS calls run as. Give it just s3:GetObject on that bucket.
+      - t: The service-linked role
+        why: That role lets ECS itself manage load balancer targets and network cards in your account. Never add your app's permissions to it.
+      - t: Both, to be safe
+        why: That gives ECS's own start-up steps permissions they never need. Least privilege means each role gets only what its job needs.
+  - q: Why must the target group's target type be "IP addresses" for Fargate?
+    answer: 0
+    options:
+      - t: Each Fargate task has its own network card and private IP, and there's no instance of yours to register
+        why: With the awsvpc network mode, the task itself is the thing on the network. The service registers each task's IP with the target group.
+      - t: Fargate tasks don't have ports
+        why: They do — 8080 here. The target group sends traffic to that port on each task's IP.
+      - t: Instance targets cost more
+        why: The target type doesn't change the price. It's about what exists to register.
+      - t: IP targets are faster
+        why: Speed isn't the reason. On Fargate, "Instance" isn't even possible.
+  - q: The service's desired count is 2. You stop one of its tasks by hand. What happens?
+    answer: 3
+    options:
+      - t: The service now runs 1 task, until you start another
+        why: That's what plain docker run would do. A service's job is to prevent exactly this.
+      - t: The service's desired count changes to 1
+        why: Stopping a task doesn't change what you asked for. Desired stays at 2.
+      - t: The whole service restarts
+        why: The other task keeps serving the whole time. Only the missing one is replaced.
+      - t: The service notices running is 1 but desired is 2, and starts a replacement
+        why: The service keeps comparing desired with running, and closes any gap. That's the self-healing.
+  - q: QuickCart's tasks run in public subnets with a public IP, but no NAT gateway. What stops anyone on the internet reaching port 8080 on a task directly?
+    answer: 1
+    options:
+      - t: Nothing — that's the risk of skipping the NAT gateway
+        why: The security group is still there, and it decides.
+      - t: The task's security group only allows port 8080 from the load balancer's security group
+        why: A public IP gives the task a way out to pull its image. The security group is what decides who may come in, and it names only the load balancer.
+      - t: Fargate blocks all inbound traffic by default
+        why: Fargate applies whatever security group you give the task. The protection comes from your rule.
+      - t: The public IP changes too often to be found
+        why: Scanners find new addresses within minutes. Relying on that would be no protection at all.
+  - q: In the task definition, what does cpu set to 256 mean?
+    answer: 2
+    options:
+      - t: 256 CPUs
+        why: ECS counts CPU in units where 1024 is one whole vCPU.
+      - t: 256 MB of memory for the CPU
+        why: Memory is a separate setting. This one is compute.
+      - t: A quarter of a vCPU
+        why: 1024 units is one vCPU, so 256 is a quarter. With it, Fargate allows 512, 1024 or 2048 MB of memory.
+      - t: The maximum requests per second
+        why: ECS has no such setting. The CPU number is only the task's share of a processor.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, launch month">
+
+QuickCart's order service runs in a container on one EC2 server. Leo started it with `docker run`, and it worked.
+
+At 3 a.m. on a Saturday, the container ran out of memory and stopped. Nothing started it again. Orders failed until Noor checked her phone at 8.
+
+On Monday, releasing the fix meant Leo logging in to the server, stopping the old container and starting the new one. For about a minute, there was no container at all. Customers saw errors.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Teams move to containers, then run them with plain `docker run` on one or two servers they look after by hand. It feels finished, because the container starts the same way every time.
+
+But nothing is watching. A container that stops stays stopped. A server that dies takes every container on it. Every release is a person typing commands on a live server. The container solved packaging. It didn't solve running.
+
+</Case>
+
+QuickCart needs something that keeps a set number of copies running, spreads them across zones, replaces any that die, and connects them to the load balancer. That's a **container orchestrator**. On AWS, the simplest one is **ECS**.
+
+</Part>
+
+<Part id="idea">
+
+**ECS**, Elastic Container Service, runs containers for you. You describe the container once, say how many copies you want, and ECS keeps that many running.
+
+### What an orchestrator does
+
+| Job | Without one | With ECS |
+|---|---|---|
+| Put a container somewhere to run | You pick a server and run `docker run` | ECS finds room for it |
+| Keep it running | Nobody notices when it stops | A stopped copy is replaced automatically |
+| Run several copies across zones | You start each one by hand | You set a number; ECS spreads them |
+| Connect copies to the load balancer | You register each server | ECS registers and removes them |
+| Release a new version | Stop old, start new, by hand | ECS replaces copies one batch at a time |
+
+### The four ECS words
+
+| Word | What it is | The EC2 version you already know |
+|---|---|---|
+| **Cluster** | A named group for your services. On Fargate it holds no servers | — |
+| **Task definition** | The recipe: which image, how much CPU and memory, which port, where logs go | A launch template |
+| **Task** | One running copy of a task definition | One EC2 instance |
+| **Service** | Keeps a set number of tasks running, and connects them to a load balancer | An Auto Scaling group |
+
+Every change to a task definition makes a new numbered **revision**, like `order-service:1`, `order-service:2`. Old revisions stay exactly as they were, so going back is just choosing an earlier number.
+
+### Fargate: no servers of your own
+
+ECS can run tasks in two ways:
+
+| | Fargate | EC2 |
+|---|---|---|
+| Servers | None that you see. AWS runs them | EC2 instances in your account |
+| Patching servers | AWS does it | You do it |
+| You pay for | The CPU and memory each task asks for, while it runs | Every instance, busy or not |
+| Cheapest when | Load is small, or goes up and down | Load is large and steady |
+
+QuickCart uses **Fargate**. It costs a little more per hour of computing, but there is no server to patch, resize or replace. [Auto scaling](/lessons/auto-scaling/) showed how much work servers are.
+
+### The task definition, every field explained
+
+This is QuickCart's task definition as JSON. The console builds exactly this from its form, and you can also paste it in directly, which you'll do in the lab.
+
+```json title="order-service-task.json" ph="111122223333"
+{
+  "family": "order-service",
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "256",
+  "memory": "512",
+  "runtimePlatform": {
+    "operatingSystemFamily": "LINUX",
+    "cpuArchitecture": "X86_64"
+  },
+  "executionRoleArn": "arn:aws:iam::111122223333:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8080, "protocol": "tcp" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/order-service",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
+```
+
+| Field | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `family` | The task definition's name. Each save adds a revision to this family | Required | Never; a new name is a new task definition |
+| `requiresCompatibilities` | Check that this recipe can run on Fargate | ECS doesn't check Fargate's rules until you try to run it | To `EC2` if you run on your own instances |
+| `networkMode` | `awsvpc`: each task gets its own network card and private IP in your subnet | Required on Fargate — it's the only mode Fargate supports | Only on the EC2 launch type |
+| `cpu` | CPU for the whole task, in units where 1024 is one vCPU. `256` is a quarter | Required on Fargate | When the app needs more. Load tests tell you |
+| `memory` | Memory for the whole task, in MB. Must be a size Fargate allows for that CPU | Required on Fargate | With `cpu`. Too little and the task is killed for running out of memory |
+| `runtimePlatform` | Linux on Intel/AMD processors — matches `--platform linux/amd64` from the build | Defaults to Linux on X86_64 | To `ARM64` if you build ARM images. Fargate on ARM costs less |
+| `executionRoleArn` | The IAM role ECS uses **before your app starts**: pull the image from ECR, send logs | ECS can't pull from a private ECR repository or send logs, so the task fails to start | Only to point at a different role |
+| `taskRoleArn` (not used here) | The IAM role **your code** uses for its own AWS calls | Your code has no AWS permissions. Fine here — the order service doesn't call AWS | When the app reads S3, a secret or a queue |
+| `containerDefinitions` | The containers in the task. Usually one | Required | To add a helper container, such as a log shipper |
+| `name` | The container's name. The service uses it to know which container gets load balancer traffic | Required | Rarely |
+| `image` | The full image URI to pull, with its tag | Required | For every release: `v1`, then `v2` |
+| `essential` | If this container stops, stop the whole task | Defaults to `true` | Set `false` only for optional helper containers |
+| `portMappings` | The port the app listens on inside the container, and its protocol | The load balancer has no port to send traffic to | If the app's port changes |
+| `logConfiguration` → `logDriver` | `awslogs`: send everything the app prints to CloudWatch Logs | Output is thrown away. You can't see why a task crashed | Rarely |
+| `awslogs-group` | The CloudWatch log group to write to. It must exist already | Required with `awslogs` | One group per service |
+| `awslogs-region` | The region of that log group | Required with `awslogs` | If logs go to another region |
+| `awslogs-stream-prefix` | Start of each log stream's name. Streams are named `ecs/app/TASK_ID`, so you can find one task's output | Required on Fargate | Rarely |
+
+Fargate only accepts certain CPU and memory pairs. For the small sizes:
+
+| `cpu` | Allowed `memory` |
+|---|---|
+| `256` (0.25 vCPU) | `512`, `1024`, `2048` |
+| `512` (0.5 vCPU) | `1024` to `4096`, in steps of 1024 |
+| `1024` (1 vCPU) | `2048` to `8192`, in steps of 1024 |
+
+### Every task gets its own IP address
+
+With `awsvpc`, a task is a full member of your VPC, like a small server:
+
+- Its **security group** applies to the task itself.
+- The load balancer's **target group must use IP addresses** as targets, not instances. There's no instance of yours to register.
+- Each task uses one IP in its subnet. A busy service can run a small subnet out of addresses.
+
+### Two roles, easy to mix up
+
+| Role | Used by | When | For | If it's wrong |
+|---|---|---|---|---|
+| **Execution role** | ECS itself | Before your app starts | Pull the image, send logs, fetch secrets | The task **never starts**. No app logs. The **stopped reason** says why |
+| **Task role** | Your code | While your app runs | Anything your code does in AWS | The task runs fine, then your app logs **AccessDenied** errors |
+
+### The service and the load balancer
+
+A **service** holds a **desired count** — how many tasks you want. It keeps comparing that number with what's running and closes the gap. A task stops, a zone has a problem, a release starts: it's always the same loop.
+
+When a task starts, the service registers its IP with the target group. The load balancer only sends it traffic once it passes the health check on `/health`. When a task stops, the service removes it from the target group first.
+
+<Key>You never start tasks yourself. You set a desired count, and the service keeps reality matching it.</Key>
+
+</Part>
+
+<Part id="see">
+
+Here is QuickCart's service with a desired count of 2. **Stop a task** and watch the service replace it. Change the desired count. Then break the **execution role** and stop a task again.
+
+<EcsService />
+
+**What to notice:** with the execution role broken, the running tasks carried on — they had pulled their image long before. Only new tasks failed, and they left no app logs at all. The only clue was the **stopped reason**. That's why it's the first place to look when a task won't start.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $2 a day while it runs: two small Fargate tasks (about $0.60 a day together), the load balancer (about $0.55 a day plus a little per request), and public IPv4 addresses (about $0.12 a day each). Prices are for us-east-1 and change, so check the pricing pages. Delete everything at the end.</Cost>
+
+<Note title="This lab costs money until you clean up">
+
+The load balancer and the Fargate tasks are billed every hour they exist, whether anyone uses them or not. Do the lab in one sitting, and do the **Clean up** step before you stop. If you're going straight on to [Releases without downtime](/lessons/zero-downtime-releases/), you can keep it running for that lesson.
+
+</Note>
+
+You'll run QuickCart's order service on Fargate: two tasks in two zones, behind a load balancer, with logs in CloudWatch. Then you'll stop a task and watch it come back. About 45 minutes.
+
+You need the `quickcart-orders` repository with the `v1` image from [Storing images: ECR](/lessons/ecr/). Check the region selector says **N. Virginia (us-east-1)**.
+
+To save money, this lab uses the **default VPC** that every account has, and gives each task a public IP, so it can pull its image from ECR without a NAT gateway. That's safe because the task's security group only lets the load balancer in. The [routing lesson](/lessons/routing/) shows the stricter version, with private subnets and a NAT gateway.
+
+<Steps>
+
+<Step title="Check the image is in ECR">
+
+<ConsolePath path="Amazon ECR > Private registry > Repositories > quickcart-orders" />
+
+<See>
+
+An image tagged **v1**. Copy the repository **URI** — you'll need it for the task definition.
+
+</See>
+
+</Step>
+
+<Step title="Create the execution role">
+
+Many accounts already have a role called `ecsTaskExecutionRole`. Look for it in **IAM → Roles** first. If it's there, skip to the next step.
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+| Field | Enter |
+|---|---|
+| Trusted entity type | **AWS service** |
+| Service or use case | **Elastic Container Service** |
+| Use case | **Elastic Container Service Task** |
+
+Choose **Next**. Search for and tick `AmazonECSTaskExecutionRolePolicy`, then **Next**.
+
+| Field | Enter |
+|---|---|
+| Role name | `ecsTaskExecutionRole` |
+
+Choose **Create role**.
+
+<See>
+
+The role in the list. Open it and copy its **ARN**. It looks like `arn:aws:iam::111122223333:role/ecsTaskExecutionRole`, with your account ID.
+
+</See>
+
+That managed policy allows exactly the execution role's job: pulling images from ECR and writing to CloudWatch Logs.
+
+</Step>
+
+<Step title="Create the log group">
+
+<ConsolePath path="CloudWatch > Logs > Log groups > Create log group" />
+
+| Field | Enter |
+|---|---|
+| Log group name | `/ecs/order-service` |
+| Retention setting | **1 week** |
+
+Choose **Create**. Without a retention setting, logs are kept, and billed, forever.
+
+<Mistake title="the log group doesn't exist">
+
+If the task definition names a log group that isn't there, every task fails before the app starts, with a stopped reason like:
+
+```output title="Stopped reason, roughly"
+ResourceInitializationError: failed to validate logger args: The specified log group does not exist.
+```
+
+**Why:** the execution role's policy may write to a log group, but not create one.
+
+**The fix:** create the log group with exactly the name in the task definition, then let the service start new tasks.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the two security groups">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+First, the load balancer's:
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-alb-sg` |
+| Description | `QuickCart load balancer` |
+| VPC | the default VPC |
+
+| Inbound rule type | Port | Source |
+|---|---|---|
+| HTTP | 80 | **Anywhere-IPv4** |
+
+Choose **Create security group**. Then create a second one, for the tasks:
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-app-sg` |
+| Description | `QuickCart order service tasks` |
+| VPC | the default VPC |
+
+| Inbound rule type | Port range | Source |
+|---|---|---|
+| Custom TCP | `8080` | **Custom**, then choose `quickcart-alb-sg` |
+
+Leave outbound rules as they are on both. The tasks need to reach ECR on the way out.
+
+<See>
+
+Two security groups. `quickcart-app-sg` has one inbound rule, naming the load balancer's group rather than any address. Tasks can come and go; the rule still fits.
+
+</See>
+
+</Step>
+
+<Step title="Create the target group">
+
+<ConsolePath path="EC2 > Target groups > Create target group" />
+
+| Field | Enter |
+|---|---|
+| Choose a target type | **IP addresses** |
+| Target group name | `quickcart-orders-tg` |
+| Protocol : Port | **HTTP** : `8080` |
+| VPC | the default VPC |
+| Health check path | `/health` |
+
+Open **Advanced health check settings**:
+
+| Field | Enter |
+|---|---|
+| Healthy threshold | `2` |
+| Unhealthy threshold | `2` |
+| Interval | `10` seconds |
+
+Choose **Next**. On the **Register targets** page, **don't register anything** — remove any IP the page filled in. The ECS service adds its tasks itself. Choose **Create target group**.
+
+Then make it drain faster:
+
+<ConsolePath path="EC2 > Target groups > quickcart-orders-tg > Attributes > Edit" />
+
+| Field | Enter |
+|---|---|
+| Deregistration delay | `30` seconds |
+
+Choose **Save changes**. The default of 300 seconds makes every stop and every release wait five minutes. [Releases without downtime](/lessons/zero-downtime-releases/) explains how to choose the number.
+
+</Step>
+
+<Step title="Create the load balancer">
+
+<ConsolePath path="EC2 > Load balancers > Create load balancer > Application Load Balancer > Create" />
+
+| Field | Enter |
+|---|---|
+| Load balancer name | `quickcart-alb` |
+| Scheme | **Internet-facing** |
+| Load balancer IP address type | **IPv4** |
+| VPC | the default VPC |
+| Availability Zones and subnets | tick **us-east-1a** and **us-east-1b** |
+| Security groups | `quickcart-alb-sg` only — remove `default` |
+| Listener | **HTTP** : `80`, default action **Forward to** `quickcart-orders-tg` |
+
+Choose **Create load balancer**. It takes a few minutes to become **Active**. Carry on meanwhile.
+
+</Step>
+
+<Step title="Create the cluster">
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > Create cluster" />
+
+| Field | Enter |
+|---|---|
+| Cluster name | `quickcart` |
+| Infrastructure | **AWS Fargate (serverless)** only |
+
+Choose **Create**.
+
+<See>
+
+The cluster **quickcart**, active, with 0 services and 0 tasks. Look at **EC2 → Instances**: nothing new. On Fargate a cluster is just a name.
+
+</See>
+
+<Mistake title="the very first cluster in an account fails">
+
+```output title="Cluster creation fails with"
+Unable to assume the service linked role. Please verify that the ECS service linked role exists.
+```
+
+**Why:** the first time an account uses ECS, AWS creates a role called `AWSServiceRoleForECS` for ECS to manage network cards and load balancer targets. Sometimes it isn't ready in time.
+
+**The fix:** wait a minute and create the cluster again. If it still fails, create the role yourself. This is a CLI command because the role belongs to AWS's service, not to you:
+
+```sh
+aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `aws iam create-service-linked-role` | create a role that an AWS service uses on your behalf |
+| `--aws-service-name ecs.amazonaws.com` | the service it belongs to: ECS |
+
+If it answers that the role name has been taken, the role already exists and AWS was just slow. Try the cluster again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the task definition">
+
+<ConsolePath path="Amazon Elastic Container Service > Task definitions > Create new task definition > Create new task definition with JSON" />
+
+Replace everything in the editor with the task definition from [the idea](#idea), above. Put **your** account ID in both highlighted places: the role ARN and the image URI.
+
+Choose **Create**.
+
+<See>
+
+**order-service:1** — revision 1 of the `order-service` family. The **JSON** tab shows your definition, with a few extra fields ECS filled in with their defaults.
+
+</See>
+
+<Mistake title="an image built on an Apple-chip Mac without --platform">
+
+The task starts, then stops at once. Its log stream in CloudWatch holds one line:
+
+```output
+exec /usr/local/bin/gunicorn: exec format error
+```
+
+**Why:** the image was built for ARM processors, and the task definition asks for X86_64. The program inside can't run on that processor.
+
+**The fix:** build again with `--platform linux/amd64`, push it under a **new** tag (the repository is immutable), and make a new task definition revision that uses that tag.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the service">
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > Create" />
+
+The form is long, and AWS moves its sections around from time to time. Find each field by its name.
+
+| Field | Enter |
+|---|---|
+| Task definition family | `order-service` |
+| Task definition revision | the latest, **1** |
+| Service name | `order-service` |
+| Compute options | **Launch type** |
+| Launch type | **FARGATE** |
+| Platform version | **LATEST** |
+| Desired tasks | `2` |
+| Health check grace period | `30` seconds |
+
+Leave **Deployment configuration** on its defaults. [Releases without downtime](/lessons/zero-downtime-releases/) goes through every setting in it.
+
+Under **Networking**:
+
+| Field | Enter |
+|---|---|
+| VPC | the default VPC |
+| Subnets | only the **us-east-1a** and **us-east-1b** subnets — remove the others |
+| Security group | **Use an existing security group**, then `quickcart-app-sg` only — remove `default` |
+| Public IP | **Turned on** |
+
+Under **Load balancing**:
+
+| Field | Enter |
+|---|---|
+| Use load balancing | ticked |
+| Load balancer type | **Application Load Balancer** |
+| Container | `app 8080:8080` |
+| Application Load Balancer | **Use an existing load balancer**, then `quickcart-alb` |
+| Listener | **Use an existing listener**, then `80:HTTP` |
+| Target group | **Use an existing target group**, then `quickcart-orders-tg` |
+
+Choose **Create**.
+
+| Setting | In plain words |
+|---|---|
+| Desired tasks 2 | Always keep two copies running |
+| Health check grace period 30 | Give a new task 30 seconds to start before its failed health checks count against it |
+| Public IP on | Lets the task reach ECR to pull its image, without a NAT gateway |
+| Security group `quickcart-app-sg` | Only the load balancer may reach the task |
+
+<See>
+
+After one to three minutes, the service shows **2/2 tasks running**. On the **Tasks** tab, two tasks, one in each zone, each with its own private IP. In **EC2 → Target groups → quickcart-orders-tg → Targets**, two IP addresses, both **healthy**.
+
+</See>
+
+<Mistake title="targets unhealthy, tasks keep being replaced">
+
+```output title="Target group → Targets → Health status details"
+Request timed out
+```
+
+**Why:** "timed out" means the health check never reached the app. That's the network, not the code. The usual causes: the tasks were given `quickcart-alb-sg` or `default` instead of `quickcart-app-sg`, or the rule in `quickcart-app-sg` has the wrong port.
+
+**The fix:** check the task's security group on the **Tasks** tab, and that `quickcart-app-sg` allows port `8080` from `quickcart-alb-sg`. The service keeps retrying, so it recovers on its own once the rule is right.
+
+</Mistake>
+
+</Step>
+
+<Step title="Reach it through the load balancer">
+
+<ConsolePath path="EC2 > Load balancers > quickcart-alb" />
+
+Copy the **DNS name**. It looks like `quickcart-alb-1234567890.us-east-1.elb.amazonaws.com`.
+
+```sh ph="ALB_DNS_NAME"
+curl ALB_DNS_NAME/
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch a web page and print it |
+| `ALB_DNS_NAME` | replace this with the DNS name you copied. With no `http://` in front, curl uses plain HTTP |
+| `/` | the home page, which says which task answered |
+
+```output
+{"served_by":"ip-172-31-8-41.ec2.internal","service":"order-service","version":"v1"}
+```
+
+Run it a few more times. `served_by` is the name of the task that answered — yours will differ — and it switches between your two tasks. The load balancer is sharing the traffic.
+
+</Step>
+
+<Step title="Stop a task and watch it come back">
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > order-service > Tasks" />
+
+Tick one task, then choose **Stop** and **Stop selected**.
+
+<See>
+
+The service shows 1 running and 2 desired. Within about a minute a new task appears, goes from **Provisioning** to **Pending** to **Running**, and the count is back to 2. Nobody started it.
+
+</See>
+
+Change the filter from running tasks to **stopped** tasks, and open the one you stopped. Its **Stopped reason** says it was stopped by a user. When a task fails for any other reason — a missing image, a missing permission — this is where ECS writes why.
+
+</Step>
+
+<Step title="Read the logs">
+
+<ConsolePath path="CloudWatch > Logs > Log groups > /ecs/order-service" />
+
+Open the newest log stream. Its name is `ecs/app/` followed by the task's ID.
+
+```output title="The stream shows gunicorn starting"
+[INFO] Starting gunicorn 23.0.0
+[INFO] Listening at: http://0.0.0.0:8080
+[INFO] Using worker: sync
+[INFO] Booting worker with pid: 7
+[INFO] Booting worker with pid: 8
+```
+
+Each real line starts with a time and a process number, and yours differ. Everything the app prints ends up here, and it stays after the task is gone.
+
+</Step>
+
+<Step title="Change the desired count">
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > order-service > Update service" />
+
+| Field | Enter |
+|---|---|
+| Desired tasks | `3` |
+
+Choose **Update**.
+
+<See>
+
+A third task starts, and a third target appears in the target group. Change it back to `2` the same way: the service stops one task, draining it from the load balancer first.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+**If you're going straight on to [Releases without downtime](/lessons/zero-downtime-releases/)**, keep everything and clean up at the end of that lesson. Otherwise, delete it all now, in this order.
+
+**1. The service.**
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Services > order-service > Delete service" />
+
+If the console asks, tick **Force delete** (or first update the service to 0 desired tasks), then confirm. Wait until the service and its tasks are gone.
+
+**2. The cluster.**
+
+<ConsolePath path="Amazon Elastic Container Service > Clusters > quickcart > Delete cluster" />
+
+Type the confirmation text it asks for, and delete.
+
+**3. The task definition.** Open **Task definitions → order-service**, tick every revision, and choose **Actions → Deregister**. Then, with them still ticked, choose **Actions → Delete**.
+
+**4. The load balancer.** In **EC2 → Load balancers**, tick `quickcart-alb`, choose **Actions → Delete load balancer**, and type `confirm`.
+
+**5. The target group.** In **EC2 → Target groups**, tick `quickcart-orders-tg` and choose **Actions → Delete**.
+
+**6. The security groups.** In **EC2 → Security Groups**, delete `quickcart-app-sg` first, then `quickcart-alb-sg`. The app's group refers to the load balancer's, so it has to go first. If one won't delete, wait a minute — a network card from a stopped task is still letting go of it.
+
+**7. The log group.** In **CloudWatch → Log groups**, tick `/ecs/order-service`, then **Actions → Delete log group(s)**.
+
+**8. The image repository**, unless a later lesson needs it: **Amazon ECR → Repositories**, tick `quickcart-orders`, **Delete**, and type `delete`.
+
+The `ecsTaskExecutionRole` role is free to keep. Later lessons use it.
+
+<See>
+
+**ECS → Clusters** is empty. **EC2 → Load balancers** and **EC2 → Target groups** are empty. **EC2 → Network interfaces** shows nothing that mentions ECS. Nothing from this lab is still billing.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term or setting | In one line |
+|---|---|
+| Cluster | A named group for services. Holds no servers on Fargate |
+| Task definition | The recipe: image, CPU, memory, port, logs, roles. Every change is a new revision |
+| Task | One running copy of a task definition |
+| Service | Keeps the desired count of tasks running and registered with the load balancer |
+| Fargate | AWS runs the servers. You pay per task, for what it asks for |
+| `awsvpc` | Each task gets its own network card, private IP and security group |
+| Target type | **IP addresses** for Fargate |
+| `cpu` `256` / `memory` `512` | A quarter of a vCPU and 512 MB |
+| Execution role | ECS's role: pull the image, send logs, before the app starts |
+| Task role | Your code's role, while it runs |
+| Task stops with no logs | Read the **stopped reason** |
+| Targets say "Request timed out" | Security groups or port, not code |
+| `exec format error` | Image built for the wrong processor. Build with `--platform linux/amd64` |
+
+</Cheat>
+
+</Part>

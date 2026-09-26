@@ -1,0 +1,201 @@
+---
+/*
+ * IAM: how AWS decides allow or deny.
+ * Teaches: everything is denied by default, an Allow opens one door,
+ * and an explicit Deny beats every Allow.
+ */
+const STATEMENTS = [
+  { id: "read", effect: "Allow", action: "s3:GetObject", resource: "arn:aws:s3:::quickcart-menu-photos-111122223333/*", note: "Read menu photos. The least-privilege policy", on: true },
+  { id: "all", effect: "Allow", action: "s3:*", resource: "*", note: "Everything in S3. The shortcut people reach for", on: false },
+  { id: "deny", effect: "Deny", action: "s3:DeleteObject", resource: "*", note: "Never delete anything. A guard rail", on: false },
+];
+---
+<div class="viz" data-track="cloud" data-viz="iam-evaluator">
+  <div class="viz-controls">
+    <span class="lbl" id="ie-lbl">The request</span>
+    <div class="seg wide" role="group" aria-labelledby="ie-lbl">
+      <button type="button" data-req="get" aria-pressed="true">Read a menu photo</button>
+      <button type="button" data-req="del" aria-pressed="false">Delete a menu photo</button>
+      <button type="button" data-req="state" aria-pressed="false">Read the Terraform state</button>
+    </div>
+    <button class="btn line" type="button" data-act="eval">Check the request</button>
+  </div>
+  <div class="viz-stage">
+    <div class="ie">
+      <div class="ie-col">
+        <p class="ie-h" id="ie-req-h">The API server asks to</p>
+        <div class="ie-req" aria-labelledby="ie-req-h">
+          <div><span class="ie-k">Action</span> <code data-n="action">s3:GetObject</code></div>
+          <div><span class="ie-k">Resource</span> <code data-n="resource">arn:aws:s3:::quickcart-menu-photos-111122223333/burger.jpg</code></div>
+        </div>
+        <p class="ie-h" id="ie-pol-h">Statements attached to its role</p>
+        <p class="ie-tip">Choose a statement to attach or detach it.</p>
+        <ul class="ie-list" aria-labelledby="ie-pol-h">
+          {STATEMENTS.map((s) => (
+            <li>
+              <button type="button" class:list={["ie-st", s.effect === "Deny" ? "deny" : "allow"]} data-st={s.id} aria-pressed={String(s.on)}>
+                <span class="ie-att">{s.on ? "Attached" : "Not attached"}</span>
+                <span class="ie-eff">{s.effect}</span>
+                <span class="ie-line"><span class="ie-k">Action</span> <code>{s.action}</code></span>
+                <span class="ie-line"><span class="ie-k">Resource</span> <code>{s.resource}</code></span>
+                <span class="ie-note">{s.note}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div class="ie-col">
+        <p class="ie-h" id="ie-steps-h">How AWS decides</p>
+        <ol class="ie-steps" aria-labelledby="ie-steps-h">
+          <li data-n="s1"><b>Start at deny.</b> Every request is refused unless something allows it.</li>
+          <li data-n="s2"><b>Any matching Deny?</b> If so, the answer is deny. Nothing can override it.</li>
+          <li data-n="s3"><b>Any matching Allow?</b> If so, the answer is allow.</li>
+          <li data-n="s4"><b>Nothing matched?</b> Still deny. This is the implicit deny.</li>
+        </ol>
+        <div class="ie-verdict" data-n="verdict">Not checked yet</div>
+      </div>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Pick a request, attach or detach statements, then choose <b>Check the request</b>.</div>
+</div>
+
+<style is:global>
+  [data-viz="iam-evaluator"] .ie { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; padding: 6px 4px 10px; }
+  [data-viz="iam-evaluator"] .ie-h { font-size: 14px; margin: 4px 0 8px; color: var(--ink-2); font-weight: 800; }
+  [data-viz="iam-evaluator"] .ie-tip { font-size: 13px; color: var(--ink-3); margin: -4px 0 8px; }
+  [data-viz="iam-evaluator"] .ie-k { font-size: 12px; font-weight: 700; color: var(--ink-3); display: inline-block; min-width: 64px; }
+  [data-viz="iam-evaluator"] code { overflow-wrap: anywhere; font-size: 12.5px; }
+  [data-viz="iam-evaluator"] .ie-req { border: 1px solid var(--rule-2); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; background: var(--bg); display: grid; gap: 4px; }
+  [data-viz="iam-evaluator"] .ie-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  [data-viz="iam-evaluator"] .ie-st { display: grid; gap: 3px; width: 100%; text-align: left; cursor: pointer; background: var(--surface); border: 1.5px dashed var(--rule-2); border-radius: 10px; padding: 9px 12px; transition: border-color .2s, background .2s; }
+  [data-viz="iam-evaluator"] .ie-st[aria-pressed="true"] { border-style: solid; }
+  [data-viz="iam-evaluator"] .ie-st.allow[aria-pressed="true"] { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="iam-evaluator"] .ie-st.deny[aria-pressed="true"] { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="iam-evaluator"] .ie-st.match { box-shadow: 0 0 0 3px var(--cloud); }
+  [data-viz="iam-evaluator"] .ie-att { font-size: 12px; font-weight: 800; color: var(--ink-2); }
+  [data-viz="iam-evaluator"] .ie-eff { font-weight: 800; font-size: 15px; }
+  [data-viz="iam-evaluator"] .ie-st.allow .ie-eff { color: var(--ok); }
+  [data-viz="iam-evaluator"] .ie-st.deny .ie-eff { color: var(--bad); }
+  [data-viz="iam-evaluator"] .ie-note { font-size: 13px; color: var(--ink-2); }
+  [data-viz="iam-evaluator"] .ie-steps { margin: 0; padding: 0 0 0 22px; display: grid; gap: 8px; font-size: 14.5px; }
+  [data-viz="iam-evaluator"] .ie-steps li { padding: 6px 8px; border-radius: 8px; border: 1.5px solid transparent; }
+  [data-viz="iam-evaluator"] .ie-steps li.now { border-color: var(--cloud); background: color-mix(in srgb, var(--cloud) 10%, var(--surface)); }
+  [data-viz="iam-evaluator"] .ie-steps li.done { color: var(--ink-3); }
+  [data-viz="iam-evaluator"] .ie-verdict { margin-top: 14px; padding: 12px; border-radius: 10px; border: 1.5px solid var(--rule-2); font-weight: 800; font-size: 16px; text-align: center; color: var(--ink-2); }
+  [data-viz="iam-evaluator"] .ie-verdict.ok { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); }
+  [data-viz="iam-evaluator"] .ie-verdict.bad { border-color: var(--bad); background: var(--bad-bg); color: var(--bad); }
+  @media (max-width: 700px) {
+    [data-viz="iam-evaluator"] .ie { grid-template-columns: 1fr; }
+  }
+</style>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type St = { id: string; effect: "Allow" | "Deny"; action: string; resource: string };
+  const STS: St[] = [
+    { id: "read", effect: "Allow", action: "s3:GetObject", resource: "arn:aws:s3:::quickcart-menu-photos-111122223333/*" },
+    { id: "all", effect: "Allow", action: "s3:*", resource: "*" },
+    { id: "deny", effect: "Deny", action: "s3:DeleteObject", resource: "*" },
+  ];
+  const REQS: Record<string, { action: string; resource: string; say: string }> = {
+    get: { action: "s3:GetObject", resource: "arn:aws:s3:::quickcart-menu-photos-111122223333/burger.jpg", say: "read a menu photo" },
+    del: { action: "s3:DeleteObject", resource: "arn:aws:s3:::quickcart-menu-photos-111122223333/burger.jpg", say: "delete a menu photo" },
+    state: { action: "s3:GetObject", resource: "arn:aws:s3:::quickcart-tfstate-111122223333/dev/terraform.tfstate", say: "read the Terraform state file, which holds passwords" },
+  };
+  /* A * in a policy matches any run of characters. */
+  const glob = (pat: string, val: string) =>
+    new RegExp("^" + pat.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$").test(val);
+
+  onPage(() => {
+    const stops: Array<() => void> = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="iam-evaluator"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const reqBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-req]")];
+      const stBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-st]")];
+      const steps = ["s1", "s2", "s3", "s4"].map((n) => q<HTMLLIElement>(n));
+      const verdict = q<HTMLElement>("verdict");
+      const evalBtn = root.querySelector<HTMLButtonElement>("[data-act=eval]")!;
+      let req = "get";
+      let run = 0;
+      stops.push(() => run++);
+
+      const attached = () => STS.filter((s) => root.querySelector(`[data-st="${s.id}"]`)!.getAttribute("aria-pressed") === "true");
+      function clear() {
+        steps.forEach((s) => s.classList.remove("now", "done"));
+        stBtns.forEach((b) => b.classList.remove("match"));
+        verdict.className = "ie-verdict";
+        verdict.textContent = "Not checked yet";
+        evalBtn.disabled = false;
+      }
+      function mark(i: number) {
+        steps.forEach((s, j) => { s.classList.toggle("now", j === i); s.classList.toggle("done", j < i); });
+      }
+      function glow(list: St[]) {
+        stBtns.forEach((b) => b.classList.toggle("match", list.some((s) => s.id === b.dataset.st)));
+      }
+      function final(ok: boolean, text: string) {
+        verdict.className = "ie-verdict " + (ok ? "ok" : "bad");
+        verdict.textContent = text;
+      }
+
+      async function check() {
+        const me = ++run; clear(); evalBtn.disabled = true;
+        const live = () => me === run;
+        const r = REQS[req];
+        const on = attached();
+        const hits = on.filter((s) => glob(s.action, r.action) && glob(s.resource, r.resource));
+        const denies = hits.filter((s) => s.effect === "Deny");
+        const allows = hits.filter((s) => s.effect === "Allow");
+
+        mark(0);
+        tell(say, "Check 1 of 3", `The API server asks to <b>${r.say}</b>. AWS starts from <b>deny</b>.`);
+        await beat(900); if (!live()) return;
+        mark(1); glow(denies);
+        if (denies.length) {
+          final(false, "Denied: explicit Deny");
+          tell(say, "Check 2 of 3: explicit deny", `A <b>Deny</b> statement matches <code>${r.action}</code>. The answer is deny, and AWS stops looking. ${allows.length ? "It doesn't matter that an Allow matches too: <b>an explicit Deny always wins.</b>" : ""}`, "bad");
+          evalBtn.disabled = false; return;
+        }
+        tell(say, "Check 2 of 3", "No Deny statement matches this request. Now AWS looks for an Allow.");
+        await beat(900); if (!live()) return;
+        mark(2); glow(allows);
+        if (allows.length) {
+          const broad = allows.every((s) => s.id === "all");
+          final(true, "Allowed");
+          tell(say, "Check 3 of 3: allowed", broad
+            ? `Allowed, but only because of <code>s3:*</code> on <code>*</code>. That statement also lets this server ${req === "state" ? "read every secret in the Terraform state" : "touch every bucket in the account"}. <b>It works, and it's far too much.</b>`
+            : "An Allow matches this exact action on this exact resource. <b>Allowed</b>, and nothing more than that.", broad ? "bad" : "good");
+          evalBtn.disabled = false; return;
+        }
+        await beat(500); if (!live()) return;
+        mark(3); glow([]);
+        final(false, "Denied: nothing allowed it");
+        tell(say, "Check 3 of 3: implicit deny", `No statement allows <code>${r.action}</code> on this resource, so the answer stays <b>deny</b>. You never have to write "deny everything else". It is the default.`, on.length ? "good" : "bad");
+        evalBtn.disabled = false;
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.req) {
+          run++; req = b.dataset.req; press(reqBtns, (x) => x === b); clear();
+          q<HTMLElement>("action").textContent = REQS[req].action;
+          q<HTMLElement>("resource").textContent = REQS[req].resource;
+          tell(say, "New request", `The API server now wants to <b>${REQS[req].say}</b>. Choose <b>Check the request</b>.`);
+        } else if (b.dataset.st) {
+          run++;
+          const on = b.getAttribute("aria-pressed") !== "true";
+          b.setAttribute("aria-pressed", String(on));
+          b.querySelector(".ie-att")!.textContent = on ? "Attached" : "Not attached";
+          clear();
+          tell(say, on ? "Statement attached" : "Statement detached", `${on ? "Attached" : "Detached"}: <b>${b.querySelector(".ie-eff")!.textContent} ${b.querySelector("code")!.textContent}</b>. Choose <b>Check the request</b> to see what changes.`);
+        } else if (b.dataset.act === "eval") check();
+      });
+    });
+    return () => stops.forEach((f) => f());
+  });
+</script>

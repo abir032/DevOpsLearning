@@ -1,0 +1,5 @@
+---
+interface Props { title: string; cleanup?: boolean }
+const { title, cleanup = false } = Astro.props;
+---
+<li class:list={["step", { cleanup }]}><h3>{cleanup ? <span class="sr">Clean-up step: </span> : null}{title}</h3><slot /></li>

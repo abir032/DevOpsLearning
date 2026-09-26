@@ -1,0 +1,121 @@
+---
+/*
+ * Terraform variables: where a value comes from.
+ * Teaches: when several places set a variable, the one read last wins —
+ * and environment variables sit near the bottom, not the top.
+ */
+import { SOURCES, START, precStack, precResult, precSay, precCommand } from "../../scripts/tf-precedence";
+const s = START;
+---
+<div class="viz" data-track="code" data-viz="tf-precedence">
+  <div class="viz-controls">
+    <span class="lbl" id="pr-lbl">Set the value in</span>
+    <div class="pr-toggles" role="group" aria-labelledby="pr-lbl">
+      {SOURCES.map((x) => (
+        <button type="button" class="pr-tog" data-src={x.id} aria-pressed={String(s.on[x.id])}>{x.name}</button>
+      ))}
+    </div>
+    <span class="lbl" id="pr-ord">Command line order</span>
+    <div class="seg" role="group" aria-labelledby="pr-ord">
+      <button type="button" data-ord="cli-last" aria-pressed="true">-var-file, then -var</button>
+      <button type="button" data-ord="file-last" aria-pressed="false">-var, then -var-file</button>
+    </div>
+    <button class="btn" type="button" data-a="all">Turn all on</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <div class="pr-stage">
+    <div class="pr-col">
+      <p class="pr-cap"><span>Read last, wins</span><span aria-hidden="true">↑</span></p>
+      <ol class="pr-stack" set:html={precStack(s)} />
+      <p class="pr-cap"><span>Read first, loses</span></p>
+    </div>
+    <div class="pr-col">
+      <pre class="plan-out pr-cmd" aria-label="The command you would run" set:html={precCommand(s)} />
+      <div class="pr-result" set:html={precResult(s)} />
+    </div>
+  </div>
+  <div class="viz-say good" aria-live="polite" set:html={precSay(s)} />
+</div>
+
+<script>
+  import { START, precStack, precResult, precSay, precCommand, type PrecState } from "../../scripts/tf-precedence";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-precedence"]').forEach((root) => {
+    if (!once(root)) return;
+    const stack = root.querySelector<HTMLElement>(".pr-stack")!;
+    const res = root.querySelector<HTMLElement>(".pr-result")!;
+    const cmd = root.querySelector<HTMLElement>(".pr-cmd")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const togs = [...root.querySelectorAll<HTMLButtonElement>(".pr-tog")];
+    const ords = [...root.querySelectorAll<HTMLButtonElement>("[data-ord]")];
+    let s: PrecState = structuredClone(START);
+
+    function render() {
+      stack.innerHTML = precStack(s);
+      res.innerHTML = precResult(s);
+      cmd.innerHTML = precCommand(s);
+      say.innerHTML = precSay(s);
+      const none = !Object.values(s.on).some(Boolean);
+      say.className = "viz-say " + (none ? "bad" : "good");
+      press(togs, (b) => s.on[b.dataset.src!]);
+      press(ords, (b) => (b.dataset.ord === "cli-last") === s.cliLast);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.src) s.on[b.dataset.src] = !s.on[b.dataset.src];
+      else if (b.dataset.ord) s.cliLast = b.dataset.ord === "cli-last";
+      else if (b.dataset.a === "all") Object.keys(s.on).forEach((k) => (s.on[k] = true));
+      else if (b.dataset.a === "reset") s = structuredClone(START);
+      else return;
+      render();
+    });
+  }));
+</script>
+
+<style is:global>
+  [data-viz="tf-precedence"] .pr-toggles { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+  [data-viz="tf-precedence"] .pr-tog {
+    border: 1px solid var(--rule-2); background: var(--surface); color: var(--ink-2);
+    border-radius: 8px; padding: 7px 11px; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  [data-viz="tf-precedence"] .pr-tog::before { content: "○ "; }
+  [data-viz="tf-precedence"] .pr-tog[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  [data-viz="tf-precedence"] .pr-tog[aria-pressed="true"]::before { content: "● "; }
+  [data-viz="tf-precedence"] .pr-stage { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 14px; padding: 14px 16px; }
+  [data-viz="tf-precedence"] .pr-cap { display: flex; justify-content: space-between; margin: 0 0 6px; font-size: 12.5px; font-weight: 700; color: var(--ink-3); }
+  [data-viz="tf-precedence"] .pr-cap:last-child { margin: 6px 0 0; }
+  [data-viz="tf-precedence"] .pr-stack { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  [data-viz="tf-precedence"] .pr-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px;
+    border: 1px solid var(--rule); background: var(--bg); transition: background .2s, border-color .2s;
+  }
+  [data-viz="tf-precedence"] .pr-rank {
+    flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+    font-size: 12.5px; font-weight: 800; border: 2px solid var(--rule-2); color: var(--ink-3); background: var(--surface);
+  }
+  [data-viz="tf-precedence"] .pr-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 14px; }
+  [data-viz="tf-precedence"] .pr-body code { font-family: var(--mono); font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+  [data-viz="tf-precedence"] .pr-tag { flex: none; font-size: 12px; font-weight: 800; color: var(--ink-3); }
+  [data-viz="tf-precedence"] .pr-row.off { opacity: .55; border-style: dashed; }
+  [data-viz="tf-precedence"] .pr-row.lose .pr-body b { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+  [data-viz="tf-precedence"] .pr-row.lose .pr-tag { color: var(--warn); }
+  [data-viz="tf-precedence"] .pr-row.win { border-color: var(--code); background: var(--surface); box-shadow: 0 0 0 1px var(--code) inset; }
+  [data-viz="tf-precedence"] .pr-row.win .pr-rank { background: var(--code); border-color: var(--code); color: var(--on-code); }
+  [data-viz="tf-precedence"] .pr-row.win .pr-tag { color: var(--code-t); }
+  [data-viz="tf-precedence"] .pr-cmd { margin: 0 0 12px; }
+  [data-viz="tf-precedence"] .pr-result {
+    font-family: var(--mono); font-size: 15px; padding: 14px; border-radius: 10px;
+    border: 2px solid var(--code); background: var(--bg); overflow-wrap: anywhere;
+  }
+  [data-viz="tf-precedence"] .pr-result b { color: var(--code-t); font-size: 18px; }
+  @media (max-width: 720px) {
+    [data-viz="tf-precedence"] .pr-stage { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-viz="tf-precedence"] .pr-row { transition: none; }
+  }
+</style>

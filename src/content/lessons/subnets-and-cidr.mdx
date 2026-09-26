@@ -1,0 +1,385 @@
+---
+time: 35 minutes
+level: Beginner
+before: [vpc]
+cost: free
+quiz:
+  - q: How many addresses are in 10.0.8.0/22?
+    answer: 2
+    options:
+      - t: "22"
+        why: 22 is the number of fixed bits, not the number of addresses.
+      - t: "256"
+        why: That's a /24. A /22 has two more free bits, so it is four times bigger.
+      - t: "1,024"
+        why: 22 bits are fixed, so 32 − 22 = 10 bits are free. Two to the power of 10 is 1,024.
+      - t: "4,096"
+        why: That's a /20, with 12 free bits.
+  - q: A subnet is 10.0.11.0/24. How many addresses can you actually give to servers?
+    answer: 1
+    options:
+      - t: "256"
+        why: That's the total. AWS keeps five of them in every subnet.
+      - t: "251"
+        why: AWS reserves the first four addresses (.0, .1, .2, .3) and the last one (.255). 256 − 5 = 251.
+      - t: "254"
+        why: That's the usual answer on a home network, which keeps two. AWS keeps five.
+      - t: "255"
+        why: More than one address is reserved. AWS keeps five.
+  - q: Why does AWS reject 10.0.1.0/20?
+    answer: 3
+    options:
+      - t: A /20 is too big for a subnet
+        why: A /20 is fine. AWS allows subnets from /16 down to /28.
+      - t: The third number must be 0
+        why: Not in general. 10.0.16.0/20 is valid, and its third number is 16.
+      - t: Subnets must be /24
+        why: /24 is common, but it's a choice, not a rule.
+      - t: A /20 holds 4,096 addresses, so it must start on a multiple of 4,096 — 10.0.0.0 or 10.0.16.0, not 10.0.1.0
+        why: Every block starts on its own boundary. For a /20 that means the third number is a multiple of 16. 10.0.1.0 sits in the middle of the block 10.0.0.0/20.
+  - q: QuickCart is adding a VPC in a second region. Which range should it use, if the first VPC is 10.0.0.0/16?
+    answer: 0
+    options:
+      - t: 10.1.0.0/16
+        why: It doesn't share a single address with 10.0.0.0/16, so the two VPCs can be connected later without renumbering.
+      - t: 10.0.0.0/16, the same, so the setups match
+        why: Matching ranges look tidy, but two VPCs with the same range can never be peered or joined through a transit gateway.
+      - t: 10.0.128.0/17
+        why: That is inside 10.0.0.0/16, so it overlaps the first VPC.
+      - t: It doesn't matter — regions are separate
+        why: They're separate until you want them to talk. Then overlapping ranges block the connection.
+  - q: You made the app subnets /24 and the service now needs far more addresses. What can you do?
+    answer: 1
+    options:
+      - t: Edit each subnet and change /24 to /22
+        why: A subnet's range can't be changed after it's created.
+      - t: Create new, bigger subnets in unused space, move the servers, then delete the old ones
+        why: This is why you leave space free when you plan. With room left in the VPC, growing is a migration, not a rebuild.
+      - t: Nothing — a VPC can never grow
+        why: You can create more subnets in unused space, and even add extra ranges to a VPC. What you can't do is resize an existing subnet.
+      - t: Delete the VPC and start again
+        why: That would work, but it takes everything down. Unused space in the plan avoids it.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, month four">
+
+When Priya built QuickCart's first network, she gave the VPC `10.0.0.0/24` — 256 addresses. It seemed like plenty for three servers.
+
+Then QuickCart moved to containers. Every running container needs its own address, and the app subnets filled up in an afternoon. New containers failed to start with an error about no free addresses.
+
+A subnet can't be resized, and a VPC's first range can't be changed. The fix was a new, bigger VPC, and a weekend moving everything across.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Every region in every AWS account comes with a **default VPC**, and every one of them uses the same range: `172.31.0.0/16`. Many teams also accept `10.0.0.0/16` for every VPC they create, because it's the suggestion in front of them.
+
+It works for years. Then someone needs two of those VPCs to talk to each other — a new region, a company that was bought, a shared tools VPC. **VPC peering refuses to connect two VPCs whose ranges overlap**, and so does a transit gateway route. The only fix is to renumber one network, which means rebuilding it.
+
+</Case>
+
+Both problems come from choosing address ranges without a plan. This lesson is that plan: how to read a range, how big to make each one, and how to keep them apart.
+
+</Part>
+
+<Part id="idea">
+
+The [VPC lesson](/lessons/vpc/) showed that every range is written like `10.0.0.0/16`, and that a smaller number after the slash means a bigger range. Here's why.
+
+### An address is 32 bits
+
+An IPv4 address like `10.0.11.24` is four numbers, each from 0 to 255. Each number is one **octet**: 8 bits. Four octets make 32 bits.
+
+| Written | 10 | 0 | 11 | 24 |
+|---|---|---|---|---|
+| In bits | `00001010` | `00000000` | `00001011` | `00011000` |
+
+A computer only sees the 32 bits. The dots are for people.
+
+### The slash says how many bits are fixed
+
+In `10.0.0.0/16`, the `/16` means **the first 16 bits are fixed**. Every address in the range starts with the same 16 bits: `10.0`. The other 16 bits are **free**: they can be anything.
+
+Each free bit doubles the number of addresses. So the size of a range is **2 to the power of the free bits**:
+
+| Range | Fixed bits | Free bits | Addresses | Covers |
+|---|---|---|---|---|
+| `10.0.0.0/16` | 16 | 16 | 2¹⁶ = 65,536 | 10.0.0.0 to 10.0.255.255 |
+| `10.0.0.0/20` | 20 | 12 | 2¹² = 4,096 | 10.0.0.0 to 10.0.15.255 |
+| `10.0.1.0/24` | 24 | 8 | 2⁸ = 256 | 10.0.1.0 to 10.0.1.255 |
+| `10.0.1.0/26` | 26 | 6 | 2⁶ = 64 | 10.0.1.0 to 10.0.1.63 |
+| `10.0.1.0/28` | 28 | 4 | 2⁴ = 16 | 10.0.1.0 to 10.0.1.15 |
+
+That's the whole trick: **free bits = 32 − the number after the slash; addresses = 2 to that power.** One step down the slash doubles the size. One step up halves it.
+
+<Key>The number after the slash is how many bits are fixed. The rest are free, and 2 to the power of the free bits is the number of addresses.</Key>
+
+### Every block starts on its own boundary
+
+A range is written as its **first** address. And a block of a given size can only start at a multiple of that size.
+
+A /20 holds 4,096 addresses — 16 blocks of 256. So a /20 always starts where the third number is a multiple of 16:
+
+| Valid /20 blocks in 10.0.0.0/16 | Not a valid /20 |
+|---|---|
+| `10.0.0.0/20`, `10.0.16.0/20`, `10.0.32.0/20`, `10.0.48.0/20` | `10.0.1.0/20`, `10.0.8.0/20`, `10.0.20.0/20` |
+
+The same rule at every size: a /24 starts at `x.x.x.0`, a /26 at `.0`, `.64`, `.128` or `.192`, a /28 at a multiple of 16 in the last number. If a range doesn't start on its boundary, the free bits wouldn't all be free — some would already be set. AWS rejects it.
+
+### AWS keeps five addresses in every subnet
+
+In every subnet, AWS reserves the first four addresses and the last one. For `10.0.11.0/24`:
+
+| Address | Reserved for |
+|---|---|
+| `10.0.11.0` | The network address — the name of the range itself |
+| `10.0.11.1` | The VPC router, where traffic leaving the subnet goes first |
+| `10.0.11.2` | The Amazon DNS server |
+| `10.0.11.3` | Kept by AWS for future use |
+| `10.0.11.255` | The last address. Networks use it for broadcast; AWS doesn't support broadcast, so it simply keeps it |
+
+So a /24 gives you 251 usable addresses, and the smallest subnet AWS allows, a /28, gives only 11. The five matter most in small subnets.
+
+### Which ranges to use at all
+
+Three ranges are set aside for private networks. Nothing on the internet uses them, so they're safe inside a VPC:
+
+| Private range | Size | Notes |
+|---|---|---|
+| `10.0.0.0/8` | 16.7 million addresses | The usual choice. Room for 256 VPCs of /16 each |
+| `172.16.0.0/12` | About 1 million | Default VPCs use `172.31.0.0/16` from here |
+| `192.168.0.0/16` | 65,536 | Home routers use it. Avoid it, or your VPN users will clash with their own Wi-Fi |
+
+A VPC can be anything from a /16 (65,536 addresses) down to a /28. Subnets have the same limits.
+
+### Planning for growth
+
+A plan is cheap on paper and very expensive to change later. Three rules:
+
+| Rule | Why |
+|---|---|
+| Give each VPC a /16 | Addresses inside a VPC are free. Running out is not |
+| Make subnets bigger than today's need, and leave most of the VPC unused | Containers and Kubernetes can use one address per running copy. You can add subnets later, but never resize one |
+| Give every VPC its own range, even in another region or account | Overlapping VPCs can never be connected. `10.0.0.0/16`, `10.1.0.0/16`, `10.2.0.0/16`… |
+
+QuickCart's plan for its first VPC, `10.0.0.0/16`. The third number tells you the tier and the zone at a glance:
+
+| Tier | Zone a | Zone b | Room to grow |
+|---|---|---|---|
+| Public | `10.0.1.0/24` | `10.0.2.0/24` | `10.0.3.0/24` for a third zone |
+| App | `10.0.11.0/24` | `10.0.12.0/24` | `10.0.13.0/24` |
+| Data | `10.0.21.0/24` | `10.0.22.0/24` | `10.0.23.0/24` |
+| Containers, later | `10.0.32.0/20` | `10.0.48.0/20` | 4,091 usable addresses each |
+
+Six subnets use 1,536 of 65,536 addresses. More than 95% of the VPC is left for things nobody has thought of yet. The second region gets `10.1.0.0/16` with the same layout, so the two can be joined whenever they need to be.
+
+</Part>
+
+<Part id="see">
+
+Below is QuickCart's VPC, `10.0.0.0/16`, drawn as a map: one square for every /24. Pick a size and a starting address, and add a subnet. Watch the bits, the address count, and the map. Then try to break it: start a /20 at `10.0.1.0`, and add a /24 that lands on top of one that's already there.
+
+<CidrPlanner />
+
+**What to notice:** each step down in the slash doubles the addresses and halves the number of blocks that fit. A block only fits where its fixed bits line up, and nothing may overlap — the two rules AWS enforces every time you create a subnet.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">VPCs and subnets cost nothing.</Cost>
+
+You'll plan QuickCart's addresses on paper, build part of the plan, and deliberately hit the two errors from this lesson so you recognise them. About 20 minutes.
+
+Check the region selector at the top right of the console says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Plan on paper first">
+
+Before opening the console, write down the plan from [the idea](#idea): one VPC, and a public, app and data subnet in each of two zones. For each subnet, work out:
+
+| Subnet | Range | Addresses | Usable | First usable | Last usable |
+|---|---|---|---|---|---|
+| `quickcart-public-a` | `10.0.1.0/24` | 256 | 251 | `10.0.1.4` | `10.0.1.254` |
+| `quickcart-app-a` | `10.0.11.0/24` | 256 | 251 | `10.0.11.4` | `10.0.11.254` |
+| `quickcart-data-a` | `10.0.21.0/24` | 256 | 251 | `10.0.21.4` | `10.0.21.254` |
+
+Fill in the zone b rows yourself — `10.0.2.0/24`, `10.0.12.0/24` and `10.0.22.0/24` — and check your answers with the planner above.
+
+<See>
+
+A table where no two ranges share an address, every range is inside `10.0.0.0/16`, and most of the VPC is still unused.
+
+</See>
+
+</Step>
+
+<Step title="Create the VPC">
+
+<ConsolePath path="VPC > Your VPCs > Create VPC" />
+
+| Field | Enter |
+|---|---|
+| Resources to create | **VPC only** |
+| Name tag | `quickcart-vpc` |
+| IPv4 CIDR block | **IPv4 CIDR manual input** |
+| IPv4 CIDR | `10.0.0.0/16` |
+| IPv6 CIDR block | **No IPv6 CIDR block** |
+| Tenancy | **Default** |
+
+Choose **Create VPC**.
+
+<See>
+
+The VPC's details page, with **State: Available** and **IPv4 CIDR: 10.0.0.0/16**.
+
+</See>
+
+</Step>
+
+<Step title="Create the zone a subnets">
+
+<ConsolePath path="VPC > Subnets > Create subnet" />
+
+For **VPC ID**, choose `quickcart-vpc`. Fill in the first subnet, choose **Add new subnet** for each of the others, then choose **Create subnet**:
+
+| Subnet name | Availability Zone | IPv4 subnet CIDR block |
+|---|---|---|
+| `quickcart-public-a` | us-east-1a | `10.0.1.0/24` |
+| `quickcart-app-a` | us-east-1a | `10.0.11.0/24` |
+| `quickcart-data-a` | us-east-1a | `10.0.21.0/24` |
+
+<See>
+
+Three subnets in the list. The **Available IPv4 addresses** column says **251** for each: 256 minus the five AWS keeps.
+
+</See>
+
+</Step>
+
+<Step title="Create the zone b subnets">
+
+Same page, same VPC:
+
+| Subnet name | Availability Zone | IPv4 subnet CIDR block |
+|---|---|---|
+| `quickcart-public-b` | us-east-1b | `10.0.2.0/24` |
+| `quickcart-app-b` | us-east-1b | `10.0.12.0/24` |
+| `quickcart-data-b` | us-east-1b | `10.0.22.0/24` |
+
+<See>
+
+Six subnets, three in each zone, each with **251** available addresses.
+
+</See>
+
+</Step>
+
+<Step title="Try a block that isn't on its boundary">
+
+Create one more subnet in `quickcart-vpc`:
+
+| Field | Enter |
+|---|---|
+| Subnet name | `quickcart-containers-a` |
+| Availability Zone | us-east-1a |
+| IPv4 subnet CIDR block | `10.0.33.0/20` |
+
+Choose **Create subnet**.
+
+<Mistake title="a range that doesn't start on its boundary">
+
+The console refuses it. The wording has changed over time, and yours may differ, but it says the CIDR is not valid — for example:
+
+```output title="A message like"
+The CIDR '10.0.33.0/20' is invalid.
+```
+
+**Why:** a /20 holds 4,096 addresses, so it must start where the third number is a multiple of 16. `10.0.33.0` is in the middle of the block `10.0.32.0/20`.
+
+**The fix:** round down to the boundary. Enter `10.0.32.0/20` and create it.
+
+</Mistake>
+
+<See>
+
+`quickcart-containers-a` in the list with **4091** available addresses: 4,096 minus five.
+
+</See>
+
+</Step>
+
+<Step title="Try a range that overlaps">
+
+Create one more subnet:
+
+| Field | Enter |
+|---|---|
+| Subnet name | `quickcart-extra-a` |
+| Availability Zone | us-east-1a |
+| IPv4 subnet CIDR block | `10.0.40.0/24` |
+
+Choose **Create subnet**.
+
+<Mistake title="two subnets that overlap">
+
+```output title="The console shows"
+The CIDR '10.0.40.0/24' conflicts with another subnet
+```
+
+**Why:** `10.0.32.0/20` runs from `10.0.32.0` to `10.0.47.255`. `10.0.40.0/24` sits inside it. Two subnets can't share an address, or the VPC wouldn't know which one to deliver it to.
+
+**The fix:** pick unused space from your plan. This is what the paper plan is for.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Actions > Delete VPC" />
+
+AWS lists the subnets that go with it. Type `delete` in the box and choose **Delete**.
+
+<See>
+
+The VPC and all seven subnets are gone. Nothing was charged; keep your paper plan for the [routing lesson](/lessons/routing/).
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| IPv4 address | 32 bits, written as four numbers from 0 to 255 |
+| `/n` | The first n bits are fixed. 32 − n bits are free |
+| Addresses in a range | 2 to the power of the free bits |
+| `/16` · `/20` · `/24` · `/28` | 65,536 · 4,096 · 256 · 16 |
+| Boundary rule | A block starts on a multiple of its own size |
+| Reserved in every subnet | First four and the last: 5 addresses. A /24 has 251 usable |
+| Subnet size limits | From /16 to /28 |
+| Private ranges | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
+| Growth | /16 per VPC, leave most of it unused. You can't resize a subnet |
+| Several VPCs | Never overlap: `10.0.0.0/16`, `10.1.0.0/16`, `10.2.0.0/16` |
+
+</Cheat>
+
+</Part>

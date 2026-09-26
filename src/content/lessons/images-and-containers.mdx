@@ -1,0 +1,547 @@
+---
+time: 30 minutes
+level: Beginner
+before: [mac-setup]
+cost: free
+quiz:
+  - q: What is the difference between an image and a container?
+    answer: 2
+    options:
+      - t: They are two names for the same thing
+        why: People use the words loosely, but they are different. One is a file you store, the other is something running.
+      - t: An image runs on a server; a container runs on a laptop
+        why: Both run anywhere Docker runs. Where it runs isn't the difference.
+      - t: An image is the package; a container is a running copy of it
+        why: The image is read-only and does nothing on its own. Start it and you get a container. You can start many containers from one image.
+      - t: A container is a smaller, compressed image
+        why: A container isn't a file format at all. It's a process running from an image, plus a thin layer it can write to.
+  - q: Why does a container start in about a second, when a virtual machine takes a minute or more?
+    answer: 0
+    options:
+      - t: It doesn't boot an operating system. It shares the host's kernel and just starts the app's process
+        why: A VM has to boot a whole guest operating system first. A container is a normal process with a private view of files and network, so there's nothing to boot.
+      - t: Containers use faster disks
+        why: They use the same disks as everything else on the machine.
+      - t: Docker keeps every container running in the background, ready to go
+        why: Containers that aren't running use no CPU or memory at all. Starting one really is starting it.
+      - t: Containers skip installing the app's libraries
+        why: The libraries are already inside the image, which saves time compared with installing them at start-up. But the big difference is not booting an operating system.
+  - q: The tag v1 on an image in a registry. Can it point at different code next week?
+    answer: 1
+    options:
+      - t: No — a tag is fixed forever once pushed
+        why: Not by default. A tag is a movable label. Someone can push a different image with the same tag, unless the repository forbids it.
+      - t: Yes, unless the repository makes tags immutable. A digest never can
+        why: Tags are labels that can be moved. The digest is calculated from the image's contents, so the same digest always means exactly the same bytes. ECR can also lock tags so they never move.
+      - t: Only if the image is deleted first
+        why: A tag can be pushed over directly, without deleting anything.
+      - t: Only the latest tag can move
+        why: latest is just a tag like any other. Every tag can move, which is why latest is especially unreliable — it moves on every push.
+  - q: Leo builds an image on his Apple-chip Mac and it runs fine. On AWS it fails at once with "exec format error". Why?
+    answer: 3
+    options:
+      - t: AWS doesn't support Docker images
+        why: AWS runs Docker images everywhere, in ECS, EKS and more.
+      - t: The image is too big for AWS
+        why: Size would make it slow to download, not fail with this error.
+      - t: The Dockerfile has a syntax error
+        why: Then the build would have failed on his Mac too.
+      - t: The image was built for the Mac's ARM processor, and the AWS server has an Intel or AMD one
+        why: An image contains programs compiled for one processor type. Build it with --platform linux/amd64 for x86 servers, or run it on ARM servers such as Graviton.
+  - q: You remove a container that had written files inside itself. What happens to those files?
+    answer: 1
+    options:
+      - t: They're saved back into the image
+        why: The image is read-only. Nothing a container does changes it.
+      - t: They're deleted with the container
+        why: Each container writes to its own thin layer, and that layer goes when the container is removed. Anything that must survive goes in a volume, a database or S3.
+      - t: They move to the next container started from the same image
+        why: Every new container starts from the clean image, with an empty layer of its own.
+      - t: They stay on disk until you restart Docker
+        why: Removing the container removes its layer straight away.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a Friday release">
+
+Leo fixed a bug in the order service and tested it on his laptop. Everything passed. He released it to QuickCart's servers.
+
+Within minutes, every order failed. The servers had an older version of one Python library than Leo's laptop. The code was identical; **what it ran on was not**.
+
+The next Saturday, lunch orders tripled. New servers were started to cope, but each one took over two minutes to boot and install Python and every library. For those two minutes, customers saw errors.
+
+</Story>
+
+<Case title="The day eleven lines broke the internet's builds">
+
+In March 2016, a developer removed all of his packages from npm, the public registry for JavaScript libraries. One of them, `left-pad`, was eleven lines long. Thousands of projects depended on it, directly or through other libraries, including some of the most popular tools of the time.
+
+Every build and every install that needed it started failing, all over the world, until npm restored it. The code of those projects hadn't changed at all. What changed was something they fetched from the internet each time they were installed.
+
+</Case>
+
+Both of QuickCart's problems have the same cause. The app is installed **fresh on every machine**, from whatever versions are around that day. QuickCart needs to build the app and everything it depends on **once**, check it, and then run that exact thing everywhere.
+
+That is what a container image is.
+
+</Part>
+
+<Part id="idea">
+
+An **image** is a package that holds everything your app needs to run: your code, the exact libraries it uses, and the small set of operating-system files those libraries expect. It's built once and never changes.
+
+A **container** is a running copy of an image. Start an image and you get a container. Start it five times and you get five containers, all identical.
+
+<YouKnow title="You already know this: a signed app build">
+
+When you ship a mobile app, you don't send the store your source code and hope each phone compiles it the same way. You build once, sign the build, and every device installs **that exact binary**. An image is the same idea for servers: one build, the same bytes on your laptop, in testing and in production.
+
+</YouKnow>
+
+<Key>Build the image once. Run that same image everywhere. Never install the app on the server.</Key>
+
+### Image and container, side by side
+
+| | Image | Container |
+|---|---|---|
+| What it is | A package: code, libraries, system files | A running copy of an image |
+| Can it change? | No. It's read-only | It can write files, but only to its own thin layer |
+| How many? | One per version of your app | As many as you start |
+| When it's deleted | You delete it on purpose | Its written files go with it |
+| Like | A class, or an app build | An object, or the app running on one phone |
+
+### What a container really is
+
+A container isn't a small virtual machine. It's an ordinary program running on the host's operating system, with two restrictions the Linux kernel applies to it:
+
+| Kernel feature | What it does for the container |
+|---|---|
+| **Namespaces** | Give it a private view: its own files, its own process list, its own network. It can't see the other containers |
+| **cgroups** (control groups) | Limit how much CPU and memory it may use |
+
+So a container **shares the host's kernel** — the core of the operating system — with every other container on the machine. That's why it's small and quick, and it's the difference from a virtual machine:
+
+| | Virtual machine | Container |
+|---|---|---|
+| Carries | A whole operating system, with its own kernel | Just the app, its libraries and a few system files |
+| Typical size | Gigabytes | Tens to hundreds of megabytes |
+| Starts in | About a minute: it boots an OS | About a second: it starts a process |
+| Isolation | Strong: separate kernels | Good, but the kernel is shared |
+
+Containers usually run **inside** virtual machines, not instead of them. On AWS, your containers run on EC2 instances, which are virtual machines. On a Mac, Docker Desktop runs a small Linux virtual machine, and your containers share its kernel.
+
+### Images are made of layers
+
+An image isn't one big file. It's a stack of **layers**, each one a set of file changes: a base Linux, then Python, then your libraries, then your code. Each line of a [Dockerfile](/lessons/dockerfile/) usually makes one layer.
+
+| Layer | Holds | Changes |
+|---|---|---|
+| Base | A minimal Linux, such as Debian | Rarely |
+| Runtime | Python 3.12 | Rarely |
+| Libraries | Flask and gunicorn | Sometimes |
+| Your code | `app.py` | Every release |
+| Container layer | Files the running container writes | Thrown away when the container is removed |
+
+Layers are shared. If two images use the same base, it's downloaded and stored once. When you release a new version, a server downloads only the layers that changed — usually just your code, a few kilobytes.
+
+### Registries store images
+
+A **registry** is a server that stores images, like an app store for containers. You **push** an image to it, and servers **pull** from it.
+
+| Registry | Who runs it | QuickCart uses it for |
+|---|---|---|
+| Docker Hub | Docker. Public images like `nginx` and `python` | Base images |
+| Amazon ECR | AWS. Private, in your account | QuickCart's own images — see [Storing images: ECR](/lessons/ecr/) |
+
+An image's full name says where it lives:
+
+| Part of `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1` | What it means |
+|---|---|
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | the registry: here, the ECR registry of one AWS account in one region |
+| `quickcart-orders` | the repository: one app's images |
+| `v1` | the tag: which version |
+
+A short name like `nginx:1.27` is shorthand for `docker.io/library/nginx:1.27` — the official `nginx` repository on Docker Hub.
+
+### Tags move. Digests don't
+
+A **tag**, like `v1` or `1.27`, is a label someone put on an image. Labels can be moved: anyone allowed to push can put `v1` on a different image tomorrow.
+
+A **digest**, like `sha256:4f1c…`, is calculated from the image's contents. Change one byte, and the digest changes. So a digest always means exactly the same image.
+
+| | Tag | Digest |
+|---|---|---|
+| Looks like | `nginx:1.27` | `nginx@sha256:` followed by 64 characters |
+| Chosen by | A person | Calculated from the contents |
+| Can it point at different code later? | Yes, unless the registry forbids it | Never |
+| Use it for | Humans: "we're on v2" | Machines: "run exactly this" |
+
+And `latest` is **not** special. It's just the tag Docker uses when you don't give one. It usually means "whatever was pushed most recently", so it tells you nothing about what's running. Don't release with it.
+
+### "Works on my laptop", solved — with one catch
+
+An image fixes library versions, system files and settings. It can't fix the **processor**. The programs inside an image are compiled for one type of chip:
+
+| Built on | Makes images for | Runs on |
+|---|---|---|
+| An Apple-chip Mac | `linux/arm64` by default | ARM servers, such as AWS Graviton |
+| Most Intel or AMD machines | `linux/amd64` | Most EC2 instances and Fargate's default |
+
+<Mistake title="an image from an Apple-chip Mac fails on AWS">
+
+The container stops the moment it starts. Its log has one line, naming the program it tried to start:
+
+```output title="The container's log shows"
+exec /usr/local/bin/gunicorn: exec format error
+```
+
+**Why:** the image was built for ARM, and the server has an x86 processor. The server can't run the programs inside it.
+
+**The fix:** build for the server's processor with `--platform linux/amd64`. The [Dockerfile lesson](/lessons/dockerfile/) shows the whole command.
+
+</Mistake>
+
+</Part>
+
+<Part id="see">
+
+Below are four QuickCart apps — orders, menu, payments and delivery — packed onto one server. Start with **Virtual machines**, then switch to **Containers**. Choose **Add an app** in each, and drag the stack to turn it.
+
+<ContainerStack />
+
+**What to notice:** the thick guest operating system layer appears once for every app with virtual machines, and not at all with containers. That missing layer is why a container is megabytes instead of gigabytes, and starts in a second. It's also why containers share one kernel: that is the price of being light.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything runs on your own computer.</Cost>
+
+You'll pull a real image, run two containers from it, look inside one, and tidy everything away. About 20 minutes.
+
+You need Docker Desktop installed and running. [Set up your Mac](/lessons/mac-setup/) covers it. The whale icon in the menu bar should say **Docker Desktop is running**.
+
+<Steps>
+
+<Step title="Check Docker works">
+
+```sh
+docker run --rm hello-world
+```
+
+| Part | What it means |
+|---|---|
+| `docker run` | start a container from an image. If the image isn't on your computer yet, download it first |
+| `--rm` | remove the container as soon as it finishes |
+| `hello-world` | a tiny image that prints a message and exits |
+
+```output
+Unable to find image 'hello-world:latest' locally
+latest: Pulling from library/hello-world
+Status: Downloaded newer image for hello-world:latest
+
+Hello from Docker!
+This message shows that your installation appears to be working correctly.
+```
+
+Between these lines you'll also see a `Pull complete` line and a `Digest` line, and after them more text explaining what just happened. Notice the first line: you didn't give a tag, so Docker used `latest`.
+
+<Mistake title="Docker Desktop isn't running">
+
+```output title="The command fails with a message like"
+Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+```
+
+The path in your message may be different.
+
+**Why:** the `docker` command is only a client. It sends your request to the Docker engine, which runs inside Docker Desktop. If Docker Desktop is closed, nothing answers.
+
+**The fix:** open Docker Desktop, wait until it says it's running, and try again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Pull an image with a real version">
+
+```sh
+docker pull nginx:1.27
+```
+
+| Part | What it means |
+|---|---|
+| `docker pull` | download an image from a registry, without running it |
+| `nginx` | the repository: the official nginx web server on Docker Hub |
+| `:1.27` | the tag: version 1.27. Always name a version rather than relying on `latest` |
+
+```output
+1.27: Pulling from library/nginx
+a2318d6c47ec: Pull complete
+7bd1fe4d8e2b: Pull complete
+c9ba5b3e04d7: Pull complete
+Digest: sha256:<64 letters and numbers>
+Status: Downloaded newer image for nginx:1.27
+docker.io/library/nginx:1.27
+```
+
+Your layer IDs and digest will be different, and there are several more `Pull complete` lines. **Each `Pull complete` line is one layer.** Copy the `Digest` line somewhere; you'll use it in step 6. The last line is the image's full name.
+
+Now list the images on your computer:
+
+```sh
+docker images
+```
+
+| Part | What it means |
+|---|---|
+| `docker images` | list every image stored on this computer |
+
+<See>
+
+A row for `nginx` with tag `1.27`, and one for `hello-world`. Each has an image ID and a size. The exact columns depend on your Docker version.
+
+</See>
+
+</Step>
+
+<Step title="Run a container">
+
+```sh
+docker run -d -p 8080:80 --name web nginx:1.27
+```
+
+| Part | What it means |
+|---|---|
+| `docker run` | start a container |
+| `-d` | detached: run it in the background and give you your terminal back |
+| `-p 8080:80` | publish a port: connections to port 8080 on your computer go to port 80 inside the container, where nginx listens |
+| `--name web` | call the container `web`, so later commands can use the name |
+| `nginx:1.27` | the image to start it from |
+
+```output
+4d29ffd981e4c0a7b5e1d2f3a9c8b7e6d5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0
+```
+
+That long string is the new container's ID. Yours will be different. Now open `http://localhost:8080` in your browser.
+
+<See>
+
+A page headed **Welcome to nginx!** It came from inside the container, through the port you published.
+
+</See>
+
+</Step>
+
+<Step title="See what's running">
+
+```sh
+docker ps
+```
+
+| Part | What it means |
+|---|---|
+| `docker ps` | list running containers. Add `-a` to include stopped ones |
+
+```output
+CONTAINER ID   IMAGE        COMMAND                  CREATED          STATUS          PORTS                                     NAMES
+4d29ffd981e4   nginx:1.27   "/docker-entrypoint.…"   30 seconds ago   Up 29 seconds   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp   web
+```
+
+The `PORTS` column shows the port you published. Next, see what nginx has written to its log:
+
+```sh
+docker logs web
+```
+
+| Part | What it means |
+|---|---|
+| `docker logs` | print everything a container has written to its output |
+| `web` | which container |
+
+<See>
+
+Some start-up lines from nginx, then a line for your browser's visit containing `"GET / HTTP/1.1" 200`. On AWS, this same output is what ends up in CloudWatch Logs.
+
+</See>
+
+</Step>
+
+<Step title="Start a second container from the same image">
+
+One image can run as many containers as you like. Each needs its own name and its own port on your computer:
+
+```sh
+docker run -d -p 8081:80 --name web2 nginx:1.27
+```
+
+| Part | What it means |
+|---|---|
+| `-p 8081:80` | this time, port 8081 on your computer goes to port 80 in the new container |
+| `--name web2` | a different name; two containers can't share one |
+| `nginx:1.27` | the same image as before. Nothing is downloaded this time |
+
+Open `http://localhost:8081`. The same page, from a second, separate container.
+
+<Mistake title="reusing a port that's already published">
+
+If you run the second container with `-p 8080:80` again, it fails:
+
+```output title="Docker stops with a message ending in"
+Bind for 0.0.0.0:8080 failed: port is already allocated
+```
+
+**Why:** only one program can listen on a port on your computer, and `web` already has 8080.
+
+**The fix:** pick a different port on the left of the colon, like `8081`. The right side can stay `80`: each container has its own network, so both nginx copies can use port 80 inside.
+
+A container that failed this way still exists, and holds its name. Remove it with `docker rm web2` before trying again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Look inside, and find the shared kernel">
+
+Run a command inside the running container to see which Linux the image contains:
+
+```sh
+docker exec web cat /etc/os-release
+```
+
+| Part | What it means |
+|---|---|
+| `docker exec` | run a command inside a container that's already running |
+| `web` | which container |
+| `cat /etc/os-release` | print the file that names the Linux distribution |
+
+```output
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+```
+
+There are more lines after these. The image carries Debian's files, even though you're on a Mac. Now ask for the **kernel**:
+
+```sh
+docker exec web uname -r
+```
+
+| Part | What it means |
+|---|---|
+| `uname -r` | print the version of the kernel this program is running on |
+
+<See>
+
+A version number ending in `linuxkit`, such as `6.10.14-linuxkit`. That's the kernel of the small Linux virtual machine inside Docker Desktop. Run the same command with `web2` instead of `web` and you get the identical answer: **both containers share one kernel**. Only the files are their own.
+
+</See>
+
+</Step>
+
+<Step title="Run an image by its digest">
+
+A tag can move; a digest can't. Use the digest you copied in step 2. Replace `DIGEST` with everything after `sha256:`:
+
+```sh ph="DIGEST"
+docker run --rm nginx@sha256:DIGEST nginx -v
+```
+
+| Part | What it means |
+|---|---|
+| `nginx@sha256:DIGEST` | the image with exactly this content. `@` instead of `:` means "by digest", not "by tag" |
+| `nginx -v` | instead of starting the web server, run this command: print nginx's version |
+| `--rm` | remove the container when the command finishes |
+
+```output
+nginx version: nginx/1.27.5
+```
+
+Your patch number may be different. Whatever happens to the `1.27` tag later, this digest will always run exactly the image you have now.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Stop both containers:
+
+```sh
+docker stop web web2
+```
+
+| Part | What it means |
+|---|---|
+| `docker stop` | ask containers to shut down cleanly. Docker waits up to 10 seconds, then forces them |
+| `web web2` | the containers to stop |
+
+```output
+web
+web2
+```
+
+Remove them:
+
+```sh
+docker rm web web2
+```
+
+| Part | What it means |
+|---|---|
+| `docker rm` | delete stopped containers, including anything they wrote. Their names are free again |
+
+```output
+web
+web2
+```
+
+Delete the images too:
+
+```sh
+docker image rm nginx:1.27 hello-world
+```
+
+| Part | What it means |
+|---|---|
+| `docker image rm` | delete images from this computer. It refuses while any container, even a stopped one, still uses them |
+| `nginx:1.27 hello-world` | the two images you downloaded |
+
+<See>
+
+`Untagged:` and `Deleted:` lines for each image. Run `docker ps -a` and `docker images`: neither lists anything from this lab.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command or idea | What it means |
+|---|---|
+| Image | The package: code, libraries, system files. Read-only |
+| Container | A running copy of an image. Its written files go when it's removed |
+| Layer | One set of file changes in an image. Shared between images |
+| `docker pull nginx:1.27` | Download an image |
+| `docker run -d -p 8080:80 --name web nginx:1.27` | Start a container in the background, with a published port |
+| `docker ps` / `docker ps -a` | Running containers / all containers |
+| `docker logs web` | What a container has printed |
+| `docker exec web COMMAND` | Run a command inside a running container |
+| `docker stop web` then `docker rm web` | Stop it, then delete it |
+| Tag (`:1.27`) | A movable label. Never release with `latest` |
+| Digest (`@sha256:`) | The exact content. Never changes |
+| `exec format error` | Built for the wrong processor. Use `--platform linux/amd64` |
+
+</Cheat>
+
+</Part>

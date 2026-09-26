@@ -1,0 +1,184 @@
+---
+/*
+ * Virtual machines vs containers: what sits on top of what.
+ * Teaches: a VM carries a whole guest operating system for every app; a
+ * container carries only the app and its libraries, and shares the host's
+ * kernel. That is why containers are small and start in a second.
+ *
+ * 3D (Three.js) is loaded lazily when the visual scrolls into view, only if
+ * WebGL works and reduced motion is off. The flat SVG is always in the page:
+ * it is the fallback, and what screen readers use.
+ */
+import { SVG_VIEWBOX, facts, svgInner } from "../../scripts/container-stack";
+const f = facts("vm", 3);
+---
+<div class="viz" data-track="box" data-viz="container-stack" data-3d="off">
+  <div class="viz-controls">
+    <span class="lbl" id="cs-lbl">Run each app in</span>
+    <div class="seg" role="group" aria-labelledby="cs-lbl">
+      <button type="button" data-mode="vm" aria-pressed="true">Virtual machines</button>
+      <button type="button" data-mode="ctr" aria-pressed="false">Containers</button>
+    </div>
+    <button class="btn line" type="button" data-act="add">Add an app</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+    <div class="seg cs-view" role="group" aria-label="View" hidden>
+      <button type="button" data-view="3d" aria-pressed="true">3D</button>
+      <button type="button" data-view="flat" aria-pressed="false">Flat</button>
+    </div>
+  </div>
+  <p class="viz-scroll cs-scroll" aria-hidden="true">Scroll sideways to see the whole stack</p>
+  <div class="viz-stage cs-stage">
+    <div class="cs-3d" aria-hidden="true"></div>
+    <div class="cs-flat">
+      <svg viewBox={SVG_VIEWBOX} role="img" aria-labelledby="cs-title">
+        <title id="cs-title">A stack of layers for three apps running in virtual machines: hardware, then the host operating system, then a hypervisor, then for each app a guest operating system with its own kernel, its libraries and the app.</title>
+        <g class="cs-layers" set:html={svgInner("vm", 3)} />
+      </svg>
+    </div>
+    <p class="cs-hint" hidden>Drag to turn it.</p>
+  </div>
+  <dl class="cs-facts">
+    <div><dt>Operating systems running</dt><dd data-f="oses">{f.oses}</dd></div>
+    <div><dt>Each app carries</dt><dd data-f="carries">{f.carries}</dd></div>
+    <div><dt>A new copy starts in</dt><dd data-f="start">{f.start}</dd></div>
+    <div><dt>Isolation</dt><dd data-f="isolation">{f.isolation}</dd></div>
+  </dl>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Virtual machines, 3 apps</span>Every app gets a whole <b>virtual machine</b>, and every VM boots its own <b>guest operating system</b>. Switch to <b>Containers</b> and watch what disappears.</div>
+</div>
+
+<style is:global>
+  [data-viz="container-stack"] [hidden] { display: none !important; }
+  [data-viz="container-stack"] .cs-stage { position: relative; }
+  [data-viz="container-stack"] .cs-3d { display: none; height: 360px; cursor: grab; touch-action: pan-y; }
+  [data-viz="container-stack"] .cs-3d:active { cursor: grabbing; }
+  [data-viz="container-stack"][data-3d="on"] .cs-3d { display: block; }
+  [data-viz="container-stack"][data-3d="on"] .cs-flat { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  [data-viz="container-stack"][data-3d="on"] .cs-scroll { display: none; }
+  [data-viz="container-stack"] .cs-canvas { display: block; width: 100%; height: 100%; }
+  [data-viz="container-stack"] .cs-hint { margin: 0; padding: 0 4px 6px; font-size: 13px; color: var(--ink-3); }
+  [data-viz="container-stack"] .cs-l path, [data-viz="container-stack"] .cs-l rect { stroke: var(--ink-3); stroke-width: 1; stroke-linejoin: round; }
+  [data-viz="container-stack"] .cs-t { font-family: var(--font); font-weight: 800; fill: var(--ink); }
+  [data-viz="container-stack"] .cs-s { font-family: var(--font); font-size: 11.5px; font-weight: 600; fill: var(--ink-2); }
+  [data-viz="container-stack"] .k-hw .cs-front { fill: var(--sunk); }
+  [data-viz="container-stack"] .k-hw .cs-top, [data-viz="container-stack"] .k-hw .cs-side { fill: color-mix(in srgb, var(--ink) 12%, var(--sunk)); }
+  [data-viz="container-stack"] .k-host .cs-front { fill: color-mix(in srgb, var(--ink) 7%, var(--surface)); }
+  [data-viz="container-stack"] .k-host .cs-top, [data-viz="container-stack"] .k-host .cs-side { fill: color-mix(in srgb, var(--ink) 16%, var(--surface)); }
+  [data-viz="container-stack"] :is(.k-hyp, .k-rt) .cs-front { fill: color-mix(in srgb, var(--box) 28%, var(--surface)); }
+  [data-viz="container-stack"] :is(.k-hyp, .k-rt) :is(.cs-top, .cs-side) { fill: color-mix(in srgb, var(--box) 42%, var(--surface)); }
+  [data-viz="container-stack"] .k-guest .cs-front { fill: var(--warn-bg); }
+  [data-viz="container-stack"] .k-guest :is(.cs-top, .cs-side) { fill: color-mix(in srgb, var(--warn) 30%, var(--warn-bg)); }
+  [data-viz="container-stack"] .k-guest :is(.cs-t, .cs-s) { fill: var(--warn); }
+  [data-viz="container-stack"] .k-lib .cs-front { fill: color-mix(in srgb, var(--box) 14%, var(--surface)); }
+  [data-viz="container-stack"] .k-lib :is(.cs-top, .cs-side) { fill: color-mix(in srgb, var(--box) 26%, var(--surface)); }
+  [data-viz="container-stack"] .k-app .cs-front { fill: var(--box); }
+  [data-viz="container-stack"] .k-app :is(.cs-top, .cs-side) { fill: color-mix(in srgb, var(--ink) 25%, var(--box)); }
+  [data-viz="container-stack"] .k-app .cs-t { fill: var(--on-box); }
+  [data-viz="container-stack"] .cs-facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin: 0; border-top: 1px solid var(--rule); }
+  [data-viz="container-stack"] .cs-facts div { padding: 10px 16px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin-bottom: -1px; }
+  [data-viz="container-stack"] .cs-facts dt { font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  [data-viz="container-stack"] .cs-facts dd { margin: 2px 0 0; font-size: 14.5px; font-weight: 600; }
+  @media (max-width: 860px) {
+    [data-viz="container-stack"] .cs-facts { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 560px) {
+    [data-viz="container-stack"] .cs-3d { height: 270px; }
+    [data-viz="container-stack"] .cs-flat svg { min-width: 560px; }
+  }
+</style>
+
+<script>
+  import { facts, svgInner, MAX_APPS, type Mode } from "../../scripts/container-stack";
+  import { press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+  import type { Stack3D } from "../../scripts/container-stack-3d";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="container-stack"]').forEach((root) => {
+      if (!once(root)) return;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const g = root.querySelector<SVGGElement>(".cs-layers")!;
+      const title = root.querySelector<SVGTitleElement>("title")!;
+      const addBtn = root.querySelector<HTMLButtonElement>('[data-act="add"]')!;
+      const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+      const viewSeg = root.querySelector<HTMLElement>(".cs-view")!;
+      const viewBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-view]")];
+      const hint = root.querySelector<HTMLElement>(".cs-hint")!;
+      const holder = root.querySelector<HTMLElement>(".cs-3d")!;
+      let mode: Mode = "vm";
+      let apps = 3;
+      let three: Stack3D | null = null;
+      let gone = false;
+
+      const TITLE: Record<Mode, (n: number) => string> = {
+        vm: (n) => `A stack of layers for ${n} apps running in virtual machines: hardware, then the host operating system, then a hypervisor, then for each app a guest operating system with its own kernel, its libraries and the app.`,
+        ctr: (n) => `A stack of layers for ${n} apps running in containers: hardware, then one host operating system whose kernel every container shares, then a container runtime, then for each app only its libraries and the app. There is no guest operating system.`,
+      };
+
+      function draw() {
+        g.innerHTML = svgInner(mode, apps);
+        title.textContent = TITLE[mode](apps);
+        const f = facts(mode, apps);
+        for (const k of Object.keys(f) as (keyof typeof f)[]) root.querySelector(`[data-f="${k}"]`)!.textContent = f[k];
+        press(modeBtns, (b) => b.dataset.mode === mode);
+        addBtn.disabled = apps >= MAX_APPS;
+        three?.show(mode, apps);
+      }
+
+      function narrate(why: "mode" | "add" | "reset") {
+        const head = `${mode === "vm" ? "Virtual machines" : "Containers"}, ${apps} apps`;
+        if (why === "add") {
+          tell(say, head, mode === "vm"
+            ? "One more app means one more <b>whole virtual machine</b>: another guest operating system to boot, patch and pay memory for, just to run one more program."
+            : "One more app means one more <b>container</b>: its libraries and its code, and nothing else. It shares the kernel that is already running.", mode === "ctr" ? "good" : "");
+        } else if (why === "reset") {
+          tell(say, head, "Back to the start. Switch between <b>Virtual machines</b> and <b>Containers</b> and watch the guest operating systems.");
+        } else if (mode === "ctr") {
+          tell(say, head, "The <b>guest operating systems are gone</b>. Every container shares the host's one kernel, through the <b>container runtime</b>. Each app carries only its libraries and code, so it is small and starts like a normal program.", "good");
+        } else {
+          tell(say, head, "Every app sits on its own <b>guest operating system</b>, with its own kernel, on top of a <b>hypervisor</b>. That is strong isolation, but each copy is gigabytes and has to boot.");
+        }
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.mode) { mode = b.dataset.mode as Mode; draw(); narrate("mode"); }
+        else if (b.dataset.act === "add" && apps < MAX_APPS) { apps++; draw(); narrate("add"); }
+        else if (b.dataset.act === "reset") { mode = "vm"; apps = 3; draw(); narrate("reset"); }
+        else if (b.dataset.view) setView(b.dataset.view === "3d");
+      });
+
+      function setView(on: boolean) {
+        press(viewBtns, (x) => (x.dataset.view === "3d") === on);
+        root.dataset["3d"] = on ? "on" : "flat";
+        hint.hidden = !on;
+      }
+
+      /* 3D: only when it is on screen, WebGL works and motion is welcome */
+      async function start3D() {
+        if (reduced()) { root.dataset["3d"] = "fallback"; return; }
+        const mod = await import("../../scripts/container-stack-3d");
+        if (!mod.webglAvailable()) { root.dataset["3d"] = "fallback"; return; }
+        try {
+          root.dataset["3d"] = "on";
+          three = await mod.createStack3D(holder, root, mode, apps);
+          if (gone) { three.dispose(); three = null; return; }
+          viewSeg.hidden = false;
+          /* on a phone the 3D stack is too small to read: start flat, and let them switch */
+          setView(root.clientWidth >= 560);
+        } catch {
+          three = null;
+          root.dataset["3d"] = "fallback";
+        }
+      }
+      const io = new IntersectionObserver((entries) => {
+        if (entries.some((en) => en.isIntersecting)) { io.disconnect(); start3D(); }
+      }, { rootMargin: "200px" });
+      io.observe(root);
+
+      stops.push(() => { gone = true; io.disconnect(); three?.dispose(); three = null; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

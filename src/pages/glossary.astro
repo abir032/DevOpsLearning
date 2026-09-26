@@ -1,0 +1,42 @@
+---
+import Base from "../layouts/Base.astro";
+import { href, lessonBySlug, lessonHref } from "../data/curriculum";
+import { GLOSSARY, termId } from "../data/glossary";
+import { readySlugs } from "../lib/lessons";
+
+const ready = await readySlugs();
+const terms = [...GLOSSARY].sort((a, b) => a.term.localeCompare(b.term));
+const letters = [...new Set(terms.map((t) => t.term[0].toUpperCase()))];
+---
+<Base title="Glossary" description="Every DevOps term in the course, in plain words, linked to the lesson that explains it." current={{ page: "glossary" }}>
+  <div class="page">
+    <div class="read glossary" data-pagefind-body>
+      <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+        <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">Glossary</span>
+      </nav>
+      <header class="mod-hero" data-track="start">
+        <h1>Glossary</h1>
+        <p>Every term in one place, in plain words. Each one links to the lesson that explains it properly.</p>
+      </header>
+      <nav aria-label="Jump to a letter" data-pagefind-ignore>
+        <ul class="letters">{letters.map((l) => <li><a href={`#letter-${l}`}>{l}</a></li>)}</ul>
+      </nav>
+      <div class="terms">
+        {terms.map((t, i) => {
+          const l = lessonBySlug(t.lesson);
+          const L = t.term[0].toUpperCase();
+          const first = i === 0 || terms[i - 1].term[0].toUpperCase() !== L;
+          return (
+            <div class="term" id={first ? `letter-${L}` : undefined}>
+              <h2 id={termId(t.term)}>{t.term}</h2>
+              <p>
+                {t.def}{" "}
+                {l && <>Explained in <a href={lessonHref(l.slug)}>{l.title}</a>{ready.has(l.slug) ? "" : " (being written)"}.</>}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  </div>
+</Base>

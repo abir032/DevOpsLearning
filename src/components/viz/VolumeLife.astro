@@ -1,0 +1,168 @@
+---
+/*
+ * Data and networking: what happens to a database's files when its container is removed.
+ * Teaches: anything written outside a volume goes with the container; a named volume outlives it.
+ */
+---
+<div class="viz" data-track="box" data-viz="volume-life">
+  <div class="viz-controls">
+    <span class="lbl" id="vl-lbl">MySQL keeps its files</span>
+    <div class="seg" role="group" aria-labelledby="vl-lbl">
+      <button type="button" data-mode="layer" aria-pressed="true">Inside the container</button>
+      <button type="button" data-mode="volume" aria-pressed="false">In a named volume</button>
+    </div>
+    <button class="btn line" type="button" data-act="save">Save an order</button>
+    <button class="btn" type="button" data-act="remove">Remove the container</button>
+    <button class="btn" type="button" data-act="start" disabled>Start a new container</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole picture</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 330" role="img" aria-labelledby="vl-title">
+      <title id="vl-title">The QuickCart app saves orders to a MySQL container. Inside the container is MySQL and the container's own writable layer. Outside it, on the host, is a named volume called db-data, which can be mounted into the container at /var/lib/mysql.</title>
+      <text class="vz-label" x="16" y="22">Your machine</text>
+      <path class="vz-wire" d="M150 160 L205 160" />
+      <rect data-n="app" class="vz-node" x="16" y="128" width="134" height="64" rx="10" />
+      <text class="vz-t" x="83" y="156" text-anchor="middle">QuickCart app</text>
+      <text class="vz-s" x="83" y="173" text-anchor="middle">saves orders</text>
+
+      <g data-n="ctr" class="vl-ctr">
+        <rect class="vl-box" x="205" y="34" width="320" height="276" rx="12" />
+        <text data-n="ctrname" class="vz-t" x="222" y="58">Container quickcart-db-1</text>
+        <text class="vz-s" x="222" y="75">started from the mysql:8.4 image</text>
+        <rect data-n="mysql" class="vz-node" x="222" y="88" width="286" height="44" rx="8" />
+        <text class="vz-t" x="238" y="108">MySQL</text>
+        <text class="vz-r" x="238" y="124">writes its files to /var/lib/mysql</text>
+        <rect data-n="layer" class="vl-layer" x="222" y="146" width="286" height="148" rx="8" />
+        <text class="vz-s" x="236" y="166" font-weight="700">Writable layer: the container's own</text>
+        <g data-n="layerrows"><text class="vz-s" x="236" y="192">No orders yet</text></g>
+      </g>
+      <g data-n="gone" class="vl-gone" opacity="0">
+        <rect class="vl-gone-bg" x="225" y="146" width="280" height="68" rx="8" />
+        <text class="vl-gone-t" x="365" y="178" text-anchor="middle">Removed</text>
+        <text class="vz-s" x="365" y="200" text-anchor="middle">the container and its writable layer are deleted</text>
+      </g>
+
+      <path data-n="mount" class="vl-mount" d="M508 110 L590 110" opacity="0" />
+      <text data-n="mountlbl" class="vz-r" x="549" y="128" text-anchor="middle" opacity="0">mounted</text>
+      <g data-n="vol" class="vl-vol">
+        <path class="vl-cyl" d="M590 70 v220 a82 16 0 0 0 164 0 v-220" />
+        <ellipse class="vl-cyl" cx="672" cy="70" rx="82" ry="16" />
+        <text class="vz-t" x="672" y="112" text-anchor="middle">Volume db-data</text>
+        <text data-n="volsub" class="vz-s" x="672" y="129" text-anchor="middle">not used</text>
+        <g data-n="volrows"></g>
+      </g>
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>MySQL is keeping its files <b>inside the container</b>. Save an order or two, then remove the container and start a new one.</div>
+</div>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  const ITEMS = ["margherita pizza", "pad thai", "falafel wrap", "green curry", "ramen", "veggie burger"];
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="volume-life"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+    const act = (a: string) => root.querySelector<HTMLButtonElement>(`[data-act="${a}"]`)!;
+    let mode: "layer" | "volume" = "layer";
+    let alive = true;
+    let gen = 1;
+    let next = 1;
+    let layer: string[] = [];
+    let vol: string[] = [];
+
+    const rowsSvg = (list: string[], x: number, y: number, anchor: string) => {
+      const shown = list.slice(-4);
+      const more = list.length - shown.length;
+      const top = more ? y + 20 : y;
+      const lines = shown.map((o, i) => `<text class="vl-row" x="${x}" y="${top + i * 20}" text-anchor="${anchor}">${o}</text>`);
+      if (more) lines.unshift(`<text class="vz-s" x="${x}" y="${y}" text-anchor="${anchor}">and ${more} earlier order${more === 1 ? "" : "s"}</text>`);
+      return lines.join("");
+    };
+
+    function draw() {
+      q("ctrname").textContent = `Container quickcart-db-${gen}`;
+      q<SVGGElement>("ctr").setAttribute("opacity", alive ? "1" : "0.2");
+      q<SVGGElement>("gone").setAttribute("opacity", alive ? "0" : "1");
+      const useVol = mode === "volume";
+      q("vol").setAttribute("class", useVol ? "vl-vol on" : "vl-vol");
+      q("mount").setAttribute("opacity", useVol && alive ? "1" : "0");
+      q("mountlbl").setAttribute("opacity", useVol && alive ? "1" : "0");
+      q("volsub").textContent = useVol ? (alive ? "mounted at /var/lib/mysql" : "still here, not mounted") : "not used";
+      q("layerrows").innerHTML = alive
+        ? (useVol
+          ? `<text class="vz-s" x="236" y="192">Empty. /var/lib/mysql is the volume,</text><text class="vz-s" x="236" y="210">so MySQL's files go there instead.</text>`
+          : (layer.length ? rowsSvg(layer, 236, 192, "start") : `<text class="vz-s" x="236" y="192">No orders yet</text>`))
+        : "";
+      q("volrows").innerHTML = useVol ? (vol.length ? rowsSvg(vol, 672, 166, "middle") : `<text class="vz-s" x="672" y="166" text-anchor="middle">No orders yet</text>`) : "";
+      act("save").disabled = !alive;
+      act("remove").disabled = !alive;
+      act("start").disabled = alive;
+    }
+
+    function reset(m: typeof mode) {
+      mode = m; alive = true; gen = 1; next = 1; layer = []; vol = [];
+      press(modeBtns, (b) => b.dataset.mode === m);
+      draw();
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.mode) {
+        reset(b.dataset.mode as typeof mode);
+        tell(say, mode === "volume" ? "Named volume" : "Inside the container", mode === "volume"
+          ? "Now the container is started with <code>-v db-data:/var/lib/mysql</code>. MySQL still writes to the same folder, but that folder is really the <b>volume</b>, which lives outside the container."
+          : "No volume. MySQL writes its files into the container's own <b>writable layer</b>. Save an order or two, then remove the container.");
+      } else if (b.dataset.act === "save") {
+        const order = `#${next} ${ITEMS[(next - 1) % ITEMS.length]}`;
+        next++;
+        (mode === "volume" ? vol : layer).push(order);
+        draw();
+        const n = mode === "volume" ? vol.length : layer.length;
+        tell(say, "Order saved", `The app saved order <b>${order}</b>. MySQL wrote it to <code>/var/lib/mysql</code>, which is ${mode === "volume" ? "the <b>volume</b>" : "inside the <b>container's writable layer</b>"}. The database holds ${n} order${n === 1 ? "" : "s"}.`);
+      } else if (b.dataset.act === "remove") {
+        alive = false;
+        const lost = layer.length;
+        layer = [];
+        draw();
+        tell(say, "Container removed", mode === "volume"
+          ? `<code>docker rm</code> deleted the container and its writable layer. The <b>volume is untouched</b>: Docker never deletes a named volume unless you ask. Now start a new container.`
+          : `<code>docker rm</code> deleted the container, <b>and its writable layer with it</b>. ${lost ? `The ${lost} order${lost === 1 ? " was" : "s were"} in that layer.` : ""} Now start a new container.`, mode === "volume" ? "" : "bad");
+      } else if (b.dataset.act === "start") {
+        alive = true;
+        gen++;
+        draw();
+        if (mode === "volume") {
+          tell(say, "New container, same volume", `<code>quickcart-db-${gen}</code> is a brand-new container, and it mounts the same volume. MySQL finds its files where it left them: <b>${vol.length} order${vol.length === 1 ? " is" : "s are"} still there.</b>`, "good");
+        } else {
+          tell(say, "New container, empty database", `<code>quickcart-db-${gen}</code> starts from the image, and the image has never held any orders. <b>The database is empty.</b> Nothing can bring the old orders back.`, "bad");
+        }
+      } else if (b.dataset.act === "reset") {
+        reset(mode);
+        tell(say, "Ready", "Save an order or two, then remove the container and start a new one.");
+      }
+    });
+    draw();
+  }));
+</script>
+
+<style is:global>
+  [data-viz="volume-life"] .vl-box { fill: color-mix(in srgb, var(--box) 5%, transparent); stroke: var(--box); stroke-width: 2; stroke-dasharray: 7 5; }
+  [data-viz="volume-life"] .vl-layer { fill: var(--bg); stroke: var(--rule-2); stroke-width: 1.5; }
+  [data-viz="volume-life"] .vl-ctr, [data-viz="volume-life"] .vl-gone, [data-viz="volume-life"] .vl-mount { transition: opacity .3s; }
+  [data-viz="volume-life"] .vl-gone-t { font-family: var(--font); font-size: 26px; font-weight: 800; fill: var(--bad); }
+  [data-viz="volume-life"] .vl-gone-bg { fill: var(--surface); stroke: var(--bad); stroke-width: 1.5; }
+  [data-viz="volume-life"] .vl-mount { fill: none; stroke: var(--box); stroke-width: 3; }
+  [data-viz="volume-life"] .vl-cyl { fill: var(--bg); stroke: var(--rule-2); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  [data-viz="volume-life"] .vl-vol.on .vl-cyl { fill: color-mix(in srgb, var(--box) 10%, var(--surface)); stroke: var(--box); stroke-width: 2; stroke-dasharray: none; }
+  [data-viz="volume-life"] .vl-row { font-family: var(--font); font-size: 13px; font-weight: 700; fill: var(--ink); }
+  @media (prefers-reduced-motion: reduce) {
+    [data-viz="volume-life"] .vl-ctr, [data-viz="volume-life"] .vl-gone, [data-viz="volume-life"] .vl-mount { transition: none; }
+  }
+</style>

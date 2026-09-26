@@ -1,0 +1,85 @@
+---
+/*
+ * Runbooks: a timed dry run.
+ * Teaches: running a runbook for real, with a clock, is what finds its gaps.
+ */
+import { listHtml, clockHtml, sayHtml } from "../../scripts/runbook-viz";
+const first = sayHtml("draft", 0);
+---
+<div class="viz" data-track="ship" data-viz="runbook-run">
+  <div class="viz-controls">
+    <span class="lbl" id="rb-lbl">Runbook</span>
+    <div class="seg" role="group" aria-labelledby="rb-lbl">
+      <button type="button" data-v="draft" aria-pressed="true">First draft</button>
+      <button type="button" data-v="fixed" aria-pressed="false">After the dry run</button>
+    </div>
+    <button class="btn line" type="button" data-a="next">Run next step</button>
+    <button class="btn" type="button" data-a="all">Run to the end</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <div class="rb-body">
+    <div class="rb-head"><b class="rb-title">Checkout returns 5xx</b><div class="rb-clockwrap" set:html={clockHtml("draft", 0)} /></div>
+    <ol class="rb-list" set:html={listHtml("draft", 0)} />
+  </div>
+  <div class="viz-say" aria-live="polite" set:html={first.html} />
+</div>
+
+<style is:global>
+  [data-viz="runbook-run"] .rb-body { padding: 14px 16px 8px; }
+  [data-viz="runbook-run"] .rb-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 14px; margin-bottom: 10px; }
+  [data-viz="runbook-run"] .rb-title { font-size: 16px; }
+  [data-viz="runbook-run"] .rb-clockwrap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; font-size: 14px; }
+  [data-viz="runbook-run"] .rb-clock b { font-family: var(--mono); font-size: 18px; }
+  [data-viz="runbook-run"] .rb-clock.over b { color: var(--bad); }
+  [data-viz="runbook-run"] .rb-target { color: var(--ink-3); }
+  [data-viz="runbook-run"] .rb-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  [data-viz="runbook-run"] .rb-s { border: 1px solid var(--rule); border-left-width: 4px; border-radius: 9px; padding: 8px 12px; background: var(--bg); }
+  [data-viz="runbook-run"] .rb-s.todo { background: var(--surface); border-style: dashed; border-left-style: solid; }
+  [data-viz="runbook-run"] .rb-s.next { border-left-color: var(--line); }
+  [data-viz="runbook-run"] .rb-s.ok { border-left-color: var(--ok); }
+  [data-viz="runbook-run"] .rb-s.slow { border-left-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="runbook-run"] .rb-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; font-size: 14.5px; }
+  [data-viz="runbook-run"] .rb-mark { font-size: 13px; font-weight: 700; color: var(--ink-2); }
+  [data-viz="runbook-run"] .rb-s.ok .rb-mark { color: var(--ok); }
+  [data-viz="runbook-run"] .rb-s.slow .rb-mark { color: var(--bad); }
+  [data-viz="runbook-run"] .rb-text, [data-viz="runbook-run"] .rb-find { margin: 3px 0 0; font-size: 14px; }
+  [data-viz="runbook-run"] .rb-text { color: var(--ink-2); }
+</style>
+
+<script>
+  import { STEPS, listHtml, clockHtml, sayHtml, type Ver } from "../../scripts/runbook-viz";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="runbook-run"]').forEach((root) => {
+    if (!once(root)) return;
+    const list = root.querySelector<HTMLElement>(".rb-list")!;
+    const clock = root.querySelector<HTMLElement>(".rb-clockwrap")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const next = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+    const all = root.querySelector<HTMLButtonElement>('[data-a="all"]')!;
+    const vBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-v]")];
+    let v: Ver = "draft";
+    let done = 0;
+
+    function render() {
+      press(vBtns, (b) => b.dataset.v === v);
+      list.innerHTML = listHtml(v, done);
+      clock.innerHTML = clockHtml(v, done);
+      const s = sayHtml(v, done);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = s.html;
+      next.disabled = all.disabled = done >= STEPS.length;
+    }
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.v) { v = b.dataset.v as Ver; done = 0; }
+      else if (b.dataset.a === "next") done++;
+      else if (b.dataset.a === "all") done = STEPS.length;
+      else if (b.dataset.a === "reset") done = 0;
+      else return;
+      render();
+    });
+  }));
+</script>

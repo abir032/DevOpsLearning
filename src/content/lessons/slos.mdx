@@ -1,0 +1,407 @@
+---
+time: 35 minutes
+level: Beginner
+before: [dora-metrics]
+cost: free
+quiz:
+  - q: What is the difference between an SLI and an SLO?
+    answer: 0
+    options:
+      - t: The SLI is what you measure; the SLO is the target you set for it
+        why: Right. "Share of orders that succeed" is an SLI. "99.9% of orders succeed over 30 days" is an SLO.
+      - t: The SLI is for users; the SLO is for engineers
+        why: Both are about what users experience. The difference is measurement versus target.
+      - t: They're two names for the same thing
+        why: They're related but different. One is a number you observe; the other is the number you aim for.
+      - t: The SLO is a contract with customers that includes refunds
+        why: That's an SLA, a service level agreement. SLOs are internal targets, usually stricter than any SLA.
+  - q: QuickCart's SLO is 99.9% of orders succeeding over 30 days. It handles 500,000 orders a month. How many failed orders is the error budget?
+    answer: 2
+    options:
+      - t: "5"
+        why: That would be 0.001%. The budget is 0.1%.
+      - t: "50"
+        why: That's 0.01%, the budget for a 99.99% SLO.
+      - t: "500"
+        why: Right. The budget is 100% − 99.9% = 0.1%, and 0.1% of 500,000 is 500.
+      - t: "5,000"
+        why: That's 1%, the budget for a 99% SLO.
+  - q: Why shouldn't QuickCart aim for 100% availability?
+    answer: 3
+    options:
+      - t: Because AWS doesn't allow it
+        why: AWS doesn't set your targets. You do.
+      - t: Because users don't mind outages
+        why: They do. That's why there's a target at all.
+      - t: Because 100% is easy, so it's not a useful target
+        why: It's the opposite. It's impossible in practice.
+      - t: Because it leaves no room for any change, costs far more than users notice, and can't be reached anyway
+        why: Right. Every release is a risk. A target of 100% means a budget of zero, so every change breaks the target. And users' own phones and networks fail more often than a 99.9% service does.
+  - q: Halfway through the month, the error budget is used up. What does a typical error budget policy say?
+    answer: 1
+    options:
+      - t: Nothing changes; the budget is just a number
+        why: Then the budget would be pointless. Its value is that it changes decisions.
+      - t: Pause risky feature releases and spend the time on reliability until the budget recovers
+        why: Right. The team agreed this in advance, so nobody has to argue about it in the moment.
+      - t: Release more features to win users back
+        why: More change means more risk, while the service is already failing its target.
+      - t: Lower the SLO so the budget is no longer spent
+        why: Changing the target after missing it hides the problem. An SLO can be reviewed, but calmly, with data, not to escape a bad month.
+  - q: Which of these is the best SLI for QuickCart's checkout?
+    answer: 0
+    options:
+      - t: The share of order requests that succeed within one second
+        why: Right. It measures what customers feel, success and speed, at the thing they care about most.
+      - t: The CPU use of the API servers
+        why: CPU can be high while customers are happy, or low while every order fails. It's useful for engineers, not as an SLI.
+      - t: How many servers are running
+        why: That says nothing about whether customers can order.
+      - t: The number of lines of code in the checkout service
+        why: That's not a measure of reliability at all.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, after the outage">
+
+Checkout went down for 25 minutes on a Friday evening. On Monday, the founder announced a new rule: **QuickCart must never go down again.** No releases on Fridays. Then no releases without two approvals. Then no releases in the last week of the month.
+
+Three months later, checkout is no more reliable than before. But almost nothing new has shipped, and the few releases that do go out are huge, because everything waited for them. Meanwhile Sam, on the other side of the team, argues that one outage a quarter is fine and they should ship faster. Nobody can say who's right.
+
+</Story>
+
+<Case title="A very common mistake: promising 100%">
+
+Teams and managers often promise that a service will "never go down". It can't be done. Hardware fails, networks drop packets, and every release carries some risk. The only way to get close is to stop changing anything, which is a different kind of failure.
+
+It's also wasted effort. A customer's own phone, Wi-Fi and mobile network fail far more often than a well-run service does. Past a certain point, extra reliability is invisible to users, while each extra "nine" costs a lot more than the last.
+
+</Case>
+
+QuickCart needs a number that says how reliable is reliable enough, and a rule for what to do when it isn't.
+
+</Part>
+
+<Part id="idea">
+
+Three terms, each built on the one before.
+
+| Term | What it is | QuickCart's example |
+|---|---|---|
+| **SLI**, service level indicator | Something you measure about what users experience. Usually: good events ÷ all events | Of all order requests, the share that succeeded in under one second |
+| **SLO**, service level objective | The target for that SLI, over a window of time | 99.9% of order requests succeed in under one second, over 30 days |
+| **Error budget** | The failure the SLO allows: 100% minus the SLO | 0.1% of order requests may fail or be slow each 30 days |
+
+<YouKnow title="You already know this: crash-free sessions">
+
+Your crash reporting tool shows a **crash-free sessions** rate, maybe 99.8%. That's an SLI: good sessions divided by all sessions. If your team says "we keep crash-free sessions above 99.5%", that's an SLO. The 0.5% of sessions that may crash is the error budget.
+
+</YouKnow>
+
+### Choosing the SLI
+
+A good SLI measures what users feel, at the thing they care about. For each important thing users do, ask two questions: **did it work**, and **was it fast enough**?
+
+| Counts as | Example | Why |
+|---|---|---|
+| Good | `201 Created` in 180 ms | It worked, quickly |
+| Bad | `500` or `503`: a server error | QuickCart failed the user |
+| Bad | `201` but after 3 seconds | It worked, but too slowly to feel like it did |
+| Left out | `404` for an order that doesn't exist | The user asked for something wrong. QuickCart answered correctly |
+
+CPU use, memory and server counts are useful for engineers, but they aren't SLIs. CPU can be at 90% while every customer is happy.
+
+### What the nines mean
+
+The number of nines sounds small. The difference isn't:
+
+| SLO | Error budget | In a 30-day month, that's |
+|---|---|---|
+| 99% | 1% | 7 hours 12 minutes of failure |
+| 99.5% | 0.5% | 3 hours 36 minutes |
+| 99.9% | 0.1% | 43 minutes |
+| 99.95% | 0.05% | 22 minutes |
+| 99.99% | 0.01% | 4 minutes 19 seconds |
+
+At 99.99%, one bad deploy that takes 20 minutes to undo uses the budget four times over. Each extra nine needs much more automation, more redundancy and more careful releases. Pick the lowest target your users would be happy with, not the highest you can say.
+
+### Spending the budget
+
+The error budget turns an argument into a number. Failure you can afford is budget to **spend**: on releases, on experiments, on moving fast. The team agrees an **error budget policy** in advance:
+
+| Budget left | What the team does |
+|---|---|
+| More than half | Ship as normal. Try bolder changes |
+| A quarter to a half | Keep shipping, but hold back risky changes and look at what used the budget |
+| Less than a quarter | Only small, low-risk changes |
+| None | Freeze feature releases. Work on reliability until the budget recovers |
+
+This settles QuickCart's argument. If there's budget left, Sam is right: ship. If it's gone, the founder is right: slow down. Nobody decides by who shouts loudest.
+
+### SLO or SLA?
+
+An **SLA**, service level agreement, is a promise to customers with a penalty, usually money back, if you miss it. AWS publishes SLAs for its services. An SLO is your own internal target. Set your SLO tighter than any SLA you offer, so you find out you're slipping before it costs you.
+
+<Key>An SLO says how reliable is reliable enough. The error budget is the failure you can afford, and you spend it on shipping.</Key>
+
+</Part>
+
+<Part id="see">
+
+Pick an SLO, then make things go wrong. Watch how much each failure costs, and what the policy says to do. Try the same failures at 99% and at 99.99%.
+
+<ErrorBudget />
+
+**What to notice:** the same 20-minute outage is a small dent at 99%, half the budget at 99.9%, and four times the whole budget at 99.99%. The SLO you choose decides how much room you have to move fast.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">everything runs on your laptop, on a sample log file.</Cost>
+
+You'll measure an availability SLI and a speed SLI from a web server's log, using only `grep`. Then you'll scale it up to a month and decide whether QuickCart met its SLO. About 20 minutes.
+
+<Steps>
+
+<Step title="Make a folder and a log file">
+
+```sh
+mkdir quickcart-slo
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-slo` | its name |
+
+```sh
+cd quickcart-slo
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | move into a directory. Later commands run in here |
+| `quickcart-slo` | the folder you just made |
+
+In your editor, create a file called `requests.log` in that folder, and paste this in. Each line is one request to QuickCart's API: the time, the method, the path, the status code, and how long it took.
+
+```text title="requests.log"
+2026-09-25T12:00:01Z POST /orders 201 184ms
+2026-09-25T12:00:02Z GET /menu 200 41ms
+2026-09-25T12:00:02Z GET /orders/1042 200 63ms
+2026-09-25T12:00:03Z POST /orders 201 212ms
+2026-09-25T12:00:04Z GET /menu 200 38ms
+2026-09-25T12:00:05Z POST /orders 503 3002ms
+2026-09-25T12:00:05Z GET /menu 200 44ms
+2026-09-25T12:00:06Z POST /orders 201 197ms
+2026-09-25T12:00:07Z GET /orders/1043 404 22ms
+2026-09-25T12:00:08Z POST /orders 201 1480ms
+2026-09-25T12:00:08Z GET /menu 200 40ms
+2026-09-25T12:00:09Z POST /orders 500 95ms
+2026-09-25T12:00:10Z GET /menu 200 39ms
+2026-09-25T12:00:11Z POST /orders 201 176ms
+2026-09-25T12:00:12Z GET /orders/1044 200 58ms
+2026-09-25T12:00:13Z POST /orders 201 203ms
+2026-09-25T12:00:13Z GET /menu 200 42ms
+2026-09-25T12:00:14Z POST /orders 201 188ms
+2026-09-25T12:00:15Z GET /menu 200 37ms
+2026-09-25T12:00:16Z POST /orders 201 1120ms
+```
+
+Real logs have millions of lines, but the counting works exactly the same way.
+
+</Step>
+
+<Step title="Count the orders">
+
+QuickCart's SLI is about placing orders, which are the `POST /orders` lines.
+
+```sh
+grep -c "POST /orders" requests.log
+```
+
+| Part | What it means |
+|---|---|
+| `grep` | search a file for lines containing some text |
+| `-c` | print only how many lines matched, not the lines themselves |
+| `"POST /orders"` | the text to look for |
+| `requests.log` | the file to search |
+
+```output
+10
+```
+
+Ten order attempts: that's the **total** for the SLI.
+
+</Step>
+
+<Step title="Count the failed orders">
+
+A failure is a status code in the 500s: QuickCart's fault, not the customer's.
+
+```sh
+grep -E "POST /orders 5[0-9][0-9] " requests.log
+```
+
+| Part | What it means |
+|---|---|
+| `grep` | search for matching lines |
+| `-E` | the search text is a **pattern**, not plain text |
+| `POST /orders 5[0-9][0-9] ` | `POST /orders`, a space, then a `5` followed by any two digits, then a space: a status from 500 to 599 |
+| `requests.log` | the file to search |
+
+```output
+2026-09-25T12:00:05Z POST /orders 503 3002ms
+2026-09-25T12:00:09Z POST /orders 500 95ms
+```
+
+Two failed orders. The `404` for `/orders/1043` isn't counted: it isn't an order attempt, and a `404` means the request asked for something that doesn't exist, which isn't a failure of QuickCart.
+
+**Availability SLI** = good ÷ total = (10 − 2) ÷ 10 = **80%**. A terrible minute.
+
+<Mistake title="searching for 500 only">
+
+A common first attempt is to search for the number 500:
+
+```sh
+grep -c "500" requests.log
+```
+
+| Part | What it means |
+|---|---|
+| `grep -c "500"` | count lines containing the text `500` anywhere |
+| `requests.log` | the file to search |
+
+```output
+1
+```
+
+**Why:** `500` is only one of the server errors. The `503` from an overloaded server is a failure too, and so is every other code from 500 to 599. Searching for plain text can also match the wrong part of a line, like a duration of `1500ms`.
+
+**The fix:** use the pattern above. It matches any code from 500 to 599, and only in the status position, right after `POST /orders`.
+
+</Mistake>
+
+</Step>
+
+<Step title="Count the slow orders">
+
+QuickCart's SLI also says *in under one second*. A duration with four or more digits, like `1480ms`, is a second or more.
+
+```sh
+grep -c -E "POST /orders 2[0-9][0-9] [0-9]{4,}ms" requests.log
+```
+
+| Part | What it means |
+|---|---|
+| `grep -c -E` | count the lines matching a pattern |
+| `POST /orders 2[0-9][0-9] ` | a successful order: status 200 to 299 |
+| `[0-9]{4,}ms` | four or more digits, then `ms`: 1000 milliseconds or more |
+| `requests.log` | the file to search |
+
+```output
+2
+```
+
+Two orders worked, but took over a second. For QuickCart's full SLI, *succeeded in under one second*, the good orders are 10 − 2 failed − 2 slow = 6. That's **60%**.
+
+</Step>
+
+<Step title="Scale it up to a month">
+
+A minute of log shows how to count, not whether QuickCart met its target. Here are a full month's numbers, counted the same way:
+
+| Count | September |
+|---|---|
+| Order attempts | 1,200,000 |
+| Failed or slower than one second | 1,450 |
+| Good | 1,198,550 |
+
+Work out three numbers. You can use the calculator on your Mac.
+
+| Question | Working | Answer |
+|---|---|---|
+| What was the SLI? | 1,198,550 ÷ 1,200,000 | 99.88% |
+| How big was the error budget, at a 99.9% SLO? | 0.1% of 1,200,000 | 1,200 bad orders |
+| How much of it was used? | 1,450 ÷ 1,200 | 121%: over budget |
+
+<See>
+
+QuickCart **missed** its 99.9% SLO in September, by 250 orders. Under the policy in [the idea](#idea), feature releases pause until the budget recovers.
+
+</See>
+
+</Step>
+
+<Step title="Write your own SLO">
+
+For an app you work on, fill this in. It works for a mobile app's crash-free sessions as well as for an API.
+
+| Question | Your answer |
+|---|---|
+| What's the most important thing users do? | |
+| What counts as a good event? A bad one? | |
+| How will you measure it, and where? | |
+| What target, over what window? | |
+| What does the team do when half the budget is gone? And all of it? | |
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Move out of the folder, then delete it:
+
+```sh
+cd ..
+```
+
+| Part | What it means |
+|---|---|
+| `cd ..` | move up one level, out of `quickcart-slo` |
+
+```sh
+rm -r quickcart-slo
+```
+
+| Part | What it means |
+|---|---|
+| `rm` | remove files. There's no bin: they're gone straight away |
+| `-r` | recursive: remove the folder and everything inside it |
+| `quickcart-slo` | the folder to remove. Check the name before you press Return |
+
+Nothing was created on AWS, so there's nothing else to delete.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term or command | In one line |
+|---|---|
+| SLI | What you measure: good events ÷ all events |
+| SLO | The target for the SLI over a window, like 99.9% over 30 days |
+| Error budget | 100% minus the SLO. The failure you can afford |
+| SLA | A promise to customers with a penalty. Looser than your SLO |
+| 99.9% | About 43 minutes of failure a month |
+| 99.99% | About 4 minutes a month |
+| Good vs bad | 5xx and too slow are bad. 4xx usually aren't |
+| Error budget policy | Agreed in advance: what happens as the budget runs out |
+| `grep -c "TEXT" FILE` | Count matching lines |
+| `grep -E "PATTERN" FILE` | Match a pattern, like `5[0-9][0-9]` |
+
+</Cheat>
+
+</Part>

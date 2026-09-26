@@ -1,0 +1,144 @@
+---
+/*
+ * ECS or EKS? A decision helper.
+ * Teaches: the choice comes from the team's situation (who runs it, what
+ * they know, what already runs, whether leaving AWS is real), not from which
+ * platform has more features. Every answer shows the reason it counts.
+ */
+import { QUESTIONS, verdict } from "../../scripts/ecs-eks-decider";
+const v = verdict(QUESTIONS.map(() => null));
+---
+<div class="viz" data-track="box" data-viz="ecs-eks">
+  <div class="viz-controls">
+    <button class="btn line" type="button" data-act="quickcart">Fill in QuickCart's answers</button>
+    <button class="btn" type="button" data-act="clear">Clear</button>
+  </div>
+  <div class="viz-stage ed-stage">
+    <ol class="ed-qs">
+      {QUESTIONS.map((q, i) => (
+        <li class="ed-q">
+          <span class="ed-qt" id={`ed-q-${q.id}`}>{q.q}</span>
+          <div class="ed-opts" role="group" aria-labelledby={`ed-q-${q.id}`}>
+            {q.answers.map((a, j) => (
+              <button type="button" class="ed-opt" data-q={i} data-a={j} aria-pressed="false">{a.t}</button>
+            ))}
+          </div>
+        </li>
+      ))}
+    </ol>
+    <section class="ed-result" aria-label="Recommendation">
+      <p class="ed-kicker">Recommendation</p>
+      <p class="ed-title" data-n="title">{v.title}</p>
+      <div class="ed-meter" aria-hidden="true">
+        <span class="ed-side">ECS</span>
+        <div class="ed-bars"><i class="ed-bar ecs" data-n="ecsbar" style="width:0%"></i><i class="ed-bar eks" data-n="eksbar" style="width:0%"></i></div>
+        <span class="ed-side">EKS</span>
+      </div>
+      <p class="ed-score" data-n="score">No answers yet.</p>
+      <p class="ed-body" data-n="body">{v.body}</p>
+      <ul class="ed-why" data-n="why"></ul>
+      <p class="ed-change" data-n="change" hidden></p>
+    </section>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Answer each question for your own team, or choose <b>Fill in QuickCart's answers</b>. Every answer shows why it counts.</div>
+</div>
+
+<style is:global>
+  [data-viz="ecs-eks"] [hidden] { display: none !important; }
+  [data-viz="ecs-eks"] .ed-stage { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; padding: 16px; }
+  [data-viz="ecs-eks"] .ed-qs { list-style: none; margin: 0; padding: 0; display: grid; align-content: start; gap: 16px; counter-reset: q; }
+  [data-viz="ecs-eks"] .ed-q { counter-increment: q; }
+  [data-viz="ecs-eks"] .ed-qt { display: block; font-weight: 800; font-size: 15px; margin-bottom: 6px; }
+  [data-viz="ecs-eks"] .ed-qt::before { content: counter(q) ". "; color: var(--box-t); }
+  [data-viz="ecs-eks"] .ed-opts { display: flex; flex-wrap: wrap; gap: 6px; }
+  [data-viz="ecs-eks"] .ed-opt { border: 1px solid var(--rule-2); background: var(--surface); color: var(--ink-2); border-radius: 8px; padding: 7px 11px; font-size: 14px; font-weight: 600; cursor: pointer; text-align: left; }
+  [data-viz="ecs-eks"] .ed-opt:hover { border-color: var(--ink-3); }
+  [data-viz="ecs-eks"] .ed-opt[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  [data-viz="ecs-eks"] .ed-result { align-self: start; position: sticky; top: calc(var(--top) + 12px); border: 1px solid var(--rule); border-left: 5px solid var(--box); border-radius: 12px; padding: 14px 16px; background: var(--bg); }
+  [data-viz="ecs-eks"] .ed-kicker { margin: 0; font-size: 13px; font-weight: 700; color: var(--ink-3); }
+  [data-viz="ecs-eks"] .ed-title { margin: 2px 0 10px; font-size: 21px; font-weight: 800; line-height: 1.25; letter-spacing: -.01em; }
+  [data-viz="ecs-eks"] .ed-meter { display: flex; align-items: center; gap: 8px; }
+  [data-viz="ecs-eks"] .ed-side { font-size: 13px; font-weight: 800; color: var(--ink-2); }
+  [data-viz="ecs-eks"] .ed-bars { flex: 1; display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--sunk); border: 1px solid var(--rule); }
+  [data-viz="ecs-eks"] .ed-bar { display: block; height: 100%; transition: width .3s; }
+  [data-viz="ecs-eks"] .ed-bar.ecs { background: var(--box); }
+  [data-viz="ecs-eks"] .ed-bar.eks { background: var(--ink-3); margin-left: auto; }
+  [data-viz="ecs-eks"] .ed-score { margin: 6px 0 10px; font-size: 13.5px; color: var(--ink-2); }
+  [data-viz="ecs-eks"] .ed-body { margin: 0 0 10px; font-size: 15px; }
+  [data-viz="ecs-eks"] .ed-why { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 8px; }
+  [data-viz="ecs-eks"] .ed-why li { font-size: 14px; line-height: 1.45; padding-left: 10px; border-left: 3px solid var(--rule-2); }
+  [data-viz="ecs-eks"] .ed-why li.ecs { border-left-color: var(--box); }
+  [data-viz="ecs-eks"] .ed-why li.eks { border-left-color: var(--ink-3); }
+  [data-viz="ecs-eks"] .ed-why b { font-size: 12.5px; color: var(--ink-3); display: block; }
+  [data-viz="ecs-eks"] .ed-change { margin: 0; font-size: 14px; padding-top: 10px; border-top: 1px solid var(--rule); }
+  @media (prefers-reduced-motion: reduce) { [data-viz="ecs-eks"] .ed-bar { transition: none; } }
+  @media (max-width: 900px) {
+    [data-viz="ecs-eks"] .ed-stage { grid-template-columns: 1fr; }
+    [data-viz="ecs-eks"] .ed-result { position: static; }
+  }
+</style>
+
+<script>
+  import { QUESTIONS, QUICKCART, verdict } from "../../scripts/ecs-eks-decider";
+  import { tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="ecs-eks"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const opts = [...root.querySelectorAll<HTMLButtonElement>(".ed-opt")];
+    const picks: (number | null)[] = QUESTIONS.map(() => null);
+    const MAX = QUESTIONS.reduce((s, x) => s + Math.max(...x.answers.map((a) => Math.max(a.ecs, a.eks))), 0);
+
+    const side = (a: { ecs: number; eks: number }) => a.ecs > a.eks ? "ecs" : a.eks > a.ecs ? "eks" : "";
+    const sideText = (a: { ecs: number; eks: number }) => a.ecs > a.eks ? `Points to ECS (+${a.ecs})` : a.eks > a.ecs ? `Points to EKS (+${a.eks})` : "Neutral";
+
+    function render() {
+      for (const b of opts) b.setAttribute("aria-pressed", String(picks[+b.dataset.q!] === +b.dataset.a!));
+      const v = verdict(picks);
+      q<HTMLElement>("title").textContent = v.title;
+      q<HTMLElement>("body").textContent = v.body;
+      q<HTMLElement>("ecsbar").style.width = `${(v.ecs / MAX) * 50}%`;
+      q<HTMLElement>("eksbar").style.width = `${(v.eks / MAX) * 50}%`;
+      q<HTMLElement>("score").textContent = v.answered ? `ECS ${v.ecs} points, EKS ${v.eks} points, from ${v.answered} of ${QUESTIONS.length} answers.` : "No answers yet.";
+      const why = q<HTMLUListElement>("why");
+      why.innerHTML = "";
+      picks.forEach((p, i) => {
+        if (p == null) return;
+        const a = QUESTIONS[i].answers[p];
+        const li = document.createElement("li");
+        const s = side(a);
+        if (s) li.className = s;
+        const b = document.createElement("b");
+        b.textContent = `${i + 1}. ${sideText(a)}`;
+        li.append(b, a.why);
+        why.append(li);
+      });
+      const change = q<HTMLElement>("change");
+      change.hidden = !v.change;
+      change.innerHTML = v.change ? `<b>What would change this:</b> ${v.change}` : "";
+      return v;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.classList.contains("ed-opt")) {
+        const qi = +b.dataset.q!, ai = +b.dataset.a!;
+        picks[qi] = ai;
+        const v = render();
+        const a = QUESTIONS[qi].answers[ai];
+        tell(say, `Question ${qi + 1}: ${sideText(a)}`, `${a.why} <b>${v.answered === QUESTIONS.length ? "Recommendation: " + v.title + "." : "Answered " + v.answered + " of " + QUESTIONS.length + "."}</b>`);
+      } else if (b.dataset.act === "quickcart") {
+        QUICKCART.forEach((a, i) => (picks[i] = a));
+        const v = render();
+        tell(say, "QuickCart's answers", `A few people running it part time, already on ECS, no plan to leave AWS and no Kubernetes-only tool. <b>Recommendation: ${v.title}.</b> Now change one answer, such as a real plan to leave AWS, and watch what moves.`, "good");
+      } else if (b.dataset.act === "clear") {
+        picks.fill(null);
+        render();
+        tell(say, "Cleared", "Answer each question for your own team. Every answer shows why it counts.");
+      }
+    });
+  }));
+</script>

@@ -1,0 +1,14 @@
+---
+/* Where to click in the AWS console, e.g. path="VPC > Your VPCs > Create VPC". */
+interface Props { path: string }
+const parts = Astro.props.path.split(">").map((s) => s.trim());
+---
+<p class="console-path">
+  <span class="aws" aria-hidden="true">AWS</span><span class="sr">In the AWS console: </span>
+  {parts.map((p, i) => (
+    <>
+      {i > 0 && <span class="sep" aria-hidden="true">→</span>}
+      {i === 0 || i === parts.length - 1 ? <b>{p}</b> : <span>{p}</span>}
+    </>
+  ))}
+</p>

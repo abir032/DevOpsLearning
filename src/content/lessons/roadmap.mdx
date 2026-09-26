@@ -1,0 +1,313 @@
+---
+time: 15 minutes
+level: Beginner
+before: []
+cost: free
+quiz:
+  - q: What is DevOps mostly about?
+    answer: 2
+    options:
+      - t: A set of tools, such as Docker, Kubernetes and Terraform
+        why: The tools come up a lot, but they are answers to problems. Learning the tools without the problems is why DevOps feels like an endless list.
+      - t: A job title for the person who manages servers
+        why: Some companies use it as a job title, but the idea is bigger than one person. It is about how the whole team ships and runs software.
+      - t: Getting changes from a developer's laptop to users safely and often, and keeping them running
+        why: That's it. Every lesson in this course is one part of that journey, from the first commit to fixing things at 3am.
+      - t: Writing backend code instead of app code
+        why: Backend code is still just code. DevOps is about what happens to any code after it is written.
+  - q: Why does this course introduce each tool only when QuickCart needs it?
+    answer: 1
+    options:
+      - t: Because the tools are too hard to learn all at once
+        why: They can be hard, but that is not the main reason. Even an easy tool is confusing when you can't see what it is for.
+      - t: Because a tool makes sense only when you have felt the problem it solves
+        why: A load balancer means little until you've seen one server fall over. Problem first, then tool, is the rule for every lesson.
+      - t: Because QuickCart is a real company with a real history
+        why: QuickCart is invented. Its problems are the common ones every growing app runs into.
+      - t: Because the tools are only useful for food-ordering apps
+        why: Nothing here is specific to food. The same problems appear in any app with a backend.
+  - q: You only want to learn Terraform. What should you do?
+    answer: 3
+    options:
+      - t: Start at module 00 and read every lesson in order
+        why: That works, but you don't have to. Every lesson is written so you can start there.
+      - t: Skip straight to module 09 and ignore everything before it
+        why: Close, but you might miss something the Terraform lessons rely on. Each lesson tells you what that is.
+      - t: Give up, because the course only works in order
+        why: The course is designed for jumping in. That is one of its main jobs.
+      - t: Go to module 09 and read the lessons listed under "Read first" in each lesson's header
+        why: Each lesson lists the few lessons it builds on. Read those, and you can start anywhere.
+  - q: A small site gets mentioned on a huge news site and goes down within minutes. What is this usually called?
+    answer: 0
+    options:
+      - t: A "hug of death", or the Slashdot effect
+        why: Both names describe the same thing. A sudden rush of real visitors overwhelms a site that was sized for a trickle.
+      - t: A denial-of-service attack
+        why: The effect is similar, but nobody is attacking. These are real, welcome visitors, which makes it worse.
+      - t: A memory leak
+        why: A leak builds up slowly over hours or days. This is a sudden spike in traffic.
+      - t: A failed deployment
+        why: No code changed. The site simply met more traffic than one server could handle.
+  - q: Roughly what should you expect to spend on AWS if you follow the whole course and clean up after each lab?
+    answer: 1
+    options:
+      - t: Nothing at all, whatever you build
+        why: Most labs are free or cost pennies, but a few use things that charge by the hour, such as load balancers and Kubernetes. Those cost a little while they run.
+      - t: A few dollars to a few tens of dollars in total, if you delete things after each lab
+        why: That's the honest answer. The labs that cost money say so at the start and have a clean-up step at the end. Your exact figure depends on how long things run.
+      - t: Hundreds of dollars a month
+        why: Only if you leave expensive things running after a lab. The next lesson sets up a budget alert so that can't happen quietly.
+      - t: It depends entirely on how many users your app has
+        why: Your practice copy of QuickCart has no real users. The cost depends on what you create and for how long.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the very beginning">
+
+Maya is a mobile developer. On a weekend, she builds QuickCart: a food-ordering app with a small backend that stores the menu and the orders.
+
+The backend runs on her laptop. Her friends install the app, order lunch, and it works. Then a local food blogger mentions QuickCart. That evening, a thousand people try it at once.
+
+The laptop is asleep in Maya's bag. Every order fails.
+
+</Story>
+
+<Case title="A very common pattern: the hug of death">
+
+A small site gets linked from a very popular one. Within minutes, thousands of real visitors arrive at a server that was sized for dozens. The site slows down, then stops answering.
+
+This has happened so often, for so long, that it has names. In the early 2000s people called it the **Slashdot effect**, after a news site whose links took smaller sites down. Today people call it a **hug of death**. Nobody is attacking. The visitors are welcome. There is simply nothing ready to handle them.
+
+</Case>
+
+Maya now needs to learn a pile of things at once: servers, networks, databases, containers, Terraform, pipelines. Each one comes with a list of tools. It is hard to know where to start, or what any of it is **for**.
+
+This course answers that by following QuickCart, one problem at a time.
+
+</Part>
+
+<Part id="idea">
+
+**DevOps** is everything that happens to code after a developer writes it: getting it to users safely, often, and keeping it running once it's there.
+
+The name joins two words, *development* and *operations*. In many companies these used to be separate teams. Developers wrote code and handed it over. An operations team ran it. Releases were slow and painful, because the people who wrote the code never saw it fail, and the people who saw it fail couldn't change it. DevOps is the idea that one team owns both halves.
+
+<YouKnow title="You already know this: shipping to an app store">
+
+You already run a release process. You build the app, send it to TestFlight or an internal testing track, release it to a small percentage of users, and watch the crash reports.
+
+DevOps is the same loop for the servers your app talks to. The difference is that there's no app store doing half the work for you. You build the testing track, the gradual release and the crash reports yourself.
+
+</YouKnow>
+
+### Every tool answers one problem
+
+QuickCart grows from one laptop to millions of users. At each size, something new breaks. Each module in this course is the fix for one of those breaks.
+
+| Module | What goes wrong for QuickCart | What it teaches |
+|---|---|---|
+| 00 Start here | Nothing yet | This roadmap, safe practice, and your Mac |
+| 01 How software ships | Monthly releases hurt, and nobody knows which change broke things | Small releases, measuring delivery, reliability targets, safe ways to release |
+| 02 The cloud, simply | The backend needs a computer that is always on | Renting servers from AWS, and who is allowed to do what |
+| 03 Networking | The database can be reached from the internet | A private network where you choose what is exposed |
+| 04 Running code | One server falls over on launch night | More servers, a load balancer in front, and adding servers automatically |
+| 05 Data | Orders must never be lost, and passwords are in the code | Managed databases, file storage, secrets |
+| 06 Watching it run | Checkout fails for an hour and nobody notices | Logs, metrics, alarms, and a record of who changed what |
+| 07 Containers | "It worked on my laptop" | Packaging the app so it runs the same everywhere |
+| 08 Running containers | Releases drop requests | Running containers, and releasing without downtime |
+| 09 Infrastructure as code | A second country takes a week of clicking | Describing everything in code with Terraform |
+| 10 Automation | Releases need a person awake at 2am | A pipeline that takes a commit all the way to production |
+| 11 When things break | It's 3am and checkout is down | Where to look first, and runbooks |
+| Projects | Everything at once | Five builds that combine the modules |
+
+<Key>Every tool in this course is the answer to a problem QuickCart has at a certain size. Meet the problem first, and the tool makes sense.</Key>
+
+### Two ways to use the course
+
+| If you want to | Do this |
+|---|---|
+| Learn DevOps from zero | Go in order, from here to Project 5. Each module builds on the one before |
+| Learn one topic | Go straight to it. Each lesson's header lists the few lessons to **read first** |
+| Answer one question, like "why can't my server reach the internet?" | Use [Which lesson do I need?](/which-lesson/), or search with <kbd>/</kbd> |
+
+### What you need
+
+| You need | Why | Where it's covered |
+|---|---|---|
+| A Mac | The setup steps are written for macOS. Linux works with different install commands. On Windows, use WSL, which gives you a Linux terminal | [Set up your Mac](/lessons/mac-setup/) |
+| About 20 GB of free disk space | Docker images and tools take room | The lab below |
+| An AWS account and a payment card | AWS asks for a card even for free use | [How this course works](/lessons/how-this-course-works/) |
+| A small budget | Most labs are free or cost pennies. A few cost a little while they run | Every lab starts with a cost badge |
+| Time | Each lesson takes 15 to 45 minutes. The projects take a few hours each | Each lesson's header |
+
+You don't need any backend experience. If you can write an app and use a terminal a little, you have enough.
+
+</Part>
+
+<Part id="see">
+
+Below is QuickCart's route. Choose **Grow QuickCart** to add users. At each stage, see what breaks, and which module fixes it. You can also jump to any stage on the line.
+
+<GrowthStepper />
+
+**What to notice:** no stage needs everything. A laptop doesn't need Kubernetes, and a site with 50 users doesn't need a pipeline. Knowing which problem you actually have is how you pick the right tool, and how you avoid building things you don't need yet.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">nothing in this lab touches AWS.</Cost>
+
+You'll check that your Mac is ready for the course, and write down a plan: which route you'll take, how much time you have, and what you're willing to spend. About 10 minutes.
+
+Open the **Terminal** app. You'll find it in **Applications → Utilities**, or press <kbd>⌘</kbd> + <kbd>Space</kbd> and type `Terminal`.
+
+<Steps>
+
+<Step title="Check your version of macOS">
+
+```sh
+sw_vers
+```
+
+| Part | What it means |
+|---|---|
+| `sw_vers` | print the name and version of the operating system (short for *software versions*) |
+
+```output
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A428
+```
+
+Your version and build will differ. The tools in this course need a recent macOS. Docker Desktop, for example, supports the current version of macOS and the two before it. If your Mac is several years behind, update it first in **System Settings → General → Software Update**.
+
+</Step>
+
+<Step title="Check which kind of chip your Mac has">
+
+```sh
+uname -m
+```
+
+| Part | What it means |
+|---|---|
+| `uname` | print information about the system |
+| `-m` | only the machine's hardware type |
+
+```output
+arm64
+```
+
+`arm64` means an Apple chip (M1 or later). `x86_64` means an Intel chip. Both work for this course. It matters later: a container image built on an Apple chip is built for arm64 by default, and it won't run on an Intel server unless you build it for that. The [Dockerfile lesson](/lessons/dockerfile/) shows how.
+
+</Step>
+
+<Step title="Check your free disk space">
+
+```sh
+df -h /
+```
+
+| Part | What it means |
+|---|---|
+| `df` | show how much space is free on your disks (short for *disk free*) |
+| `-h` | human-readable: show sizes like `212Gi` instead of counting blocks |
+| `/` | only the main disk, the one macOS runs from |
+
+```output
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   460Gi    11Gi   212Gi     5%    453k  2.2G    0%   /
+```
+
+Look at the **Avail** column. Your numbers will differ. The **Used** column often looks strangely small on a Mac, because macOS keeps its own files on a separate part of the disk. **Avail** is the number that matters.
+
+<Mistake title="not enough space for Docker">
+
+If **Avail** is under about 20 GB, Docker will run out of room part-way through the containers module. It shows up as an error when you build or pull an image, like:
+
+```output title="Docker stops with a message like"
+no space left on device
+```
+
+**Why:** container images are often hundreds of megabytes each, and Docker keeps old ones until you delete them.
+
+**The fix:** free up space before you start, and use the clean-up steps in the container lessons to delete old images as you go.
+
+</Mistake>
+
+</Step>
+
+<Step title="Choose your route">
+
+Pick one of these. You can change your mind later.
+
+| Route | Modules | Good for |
+|---|---|---|
+| **The whole line** | 00 to 11, then all five projects | Going from zero to job-ready |
+| **AWS first** | 00, 02 to 06, then Project 1 and Project 2 | Understanding what your app's backend really runs on |
+| **Ship faster** | 00, 01, 07, 08, 10 | Containers, releases and pipelines, if someone else runs the cloud side |
+
+Write your choice down, in a notes app or on paper.
+
+</Step>
+
+<Step title="Decide your time and budget">
+
+Fill in this table in the same note:
+
+| Question | Example answer |
+|---|---|
+| How many hours a week can you give this? | 4 hours: two evenings |
+| Which days? | Tuesday and Thursday |
+| What's the most you'll spend on AWS in a month? | $10 |
+| Who can you ask when you're stuck? | A friend who works on backend, or a community forum |
+
+The budget number matters. In the next lesson you'll set up an alert that emails you before you reach it.
+
+<See>
+
+A short note with your route, your hours, and your monthly limit. That's your plan.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing to delete. You only ran commands that read information; none of them changed anything.
+
+Keep your plan somewhere you'll see it. When you finish a lesson, press **Mark as done** at the bottom of the page. Your progress fills in on the route map on the home page, and it stays in this browser.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Idea | In one line |
+|---|---|
+| DevOps | Getting changes to users safely and often, and keeping them running |
+| This course | One app, QuickCart, from a laptop to millions of users |
+| Every lesson | Problem, idea, see it, do it, check yourself, cheat sheet |
+| Every tool | The answer to one problem at one size. Meet the problem first |
+| Jumping in | Read the lessons listed under **Read first**, then start anywhere |
+| `sw_vers` | Which macOS you have |
+| `uname -m` | `arm64` for an Apple chip, `x86_64` for Intel |
+| `df -h /` | Free disk space. Look at **Avail**. You want 20 GB or more |
+| Cost | Every lab has a badge. The paid ones have a clean-up step |
+
+</Cheat>
+
+</Part>

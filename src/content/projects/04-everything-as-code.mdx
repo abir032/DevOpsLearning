@@ -1,0 +1,3284 @@
+---
+time: 8 to 10 hours, over two or three sittings
+cost: about $3 a day per environment, and $3.50 more while EKS runs
+---
+
+By now QuickCart's platform exists because people clicked it into being. Priya knows how the network was built. Sam remembers the target group's drain setting. Nobody remembers everything, and the notes are already out of date.
+
+Then someone asks the question every team dreads: "If we lost this account tonight, how long to rebuild it?" The honest answer is "days, and it would come back different".
+
+In this project you make that answer "about thirty minutes, and identical". You rebuild Projects 1 to 3 as Terraform code: modules for each piece, remote state with locking, two environments that differ only in their values, and a copy in a second region. Then you prove it: destroy everything, build it again from empty with no clicks, and show that the next plan has nothing left to do.
+
+## What you'll have at the end
+
+<ThreeStacks />
+
+**What to notice:** switch between the three environments and watch the code column. It never changes. Only the values and the state file's key do, and those few values decide how many NAT gateways, tasks and database copies get built.
+
+The repository looks like this:
+
+```text title="quickcart-infra/"
+quickcart-infra/
+├── .gitignore
+├── shared/                 built once per account: the image repositories
+│   └── main.tf
+├── modules/                reusable pieces that never mention an environment
+│   ├── network/main.tf     VPC, three tiers of subnets, NAT, routes, S3 endpoint
+│   ├── security/main.tf    the load balancer → app → database chain
+│   ├── certificate/main.tf self-signed, or trusted if you own a domain
+│   ├── alb/main.tf         load balancer, stable and canary target groups
+│   ├── ecs-service/main.tf one ECS service with its task definition and logs
+│   ├── data/main.tf        MySQL on RDS, and a private S3 bucket
+│   ├── alarms/main.tf      the three alarms from Project 2
+│   └── eks/main.tf         cluster, nodes, and the controller's permissions
+├── stack/                  one whole environment: calls every module
+│   ├── variables.tf
+│   ├── main.tf
+│   ├── eks.tf
+│   └── outputs.tf
+└── envs/                   one folder per environment, each with its own state
+    ├── dev/                main.tf, backend.tf, terraform.tfvars
+    ├── prod/               the same main.tf; its own backend.tf and values
+    └── dev-usw2/           the same main.tf; the second region
+```
+
+| Folder | Its job | Rule |
+|---|---|---|
+| `shared/` | things one account needs once: ECR repositories and replication | applied once, before any environment |
+| `modules/` | one piece of infrastructure each | never mentions `dev` or `prod`, so it can be reused |
+| `stack/` | one complete environment, built from the modules | takes every difference as a variable |
+| `envs/<name>/` | where you run Terraform | `main.tf` is an identical copy everywhere; only `backend.tf` and `terraform.tfvars` differ |
+
+| Project | What it becomes in code |
+|---|---|
+| [Project 1](/projects/01-network-by-hand/): the network | `modules/network` and `modules/security`, plus least-privilege roles in `stack/` and `modules/eks` |
+| [Project 2](/projects/02-self-healing-environment/): the self-healing environment | `modules/alb`, `modules/data`, `modules/alarms`, and the database secret. The order service now runs as containers, so the ECS service replaces the EC2 auto scaling group and does the same job: it replaces failed copies across two zones |
+| [Project 3](/projects/03-one-service-two-runtimes/): one service, two runtimes | `modules/ecs-service` twice (stable and canary), `modules/eks`, and the Kubernetes objects in `stack/eks.tf` |
+
+Unlike Project 3, the containers now run in **private** app subnets behind NAT gateways, as in Project 1. The canary service and target group are built now, idle, so [Project 5](/projects/05-the-pipeline/)'s pipeline has somewhere to send a canary.
+
+## Before you start
+
+This project uses every lesson in [Infrastructure as code](/modules/09-infrastructure-as-code/). Read them first; the tables below link back to them rather than repeat them.
+
+| Read | You'll use it for |
+|---|---|
+| [Your first resource](/lessons/first-resource/) | reading a plan |
+| [Variables, locals and outputs](/lessons/terraform-variables/) | every module's inputs and outputs |
+| [Loops and lifecycle](/lessons/terraform-loops/) | `for_each`, `count` and `ignore_changes` |
+| [Modules](/lessons/terraform-modules/) | how the folders call each other |
+| [Terraform state](/lessons/terraform-state/) | the backend block and the state bucket |
+| [Environments and regions](/lessons/environments-and-regions/) | folders per environment, and what doesn't move between regions |
+| [Operating Terraform](/lessons/operating-terraform/) | drift, and recovering a half-finished apply |
+
+Finish [Projects 1 to 3](/projects/) first, and clean them up. This project builds everything again, and names would clash.
+
+| Tool | Check it with | You need |
+|---|---|---|
+| Terraform | `terraform version` | 1.10 or later, for `use_lockfile` |
+| AWS CLI | `aws sts get-caller-identity` | a login that is not the root user, with admin rights in a practice account |
+| Docker | `docker version` | to push the order service image once |
+| Git | `git --version` | to keep the code |
+
+You also need the **state bucket** from [Terraform state](/lessons/terraform-state/): `quickcart-tfstate-111122223333` in `us-east-1`, with versioning on. If you deleted it, create it again as that lesson shows. It's the one thing in this project you create by hand, because the code that needs it can't create it.
+
+## Cost
+
+<Cost kind="paid">about $3 a day for each running environment without EKS, and about $3.50 a day more while EKS runs in dev. Destroy each environment when you finish with it.</Cost>
+
+| What | Price in us-east-1 (prices change; check the pricing pages) | Per environment, per day |
+|---|---|---|
+| NAT gateway | about $0.045 an hour, plus $0.045 per GB through it | about $1.10 in dev (one); $2.20 in prod (two) |
+| Application Load Balancer | about $0.0225 an hour plus traffic units | about $0.55 |
+| Fargate tasks, 0.25 vCPU and 0.5 GB | about $0.012 an hour each | about $0.60 for two |
+| RDS MySQL `db.t4g.micro`, 20 GB | about $0.016 an hour, plus storage | about $0.45. Multi-AZ doubles it |
+| Public IPv4 addresses (NAT, load balancer) | $0.005 an hour each | about $0.36 |
+| EKS control plane, when on | $0.10 an hour | $2.40 |
+| EKS nodes, 2 `t3.small`, and their load balancer | about $0.021 an hour each, plus $0.0225 | about $1.55 |
+| Secrets Manager secret, alarms, logs, ECR, S3 | $0.40 a secret a month; $0.10 an alarm a month; the rest pennies | pennies |
+
+<Note title="Three environments means three bills">
+
+`dev` with EKS on is about $6.50 a day. The second region adds about $3. You don't need to apply `prod` at all to prove it works: its plan is enough. If you do apply it, it's about $7 a day, and it has deletion protection on, so destroying it needs one extra step (see [Clean up](#clean-up)).
+
+The **EKS control plane charges $0.10 an hour from the moment it exists**, about $73 a month. Turn EKS on only for the dev build and the rebuild, then destroy.
+
+</Note>
+
+## Set up the repository
+
+<Steps>
+
+<Step title="Make the folders">
+
+```sh
+mkdir -p quickcart-infra/shared quickcart-infra/stack quickcart-infra/envs/dev quickcart-infra/envs/prod quickcart-infra/envs/dev-usw2
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir -p` | make folders, including any missing parent folders, with no error if they exist |
+| the list | the top-level folders from the layout above |
+
+```sh
+mkdir -p quickcart-infra/modules/network quickcart-infra/modules/security quickcart-infra/modules/certificate quickcart-infra/modules/alb quickcart-infra/modules/ecs-service quickcart-infra/modules/data quickcart-infra/modules/alarms quickcart-infra/modules/eks
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir -p` | the same, for the eight module folders |
+
+```sh
+cd quickcart-infra
+```
+
+| Part | What it means |
+|---|---|
+| `cd quickcart-infra` | move into the repository. Every path on this page starts here |
+
+```sh
+git init
+```
+
+| Part | What it means |
+|---|---|
+| `git init` | start a git repository in this folder |
+
+```output
+Initialized empty Git repository in /Users/you/quickcart-infra/.git/
+```
+
+</Step>
+
+<Step title="Keep state and secrets out of git">
+
+Create `.gitignore` at the top of the repository:
+
+```text title=".gitignore"
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+*.pem
+```
+
+| Line | Keeps out of git |
+|---|---|
+| `.terraform/` | downloaded providers and modules. Large, and rebuilt by `terraform init` |
+| `*.tfstate` and `*.tfstate.*` | any local state file or backup. State lives in S3, and it holds secrets |
+| `*.tfplan` and `tfplan` | saved plans. They can contain secret values too |
+| `crash.log` | Terraform's crash reports |
+| `*.pem` | certificate keys |
+
+Keep `.terraform.lock.hcl` **in** git. It records the exact provider versions, so everyone, and later the pipeline, gets the same ones.
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `git status` lists only `.gitignore`. The empty folders appear once they hold files.
+
+</See>
+
+## The shared layer
+
+Images are build artifacts, not infrastructure: they come from a build, not from Terraform. But the repositories that hold them are infrastructure, and every environment needs them before it starts. So they live in their own small layer, applied once, with their own state.
+
+<Steps>
+
+<Step title="Write shared/main.tf">
+
+```hcl title="shared/main.tf" ph="111122223333"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "shared/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Project   = "quickcart"
+      ManagedBy = "terraform"
+    }
+  }
+}
+
+locals {
+  repositories  = toset(["quickcart-orders", "quickcart-ops"])
+  second_region = "us-west-2"
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_ecr_repository" "main" {
+  for_each = local.repositories
+
+  name                 = each.key
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_repository" "second_region" {
+  for_each = local.repositories
+
+  region               = local.second_region
+  name                 = each.key
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "main" {
+  for_each = aws_ecr_repository.main
+
+  repository = each.value.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep the 30 newest images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 30
+      }
+      action = {
+        type = "expire"
+      }
+    }]
+  })
+}
+
+resource "aws_ecr_replication_configuration" "main" {
+  replication_configuration {
+    rule {
+      destination {
+        region      = local.second_region
+        registry_id = data.aws_caller_identity.current.account_id
+      }
+
+      repository_filter {
+        filter      = "quickcart-"
+        filter_type = "PREFIX_MATCH"
+      }
+    }
+  }
+
+  depends_on = [aws_ecr_repository.second_region]
+}
+
+output "repository_urls" {
+  description = "Where to push images, in the main region"
+  value       = { for name, repo in aws_ecr_repository.main : name => repo.repository_url }
+}
+```
+
+The `terraform` block, `required_providers` and the `backend "s3"` settings are explained in [Terraform state](/lessons/terraform-state/). This layer's `key` is `shared/terraform.tfstate`, so it can never touch an environment's state. The `repository_urls` output is explained in [Variables, locals and outputs](/lessons/terraform-variables/).
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `provider "aws"` → `default_tags` | adds `Project` and `ManagedBy` tags to **every** resource this provider creates | resources have no tags unless each one sets them; costs are hard to trace | add an owner or cost-centre tag |
+| `local.repositories` | the two repositories: the order service, and the operations tool Project 5 builds | — | add one line per new service |
+| `data "aws_caller_identity"` | reads your account ID, so no account number is typed into the code | you'd hard-code `111122223333`, and the code would break in another account | never |
+| `aws_ecr_repository.main` → `for_each` | one repository per name in the list | — | — |
+| `image_tag_mutability = "IMMUTABLE"` | a tag, once pushed, can never point at a different image | defaults to `MUTABLE`: `v1` could quietly mean different code tomorrow | never, for release images |
+| `force_delete = true` | lets `terraform destroy` delete a repository that still holds images | destroy fails while any image is inside | set to `false` once a repository holds images you can't rebuild |
+| `image_scanning_configuration` → `scan_on_push` | scan every image for known security problems as it arrives | no automatic scan | never |
+| `aws_ecr_repository.second_region` → `region` | creates the same repositories in `us-west-2`. Setting `region` on one resource is new in AWS provider 6; before, you needed a second provider block with an `alias` | the replicated images would land in repositories that Terraform doesn't manage, and `destroy` would leave them behind | when you pick a different second region |
+| `aws_ecr_lifecycle_policy` | deletes all but the 30 newest images in each repository | images pile up forever, and storage slowly costs more | keep more if you need to roll back further |
+| `policy = jsonencode({...})` | writes the lifecycle rule as JSON from HCL, so a typo is caught by Terraform, not by AWS | — | — |
+| `aws_ecr_replication_configuration` | copies every image pushed to a `quickcart-` repository into the same repository in `us-west-2` | you'd push every image twice, by hand: a manual step | when the second region changes |
+| `repository_filter` → `PREFIX_MATCH` `"quickcart-"` | only these repositories are copied | every repository in the account is copied | — |
+| `depends_on = [aws_ecr_repository.second_region]` | make the destination repositories before turning replication on | the first replicated push could create an unmanaged repository | never |
+
+</Step>
+
+<Step title="Apply it">
+
+```sh
+cd shared
+```
+
+| Part | What it means |
+|---|---|
+| `cd shared` | move into the shared layer's folder |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | download the AWS provider and connect to the state bucket |
+
+```output
+Successfully configured the backend "s3"! Terraform will automatically
+use this backend unless the backend configuration changes.
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan, show the plan, and build it once you type `yes` |
+
+<See>
+
+`Plan: 7 to add, 0 to change, 0 to destroy.` Type `yes`. It ends with `Apply complete! Resources: 7 added, 0 changed, 0 destroyed.` and the two repository addresses.
+
+</See>
+
+</Step>
+
+<Step title="Push the order service image, once">
+
+Use the image you built in [Project 3](/projects/03-one-service-two-runtimes/). If you deleted it, build it again from that project's first stage. Log in, tag and push exactly as Project 3 showed:
+
+```sh ph="111122223333"
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `aws ecr get-login-password` | a temporary registry password |
+| `\|` | pass it straight into `docker login` |
+| `docker login --username AWS --password-stdin` | log in, reading the password from the pipe |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | your registry. Use your account ID |
+
+```output
+Login Succeeded
+```
+
+```sh ph="111122223333"
+docker tag quickcart-orders:v1 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give the local image its registry name |
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload it. Replication then copies it to `us-west-2` |
+
+```sh
+cd ..
+```
+
+| Part | What it means |
+|---|---|
+| `cd ..` | back to the top of the repository |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** in **ECR > Repositories**, `quickcart-orders` holds `v1`. Switch the console's region to **US West (Oregon)**: the same repository exists there, and within a few minutes it holds `v1` too.
+
+</See>
+
+## The modules
+
+Each module is one folder with one `main.tf`: its inputs (`variable` blocks), its resources, and its outputs. A module never knows which environment it's in. Everything that could differ comes in as a variable, with a `description` that says why it exists. [Modules](/lessons/terraform-modules/) explains the idea.
+
+<Steps>
+
+<Step title="The network">
+
+```hcl title="modules/network/main.tf"
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "cidr" {
+  description = "The VPC's address range. Each environment and region needs its own, so they can be connected later"
+  type        = string
+
+  validation {
+    condition     = can(cidrhost(var.cidr, 0)) && endswith(var.cidr, "/16")
+    error_message = "Use a /16 range, like 10.20.0.0/16."
+  }
+}
+
+variable "single_nat_gateway" {
+  description = "One NAT gateway for both zones. Cheaper, but the app subnets in the second zone lose outbound internet if the first zone fails"
+  type        = bool
+}
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_region" "current" {}
+
+locals {
+  azs     = slice(data.aws_availability_zones.available.names, 0, 2)
+  zones   = { for i, az in local.azs : az => i }
+  nat_azs = var.single_nat_gateway ? slice(local.azs, 0, 1) : local.azs
+}
+
+resource "aws_vpc" "this" {
+  cidr_block           = var.cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = { Name = "${var.name}-vpc" }
+}
+
+resource "aws_subnet" "public" {
+  for_each = local.zones
+
+  vpc_id                  = aws_vpc.this.id
+  cidr_block              = cidrsubnet(var.cidr, 8, each.value)
+  availability_zone       = each.key
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name                     = "${var.name}-public-${each.key}"
+    "kubernetes.io/role/elb" = "1"
+  }
+}
+
+resource "aws_subnet" "app" {
+  for_each = local.zones
+
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = cidrsubnet(var.cidr, 8, each.value + 10)
+  availability_zone = each.key
+
+  tags = {
+    Name                              = "${var.name}-app-${each.key}"
+    "kubernetes.io/role/internal-elb" = "1"
+  }
+}
+
+resource "aws_subnet" "data" {
+  for_each = local.zones
+
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = cidrsubnet(var.cidr, 8, each.value + 20)
+  availability_zone = each.key
+
+  tags = { Name = "${var.name}-data-${each.key}" }
+}
+
+resource "aws_internet_gateway" "this" {
+  vpc_id = aws_vpc.this.id
+
+  tags = { Name = "${var.name}-igw" }
+}
+
+resource "aws_eip" "nat" {
+  for_each = toset(local.nat_azs)
+
+  domain = "vpc"
+
+  tags = { Name = "${var.name}-nat-${each.key}" }
+}
+
+resource "aws_nat_gateway" "this" {
+  for_each = toset(local.nat_azs)
+
+  allocation_id = aws_eip.nat[each.key].id
+  subnet_id     = aws_subnet.public[each.key].id
+
+  tags = { Name = "${var.name}-nat-${each.key}" }
+
+  depends_on = [aws_internet_gateway.this]
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.this.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.this.id
+  }
+
+  tags = { Name = "${var.name}-public" }
+}
+
+resource "aws_route_table" "app" {
+  for_each = local.zones
+
+  vpc_id = aws_vpc.this.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.this[var.single_nat_gateway ? local.nat_azs[0] : each.key].id
+  }
+
+  tags = { Name = "${var.name}-app-${each.key}" }
+}
+
+resource "aws_route_table" "data" {
+  vpc_id = aws_vpc.this.id
+
+  tags = { Name = "${var.name}-data" }
+}
+
+resource "aws_route_table_association" "public" {
+  for_each = aws_subnet.public
+
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "app" {
+  for_each = aws_subnet.app
+
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.app[each.key].id
+}
+
+resource "aws_route_table_association" "data" {
+  for_each = aws_subnet.data
+
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.data.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.this.id
+  service_name      = "com.amazonaws.${data.aws_region.current.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [for rt in aws_route_table.app : rt.id]
+
+  tags = { Name = "${var.name}-s3" }
+}
+output "vpc_id" {
+  description = "The VPC's ID"
+  value       = aws_vpc.this.id
+}
+
+output "public_subnet_ids" {
+  description = "One public subnet per zone, for load balancers and NAT gateways"
+  value       = [for s in aws_subnet.public : s.id]
+}
+
+output "app_subnet_ids" {
+  description = "One private app subnet per zone, for containers and Kubernetes nodes"
+  value       = [for s in aws_subnet.app : s.id]
+}
+
+output "data_subnet_ids" {
+  description = "One isolated data subnet per zone, for the database"
+  value       = [for s in aws_subnet.data : s.id]
+}
+```
+
+This is Project 1's network. The ideas are in [What is a VPC?](/lessons/vpc/), [Subnets and IP ranges](/lessons/subnets-and-cidr/) and [Routes, gateways and NAT](/lessons/routing/).
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `variable "cidr"` → `validation` | refuses anything that isn't a valid `/16`, before anything is built | a typo like `10.20.0.0/61` fails half-way through an apply | if you plan differently sized networks |
+| `variable "single_nat_gateway"` | the cost trade-off from Project 1, written where it's decided | — | `true` in dev to save about $1 a day; `false` in prod |
+| `data "aws_availability_zones"` → `state = "available"` | looks up the region's zone names instead of typing `us-east-1a` | hard-coded zone names break in any other region | never |
+| `data "aws_region"` | reads the region this provider is using, for the S3 endpoint's name | you'd type the region into the module | never |
+| `local.azs` → `slice(…, 0, 2)` | the first two zones, whatever the region calls them | — | three zones for more resilience, at the cost of a third NAT gateway in prod |
+| `local.zones` | a map like `{ "us-east-1a" = 0, "us-east-1b" = 1 }`, so each subnet has a stable key and a number | — | — |
+| `local.nat_azs` | one zone or both, from `single_nat_gateway` | — | — |
+| `aws_vpc` → `cidr_block` | the VPC's address range | required | once per environment and region; never after it's built, because it replaces everything |
+| `enable_dns_support`, `enable_dns_hostnames` | the VPC can resolve names, and resources get DNS names | RDS endpoints and VPC endpoints don't resolve properly | never |
+| `tags = { Name = … }` | the name shown in the console. The provider's default tags are added too | the console shows a blank name | — |
+| `aws_subnet` → `for_each = local.zones` | one subnet per zone, keyed by zone name. Why not `count`: see [Loops and lifecycle](/lessons/terraform-loops/) | — | — |
+| `cidr_block = cidrsubnet(var.cidr, 8, …)` | carves a `/24` out of the `/16`: public gets `.0.` and `.1.`, app `.10.` and `.11.`, data `.20.` and `.21.` | you'd work out and type every range by hand | if a tier needs more than 251 addresses |
+| `availability_zone = each.key` | which zone the subnet lives in | AWS picks, and two subnets could land in one zone | never |
+| `map_public_ip_on_launch = true` (public only) | anything started here gets a public address | NAT gateways still work (they use an Elastic IP), but a public test instance couldn't be reached | never; nothing but the load balancer and NAT live here |
+| `"kubernetes.io/role/elb" = "1"` | tells the EKS load balancer controller it may put internet-facing load balancers here: the tag you added by hand in Project 3 | the Ingress never gets an address | never |
+| `"kubernetes.io/role/internal-elb" = "1"` | the same, for internal load balancers, on the app subnets | internal load balancers can't be placed | never |
+| `aws_internet_gateway` | the VPC's door to the internet | nothing public works | never |
+| `aws_eip.nat` → `domain = "vpc"` | a fixed public address for each NAT gateway | the NAT gateway has no address to use | never |
+| `aws_nat_gateway` → `allocation_id`, `subnet_id` | which address it uses, and which **public** subnet it sits in | required | never |
+| `depends_on = [aws_internet_gateway.this]` | build the internet gateway first. Nothing in the NAT gateway's settings points at it, so Terraform can't see the order | the NAT gateway can be created before the VPC can reach the internet, and fail | never |
+| `aws_route_table.public` → `route` to the internet gateway | public subnets send `0.0.0.0/0` to the internet | the load balancer is unreachable | never |
+| `aws_route_table.app` → `nat_gateway_id` | each app subnet sends outbound traffic to a NAT gateway: its own zone's, or the single one | containers can't reach ECR, so they can't start | never |
+| `aws_route_table.data` with no routes | only the VPC's built-in `local` route: the database subnets can't reach or be reached from the internet | — | never |
+| `aws_route_table_association` | attaches each subnet to its route table | the subnet uses the VPC's main route table | never |
+| `aws_vpc_endpoint` → `vpc_endpoint_type = "Gateway"`, `service_name`, `route_table_ids` | S3 traffic from the app subnets goes straight to S3 instead of through the NAT gateway. Gateway endpoints are free; NAT traffic is not | S3 traffic costs NAT data charges | add interface endpoints (for ECR, Secrets Manager and logs) to drop the NAT gateway entirely, at about $7 a month each per zone |
+| the four `output` blocks | the IDs other modules need | other modules can't find the subnets | — |
+
+</Step>
+
+<Step title="The security groups">
+
+```hcl title="modules/security/main.tf"
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "The VPC the security groups belong to"
+  type        = string
+}
+
+variable "app_port" {
+  description = "The port the order service listens on inside its container"
+  type        = number
+}
+
+resource "aws_security_group" "alb" {
+  name        = "${var.name}-alb"
+  description = "Load balancer: HTTPS and HTTP from anywhere"
+  vpc_id      = var.vpc_id
+}
+
+resource "aws_security_group" "app" {
+  name        = "${var.name}-app"
+  description = "Order service: only from the load balancer"
+  vpc_id      = var.vpc_id
+}
+
+resource "aws_security_group" "db" {
+  name        = "${var.name}-db"
+  description = "Database: only from the order service"
+  vpc_id      = var.vpc_id
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTPS from anywhere"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}
+
+resource "aws_vpc_security_group_ingress_rule" "alb_http" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTP from anywhere, only to be redirected to HTTPS"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 80
+  to_port           = 80
+}
+
+resource "aws_vpc_security_group_egress_rule" "alb_to_app" {
+  security_group_id            = aws_security_group.alb.id
+  description                  = "To the order service only"
+  referenced_security_group_id = aws_security_group.app.id
+  ip_protocol                  = "tcp"
+  from_port                    = var.app_port
+  to_port                      = var.app_port
+}
+
+resource "aws_vpc_security_group_ingress_rule" "app_from_alb" {
+  security_group_id            = aws_security_group.app.id
+  description                  = "From the load balancer only"
+  referenced_security_group_id = aws_security_group.alb.id
+  ip_protocol                  = "tcp"
+  from_port                    = var.app_port
+  to_port                      = var.app_port
+}
+
+resource "aws_vpc_security_group_egress_rule" "app_out" {
+  security_group_id = aws_security_group.app.id
+  description       = "Out to ECR, Secrets Manager, CloudWatch and the database"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
+  security_group_id            = aws_security_group.db.id
+  description                  = "MySQL from the order service only"
+  referenced_security_group_id = aws_security_group.app.id
+  ip_protocol                  = "tcp"
+  from_port                    = 3306
+  to_port                      = 3306
+}
+
+output "alb_id" {
+  description = "Security group for the load balancer"
+  value       = aws_security_group.alb.id
+}
+
+output "app_id" {
+  description = "Security group for the order service's containers"
+  value       = aws_security_group.app.id
+}
+
+output "db_id" {
+  description = "Security group for the database"
+  value       = aws_security_group.db.id
+}
+```
+
+The chain from [Security groups](/lessons/security-groups/): anyone may reach the load balancer, only the load balancer may reach the app, only the app may reach the database.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_security_group` → `name`, `description`, `vpc_id` | an empty group with a name, a reason, and a VPC | `name` and `description` are optional but you'd get random names; `vpc_id` defaults to the default VPC, which is wrong here | never |
+| separate `aws_vpc_security_group_ingress_rule` and `egress_rule` resources | one resource per rule. Adding or removing one rule never rewrites the others | inline `ingress` blocks work too, but mixing both styles makes Terraform fight itself | never mix the two |
+| `cidr_ipv4 = "0.0.0.0/0"` | from anywhere on the internet | — | only on the load balancer's 443 and 80 |
+| `referenced_security_group_id` | from any resource in **that** group, whatever its address. Tasks come and go; the rule keeps working | you'd need IP addresses, which change on every release | never |
+| `ip_protocol`, `from_port`, `to_port` | TCP on one port. `"-1"` means every protocol and port | required | — |
+| `alb_to_app` egress | the load balancer may only send to the app port | a Terraform-made group has **no** outbound rules, so the load balancer couldn't reach anything | never |
+| `app_out` egress to anywhere | the containers may reach ECR, Secrets Manager, CloudWatch and the database | the tasks can't pull their image or read the secret, and never start | tighten to the VPC endpoints' prefix lists once you add them |
+| no egress rule on `db` | the database starts no connections | — | never |
+| `description` on each rule | shown in the console, so the next person knows why the rule exists | the rule works, but nobody knows why it's there | always write one |
+
+</Step>
+
+<Step title="The certificate">
+
+```hcl title="modules/certificate/main.tf"
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
+    tls = {
+      source = "hashicorp/tls"
+    }
+  }
+}
+
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "domain_name" {
+  description = "A domain you own, like orders.example.com. Leave empty for a self-signed certificate"
+  type        = string
+}
+
+variable "zone_id" {
+  description = "The Route 53 hosted zone for domain_name. Leave empty for a self-signed certificate"
+  type        = string
+}
+
+locals {
+  self_signed = var.domain_name == ""
+}
+
+resource "tls_private_key" "this" {
+  count = local.self_signed ? 1 : 0
+
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+resource "tls_self_signed_cert" "this" {
+  count = local.self_signed ? 1 : 0
+
+  private_key_pem       = tls_private_key.this[0].private_key_pem
+  validity_period_hours = 2160
+  allowed_uses          = ["key_encipherment", "digital_signature", "server_auth"]
+
+  subject {
+    common_name = "${var.name}.quickcart.test"
+  }
+}
+
+resource "aws_acm_certificate" "imported" {
+  count = local.self_signed ? 1 : 0
+
+  private_key      = tls_private_key.this[0].private_key_pem
+  certificate_body = tls_self_signed_cert.this[0].cert_pem
+
+  tags = { Name = "${var.name}-self-signed" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_acm_certificate" "issued" {
+  count = local.self_signed ? 0 : 1
+
+  domain_name       = var.domain_name
+  validation_method = "DNS"
+
+  tags = { Name = var.name }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "validation" {
+  for_each = local.self_signed ? {} : {
+    for dvo in aws_acm_certificate.issued[0].domain_validation_options : dvo.domain_name => dvo
+  }
+
+  zone_id         = var.zone_id
+  name            = each.value.resource_record_name
+  type            = each.value.resource_record_type
+  records         = [each.value.resource_record_value]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "issued" {
+  count = local.self_signed ? 0 : 1
+
+  certificate_arn         = aws_acm_certificate.issued[0].arn
+  validation_record_fqdns = [for r in aws_route53_record.validation : r.fqdn]
+}
+
+output "arn" {
+  description = "The certificate for the load balancer's HTTPS listener"
+  value       = local.self_signed ? aws_acm_certificate.imported[0].arn : aws_acm_certificate_validation.issued[0].certificate_arn
+}
+```
+
+Two ways to get HTTPS, chosen by one variable. With `domain_name` empty, it makes the self-signed certificate you made with `openssl` in Project 3, with no manual step. With a domain you own in Route 53, it requests a trusted one and validates it by DNS. [Domain names and HTTPS](/lessons/dns-and-https/) explains the difference.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `terraform` → `required_providers` → `tls` | this module uses the `tls` provider as well as `aws` | Terraform assumes `hashicorp/tls` anyway; saying so is clearer | never |
+| `local.self_signed` | true when there's no domain | — | — |
+| `count = local.self_signed ? 1 : 0` | build these resources in one mode and not the other. `count` is right here: it's on or off, never a list. See [Loops and lifecycle](/lessons/terraform-loops/) | both paths would be built | — |
+| `tls_private_key` → `algorithm`, `rsa_bits` | a 2048-bit RSA key, the type ACM accepts | required | never |
+| `tls_self_signed_cert` → `private_key_pem` | signs the certificate with that key | required | — |
+| `validity_period_hours = 2160` | valid for 90 days | required | shorter for practice; a real site uses a trusted certificate |
+| `allowed_uses` | what the certificate may be used for: a TLS server | required | never |
+| `subject` → `common_name` | the name inside the certificate | the certificate has no name | — |
+| `aws_acm_certificate.imported` → `private_key`, `certificate_body` | imports the pair into ACM, like the console's **Import** button | required for an import | — |
+| `lifecycle` → `create_before_destroy` | when the certificate is replaced, make the new one first, so the listener always has one | Terraform deletes the old one first, and the listener refuses because it's in use | never |
+| `aws_acm_certificate.issued` → `domain_name`, `validation_method = "DNS"` | requests a trusted certificate, proven by a DNS record | — | add `subject_alternative_names` for more names |
+| `aws_route53_record.validation` → `for_each` over `domain_validation_options` | writes the record ACM asks for, one per name | the certificate waits forever in **Pending validation** | — |
+| `zone_id`, `name`, `type`, `records`, `ttl` | where the record goes, and what it says | required | — |
+| `allow_overwrite = true` | if a validation record already exists from an earlier try, take it over | the second apply fails because the record exists | never |
+| `aws_acm_certificate_validation` | not a real AWS thing: a wait, until ACM says **Issued** | the listener could be given a certificate that isn't ready, and fail | never |
+| `output "arn"` | whichever certificate was made | — | — |
+
+<Note title="The private key is in the state file">
+
+With the self-signed path, the certificate's private key passes through Terraform, so it's stored in state. That's acceptable for a practice certificate, and it's why the state bucket is encrypted and private. With the trusted path, ACM keeps the key and Terraform never sees it.
+
+</Note>
+
+</Step>
+
+<Step title="The load balancer">
+
+```hcl title="modules/alb/main.tf"
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "The VPC the target groups belong to"
+  type        = string
+}
+
+variable "public_subnet_ids" {
+  description = "Public subnets in at least two zones"
+  type        = list(string)
+}
+
+variable "security_group_id" {
+  description = "The load balancer's security group"
+  type        = string
+}
+
+variable "certificate_arn" {
+  description = "The certificate for HTTPS"
+  type        = string
+}
+
+variable "app_port" {
+  description = "The port the containers listen on"
+  type        = number
+}
+
+variable "deletion_protection" {
+  description = "Refuse to delete the load balancer. On in production"
+  type        = bool
+}
+
+resource "aws_lb" "this" {
+  name                       = "${var.name}-alb"
+  internal                   = false
+  load_balancer_type         = "application"
+  security_groups            = [var.security_group_id]
+  subnets                    = var.public_subnet_ids
+  enable_deletion_protection = var.deletion_protection
+}
+
+resource "aws_lb_target_group" "this" {
+  for_each = toset(["stable", "canary"])
+
+  name                 = "${var.name}-${each.key}"
+  port                 = var.app_port
+  protocol             = "HTTP"
+  vpc_id               = var.vpc_id
+  target_type          = "ip"
+  deregistration_delay = 30
+
+  health_check {
+    path                = "/health"
+    matcher             = "200"
+    interval            = 10
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.certificate_arn
+
+  default_action {
+    type = "forward"
+
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.this["stable"].arn
+        weight = 100
+      }
+
+      target_group {
+        arn    = aws_lb_target_group.this["canary"].arn
+        weight = 0
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [default_action]
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+output "dns_name" {
+  description = "The load balancer's address"
+  value       = aws_lb.this.dns_name
+}
+
+output "arn_suffix" {
+  description = "The short name CloudWatch uses for the load balancer"
+  value       = aws_lb.this.arn_suffix
+}
+
+output "https_listener_arn" {
+  description = "The listener whose weights a canary release changes"
+  value       = aws_lb_listener.https.arn
+}
+
+output "target_group_arns" {
+  description = "The stable and canary target groups"
+  value       = { for k, tg in aws_lb_target_group.this : k => tg.arn }
+}
+
+output "target_group_arn_suffixes" {
+  description = "The short names CloudWatch uses for the target groups"
+  value       = { for k, tg in aws_lb_target_group.this : k => tg.arn_suffix }
+}
+```
+
+Project 3's load balancer, with the lessons you learned the hard way built in. [Load balancers](/lessons/load-balancers/) explains the pieces; [Canary from a pipeline](/lessons/canary-pipeline/) explains the second target group.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_lb` → `name` | the load balancer's name; 32 characters at most | a random name | — |
+| `internal = false` | reachable from the internet | defaults to `false` anyway; written so nobody has to wonder | `true` for a service only other services call |
+| `load_balancer_type = "application"` | an ALB, which understands HTTP | defaults to `application` | `network` for plain TCP |
+| `security_groups`, `subnets` | its firewall, and the public subnets in two zones it lives in | required for an internet-facing ALB | — |
+| `enable_deletion_protection` | refuses `terraform destroy` until turned off | defaults to `false` | `true` in prod |
+| `aws_lb_target_group` → `for_each = toset(["stable", "canary"])` | two target groups: `stable` gets the traffic; `canary` sits empty until a release | — | — |
+| `port`, `protocol = "HTTP"` | the port and protocol the load balancer uses to reach the containers | required | when the app's port changes |
+| `vpc_id` | the VPC the targets live in | required | — |
+| `target_type = "ip"` | targets are IP addresses, because Fargate tasks have no instance behind them | defaults to `instance`, and ECS refuses to attach the service | never, for Fargate |
+| `deregistration_delay = 30` | a removed task gets 30 seconds to finish its requests | 300 seconds: every release waits five minutes for nothing | longer if the app has slow requests |
+| `health_check` → `path`, `matcher` | `/health` must answer `200` | checks `/`, which proves less | — |
+| `interval`, `timeout` | check every 10 seconds; give up on one check after 5 | 30 and 5 | — |
+| `healthy_threshold = 2`, `unhealthy_threshold = 2` | two good checks to join, two bad checks to leave | 5 and 2: a new task waits 50 seconds for traffic | — |
+| `aws_lb_listener.https` → `port`, `protocol`, `certificate_arn` | HTTPS on 443 with the certificate | required | — |
+| `ssl_policy` | TLS 1.2 and 1.3 only | an older default policy that also allows weaker settings | when AWS publishes a newer recommended policy |
+| `default_action` → `forward` with two `target_group` blocks and `weight` | 100% to stable, 0% to canary. A canary release changes these numbers | a single target group, and no way to split traffic | never here; the pipeline changes the weights |
+| `lifecycle` → `ignore_changes = [default_action]` | Terraform sets the weights once and then leaves them to the pipeline | the next plan would try to put the weights back mid-canary: a plan that's never clean | never |
+| `aws_lb_listener.http` → `redirect` | port 80 answers with a 301 to HTTPS | plain HTTP would be refused or served unencrypted | never |
+| the five outputs | the address, and the names and ARNs the pipeline and alarms need | — | — |
+
+</Step>
+
+<Step title="The ECS service">
+
+```hcl title="modules/ecs-service/main.tf"
+variable "name" {
+  description = "The service's full name, like quickcart-dev-orders"
+  type        = string
+}
+
+variable "cluster_arn" {
+  description = "The ECS cluster to run in"
+  type        = string
+}
+
+variable "image" {
+  description = "The full image address, including its tag"
+  type        = string
+}
+
+variable "cpu" {
+  description = "CPU units for each task. 256 is a quarter of a vCPU"
+  type        = number
+}
+
+variable "memory" {
+  description = "Memory for each task, in MiB"
+  type        = number
+}
+
+variable "app_port" {
+  description = "The port the container listens on"
+  type        = number
+}
+
+variable "desired_count" {
+  description = "How many tasks to start with. Terraform sets it once; after that, releases and scaling own it"
+  type        = number
+}
+
+variable "subnet_ids" {
+  description = "Private app subnets in at least two zones"
+  type        = list(string)
+}
+
+variable "security_group_id" {
+  description = "The app's security group"
+  type        = string
+}
+
+variable "target_group_arn" {
+  description = "The target group the tasks register with"
+  type        = string
+}
+
+variable "execution_role_arn" {
+  description = "The role ECS uses to pull the image, read secrets and write logs"
+  type        = string
+}
+
+variable "environment_variables" {
+  description = "Plain settings passed to the container"
+  type        = map(string)
+}
+
+variable "secrets" {
+  description = "Settings read from Secrets Manager when the task starts: name => secret ARN and key"
+  type        = map(string)
+}
+
+variable "log_retention_days" {
+  description = "How long to keep the container's logs"
+  type        = number
+}
+
+data "aws_region" "current" {}
+
+resource "aws_cloudwatch_log_group" "this" {
+  name              = "/ecs/${var.name}"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_ecs_task_definition" "this" {
+  family                   = var.name
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.cpu
+  memory                   = var.memory
+  execution_role_arn       = var.execution_role_arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+
+  container_definitions = jsonencode([{
+    name      = "app"
+    image     = var.image
+    essential = true
+
+    portMappings = [{
+      containerPort = var.app_port
+      protocol      = "tcp"
+    }]
+
+    environment = [for k, v in var.environment_variables : { name = k, value = v }]
+    secrets     = [for k, v in var.secrets : { name = k, valueFrom = v }]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.this.name
+        "awslogs-region"        = data.aws_region.current.region
+        "awslogs-stream-prefix" = "app"
+      }
+    }
+  }])
+}
+
+resource "aws_ecs_service" "this" {
+  name                              = var.name
+  cluster                           = var.cluster_arn
+  task_definition                   = aws_ecs_task_definition.this.arn
+  desired_count                     = var.desired_count
+  launch_type                       = "FARGATE"
+  health_check_grace_period_seconds = 30
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  network_configuration {
+    subnets          = var.subnet_ids
+    security_groups  = [var.security_group_id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = var.target_group_arn
+    container_name   = "app"
+    container_port   = var.app_port
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count, task_definition]
+  }
+}
+
+output "service_name" {
+  description = "The ECS service's name"
+  value       = aws_ecs_service.this.name
+}
+
+output "task_family" {
+  description = "The task definition family. Every release adds a revision to it"
+  value       = aws_ecs_task_definition.this.family
+}
+
+output "log_group" {
+  description = "Where the containers' output goes"
+  value       = aws_cloudwatch_log_group.this.name
+}
+```
+
+Everything you clicked in Project 3's task definition and service forms, as one block. [ECS on Fargate](/lessons/ecs-fargate/) and [Releases without downtime](/lessons/zero-downtime-releases/) explain each setting.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_cloudwatch_log_group` → `name`, `retention_in_days` | where the container's output goes, and how long it's kept | ECS can't write logs, and tasks fail to start | longer in prod |
+| `aws_ecs_task_definition` → `family` | the recipe's name; each change adds a revision | required | — |
+| `requires_compatibilities = ["FARGATE"]`, `network_mode = "awsvpc"` | runs on Fargate, and each task gets its own network interface and IP | ECS rejects the task for Fargate | never |
+| `cpu`, `memory` | the task's size | required for Fargate | per environment |
+| `execution_role_arn` | the role ECS uses to pull the image, read the secret and write logs | the task can't start | — |
+| `runtime_platform` | Linux on x86: matches `--platform linux/amd64` | defaults to the same, but writing it catches an ARM image early | `ARM64` if you build ARM images, which are about 20% cheaper on Fargate |
+| `container_definitions = jsonencode([…])` | the container's settings in AWS's own JSON shape, written as HCL | required | — |
+| `name = "app"`, `image`, `essential` | the container's name, which image, and "if this stops, the task stops" | required | — |
+| `portMappings` | the container listens on 8080 | the load balancer can't reach it | — |
+| `environment` | plain settings, built from a map with a `for` expression | none are passed | — |
+| `secrets` → `valueFrom` | read the database password from Secrets Manager when the task starts. It never appears in the code, the task definition or the plan | the app has no password | — |
+| `logConfiguration` → `awslogs` | send output to the log group, in this region, under the prefix `app` | the output is lost | — |
+| `aws_ecs_service` → `cluster`, `task_definition`, `desired_count`, `launch_type` | run this recipe on Fargate in this cluster, this many times | required | — |
+| `health_check_grace_period_seconds = 30` | ignore failed health checks for 30 seconds after a task starts | a slow-starting task can be killed before it's ready | longer for slow starters |
+| `deployment_minimum_healthy_percent = 100`, `deployment_maximum_percent = 200` | never go below the full count during a release; allow double | 100 and 200 are the defaults for a service like this; written so nobody changes them by accident | never |
+| `deployment_circuit_breaker` → `enable`, `rollback` | a release whose tasks keep failing stops and goes back by itself | a broken release retries forever | never |
+| `network_configuration` → `subnets`, `security_groups`, `assign_public_ip = false` | private app subnets, the app security group, no public address | required for `awsvpc` | never; NAT gives them their way out |
+| `load_balancer` → `target_group_arn`, `container_name`, `container_port` | register each task's IP with the target group | no traffic reaches the tasks | — |
+| `lifecycle` → `ignore_changes = [desired_count, task_definition]` | Terraform sets these **once**. After that, releases (Project 5's pipeline) change the task definition, and scaling changes the count | every release would show up as drift, and the next `apply` would roll production back to the image in Terraform | never, once a pipeline releases |
+| the three outputs | names the pipeline and alarms need | — | — |
+
+<Note title="Who owns what, from now on">
+
+Because of `ignore_changes`, changing `image_tag` in a `.tfvars` file does **not** release anything once the service exists. That's deliberate. Terraform owns the shape of the platform; the pipeline owns which version runs. Mixing the two is how an innocent `terraform apply` rolls production back to last month's image.
+
+</Note>
+
+</Step>
+
+<Step title="The data layer">
+
+```hcl title="modules/data/main.tf"
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "Isolated data subnets in at least two zones"
+  type        = list(string)
+}
+
+variable "security_group_id" {
+  description = "The database's security group"
+  type        = string
+}
+
+variable "instance_class" {
+  description = "The database server's size"
+  type        = string
+}
+
+variable "multi_az" {
+  description = "Keep a standby copy in the second zone that takes over by itself"
+  type        = bool
+}
+
+variable "backup_retention_days" {
+  description = "How many days of automatic backups to keep"
+  type        = number
+}
+
+variable "deletion_protection" {
+  description = "Refuse to delete the database, and take a final snapshot if it is deleted. On in production"
+  type        = bool
+}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
+
+resource "aws_db_subnet_group" "this" {
+  name       = "${var.name}-db"
+  subnet_ids = var.subnet_ids
+}
+
+resource "aws_db_instance" "this" {
+  identifier     = "${var.name}-db"
+  engine         = "mysql"
+  engine_version = "8.4"
+  instance_class = var.instance_class
+
+  allocated_storage = 20
+  storage_type      = "gp3"
+  storage_encrypted = true
+
+  db_name                     = "quickcart"
+  username                    = "quickcart_admin"
+  manage_master_user_password = true
+
+  multi_az               = var.multi_az
+  db_subnet_group_name   = aws_db_subnet_group.this.name
+  vpc_security_group_ids = [var.security_group_id]
+  publicly_accessible    = false
+
+  backup_retention_period   = var.backup_retention_days
+  deletion_protection       = var.deletion_protection
+  skip_final_snapshot       = !var.deletion_protection
+  final_snapshot_identifier = "${var.name}-db-final"
+}
+
+resource "aws_s3_bucket" "assets" {
+  bucket        = "${var.name}-assets-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.region}"
+  force_destroy = !var.deletion_protection
+}
+
+resource "aws_s3_bucket_public_access_block" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+output "db_address" {
+  description = "The database's host name, reachable only from inside the VPC"
+  value       = aws_db_instance.this.address
+}
+
+output "db_secret_arn" {
+  description = "The Secrets Manager secret RDS created for the master password"
+  value       = aws_db_instance.this.master_user_secret[0].secret_arn
+}
+
+output "db_identifier" {
+  description = "The database's name in RDS"
+  value       = aws_db_instance.this.identifier
+}
+
+output "bucket_name" {
+  description = "The private bucket for order receipts and images"
+  value       = aws_s3_bucket.assets.bucket
+}
+```
+
+Project 2's database and bucket. [Managed databases: RDS](/lessons/rds/), [Files on S3](/lessons/s3/) and [Secrets](/lessons/secrets/) explain them.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_db_subnet_group` → `name`, `subnet_ids` | the isolated data subnets the database may use, in two zones | the database goes in the default VPC | never |
+| `identifier` | the database's name in RDS | a random name | never after creation; it replaces the database |
+| `engine = "mysql"`, `engine_version = "8.4"` | MySQL 8.4, the long-term-support version. RDS picks the newest 8.4 release and keeps it patched | required; without a version you get today's default, which changes | when you plan a major upgrade. MySQL 8.0's standard support has ended, so RDS charges extra to keep running it |
+| `instance_class` | the server's size | required | per environment |
+| `allocated_storage = 20`, `storage_type = "gp3"` | 20 GB of current-generation SSD | required; the type defaults to older `gp2` | when the data grows |
+| `storage_encrypted = true` | the disk and its backups are encrypted | unencrypted, and it can't be turned on later without a copy | never |
+| `db_name`, `username` | the first database and the admin user's name | no database is created inside the server | — |
+| `manage_master_user_password = true` | RDS creates the password and keeps it in Secrets Manager. It never appears in code, state or plan | you'd pass a password, and it would sit in state in plain text | never |
+| `multi_az` | a standby copy in the second zone that takes over by itself | one copy; a zone failure takes the database down | `true` in prod |
+| `db_subnet_group_name`, `vpc_security_group_ids` | where it lives and who may reach it | the default VPC and default group | never |
+| `publicly_accessible = false` | no public address | defaults to `false`; written so nobody flips it | never |
+| `backup_retention_period` | days of automatic backups | 1 day | 1 in dev to save money; 7 or more in prod |
+| `deletion_protection` | refuse to delete the database | defaults to `false` | `true` in prod |
+| `skip_final_snapshot = !var.deletion_protection` | in dev, delete without a final snapshot; in prod, always take one | defaults to `false`: destroy fails without `final_snapshot_identifier` | never |
+| `final_snapshot_identifier` | the name of that last snapshot | required when a final snapshot is taken | — |
+| `aws_s3_bucket` → `bucket` | a name that is unique worldwide: environment, account and region | a random name | — |
+| `force_destroy = !var.deletion_protection` | in dev, `destroy` empties the bucket first | destroy fails while the bucket holds files | never in prod |
+| `aws_s3_bucket_public_access_block`, all four settings `true` | no policy or ACL can ever make the bucket public | new buckets block public access by default today; saying so survives a changed account setting | never |
+| `aws_s3_bucket_versioning` → `status = "Enabled"` | every overwritten or deleted file can be brought back | a deleted receipt is gone | never |
+| `output "db_secret_arn"` → `master_user_secret[0].secret_arn` | where RDS put the password | — | — |
+
+</Step>
+
+<Step title="The alarms">
+
+```hcl title="modules/alarms/main.tf"
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "alb_arn_suffix" {
+  description = "The load balancer, as CloudWatch names it"
+  type        = string
+}
+
+variable "stable_target_group_arn_suffix" {
+  description = "The stable target group, as CloudWatch names it"
+  type        = string
+}
+
+variable "db_identifier" {
+  description = "The database's name in RDS"
+  type        = string
+}
+
+variable "alarm_email" {
+  description = "Where to send alarm emails. Leave empty for no emails"
+  type        = string
+}
+
+resource "aws_sns_topic" "alarms" {
+  name = "${var.name}-alarms"
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  count = var.alarm_email == "" ? 0 : 1
+
+  topic_arn = aws_sns_topic.alarms.arn
+  protocol  = "email"
+  endpoint  = var.alarm_email
+}
+
+resource "aws_cloudwatch_metric_alarm" "errors" {
+  alarm_name          = "${var.name}-5xx"
+  alarm_description   = "The order service returned more than 10 server errors in 5 minutes"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  dimensions          = { LoadBalancer = var.alb_arn_suffix }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 10
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "unhealthy" {
+  alarm_name          = "${var.name}-unhealthy"
+  alarm_description   = "At least one order service task has failed its health check for 3 minutes"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "UnHealthyHostCount"
+  dimensions          = { LoadBalancer = var.alb_arn_suffix, TargetGroup = var.stable_target_group_arn_suffix }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 3
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "db_cpu" {
+  alarm_name          = "${var.name}-db-cpu"
+  alarm_description   = "The database has been above 80% CPU for 10 minutes"
+  namespace           = "AWS/RDS"
+  metric_name         = "CPUUtilization"
+  dimensions          = { DBInstanceIdentifier = var.db_identifier }
+  statistic           = "Average"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 80
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+```
+
+Project 2's alarms, now impossible to forget. [Alarms that actually fire](/lessons/alarms/) explains how to choose thresholds.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `aws_sns_topic` | where alarms send their messages | alarms change colour in the console, and tell no one | — |
+| `aws_sns_topic_subscription` → `count`, `protocol = "email"`, `endpoint` | an email subscription, only if you gave an address. AWS emails a confirmation link, the one click this project can't avoid, so it's optional | — | add a chat or paging integration |
+| `alarm_name`, `alarm_description` | what it's called, and what it means in plain words | the person woken at 3am has to guess | — |
+| `namespace`, `metric_name`, `dimensions` | which number to watch, and for which load balancer, target group or database | required | — |
+| `statistic`, `period`, `evaluation_periods` | how to add up the numbers, over what window, for how many windows in a row | required | — |
+| `threshold`, `comparison_operator` | the line that counts as bad | required | when you learn what normal looks like |
+| `treat_missing_data = "notBreaching"` | no traffic means no errors, not an alarm | missing data leaves the alarm in `INSUFFICIENT_DATA` | — |
+| `alarm_actions`, `ok_actions` | notify when it goes bad, and when it recovers | nobody is told either way | — |
+
+</Step>
+
+<Step title="EKS">
+
+```hcl title="modules/eks/main.tf"
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
+    http = {
+      source = "hashicorp/http"
+    }
+  }
+}
+
+variable "name" {
+  description = "Prefix for every name, like quickcart-dev"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "Private app subnets in at least two zones, for the nodes"
+  type        = list(string)
+}
+
+variable "node_instance_type" {
+  description = "The EC2 size for each node"
+  type        = string
+}
+
+variable "node_count" {
+  description = "How many nodes to run"
+  type        = number
+}
+
+variable "admin_role_arns" {
+  description = "Extra IAM roles that may run kubectl as cluster admins, such as a CI agent's role"
+  type        = list(string)
+}
+
+data "aws_iam_policy_document" "cluster_assume" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["eks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "cluster" {
+  name               = "${var.name}-eks-cluster"
+  assume_role_policy = data.aws_iam_policy_document.cluster_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "cluster" {
+  role       = aws_iam_role.cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_eks_cluster" "this" {
+  name     = "${var.name}-eks"
+  role_arn = aws_iam_role.cluster.arn
+
+  vpc_config {
+    subnet_ids              = var.subnet_ids
+    endpoint_public_access  = true
+    endpoint_private_access = true
+  }
+
+  access_config {
+    authentication_mode                         = "API"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
+  upgrade_policy {
+    support_type = "STANDARD"
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.cluster]
+}
+
+data "aws_iam_policy_document" "node_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "node" {
+  name               = "${var.name}-eks-node"
+  assume_role_policy = data.aws_iam_policy_document.node_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "node" {
+  for_each = toset([
+    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+  ])
+
+  role       = aws_iam_role.node.name
+  policy_arn = each.value
+}
+
+resource "aws_eks_node_group" "this" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${var.name}-nodes"
+  node_role_arn   = aws_iam_role.node.arn
+  subnet_ids      = var.subnet_ids
+  instance_types  = [var.node_instance_type]
+
+  scaling_config {
+    desired_size = var.node_count
+    min_size     = var.node_count
+    max_size     = var.node_count + 1
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.node]
+}
+
+resource "aws_eks_addon" "pod_identity" {
+  cluster_name = aws_eks_cluster.this.name
+  addon_name   = "eks-pod-identity-agent"
+}
+
+resource "aws_eks_access_entry" "admins" {
+  for_each = toset(var.admin_role_arns)
+
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+}
+
+resource "aws_eks_access_policy_association" "admins" {
+  for_each = toset(var.admin_role_arns)
+
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.admins]
+}
+
+data "aws_iam_policy_document" "lbc_assume" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "lbc" {
+  name               = "${var.name}-eks-lbc"
+  assume_role_policy = data.aws_iam_policy_document.lbc_assume.json
+}
+
+data "http" "lbc_policy" {
+  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v3.5.0/docs/install/iam_policy.json"
+}
+
+resource "aws_iam_role_policy" "lbc" {
+  name   = "load-balancer-controller"
+  role   = aws_iam_role.lbc.id
+  policy = data.http.lbc_policy.response_body
+}
+
+resource "aws_eks_pod_identity_association" "lbc" {
+  cluster_name    = aws_eks_cluster.this.name
+  namespace       = "kube-system"
+  service_account = "aws-load-balancer-controller"
+  role_arn        = aws_iam_role.lbc.arn
+
+  depends_on = [aws_eks_addon.pod_identity]
+}
+
+output "cluster_name" {
+  description = "The cluster's name"
+  value       = aws_eks_cluster.this.name
+}
+
+output "endpoint" {
+  description = "The Kubernetes API address"
+  value       = aws_eks_cluster.this.endpoint
+}
+
+output "ca_data" {
+  description = "The cluster's certificate authority, base64 encoded"
+  value       = aws_eks_cluster.this.certificate_authority[0].data
+}
+
+output "ready" {
+  description = "Changes only once the nodes and the controller's permissions exist. The in-cluster resources wait for it"
+  value       = "${aws_eks_node_group.this.id}/${aws_eks_pod_identity_association.lbc.association_id}"
+}
+```
+
+Project 3's cluster, nodes and controller permissions. [Kubernetes and EKS](/lessons/kubernetes-and-eks/) explains the pieces. The IAM ideas are in [Who can do what: IAM](/lessons/iam/).
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_providers` → `http` | this module downloads a file | — | — |
+| `aws_iam_policy_document` → `actions`, `principals` | a trust policy: who may use the role. Here, the EKS service | — | — |
+| `aws_iam_role.cluster` and its policy attachment | the role the console called "recommended": EKS uses it to manage the cluster | the cluster can't be created | never |
+| `aws_eks_cluster` → `name`, `role_arn` | the cluster and its role | required | — |
+| no `version` | EKS uses its current default version, as you did in the console | — | pin it, and upgrade on purpose, once you run real workloads |
+| `vpc_config` → `subnet_ids` | the cluster's network interfaces go in the private app subnets | required | — |
+| `endpoint_public_access`, `endpoint_private_access` | `kubectl` works from your laptop, and nodes talk to the API inside the VPC | public only, with node traffic leaving the VPC | turn public off once you have a VPN or bastion |
+| `access_config` → `authentication_mode = "API"` | who may use the cluster is managed with EKS access entries, not a file inside the cluster | `API_AND_CONFIG_MAP` | never, for a new cluster |
+| `bootstrap_cluster_creator_admin_permissions = true` | whoever runs `apply` becomes a cluster admin | nobody can use the cluster at first | — |
+| `upgrade_policy` → `support_type = "STANDARD"` | when this version's standard support ends, EKS upgrades it instead of charging extended support, about six times as much | extended support, and a surprise bill | never, for practice clusters |
+| `depends_on` on the attachment | the role's permission exists before the cluster needs it | creation can fail on a race | never |
+| `aws_iam_role.node` and three attachments with `for_each` | the node role: join the cluster, run pod networking, pull from ECR | nodes never become **Ready** | — |
+| `aws_eks_node_group` → `cluster_name`, `node_group_name`, `node_role_arn`, `subnet_ids`, `instance_types` | a managed group of EC2 nodes in the private subnets | required | — |
+| `scaling_config` → `desired_size`, `min_size`, `max_size` | how many nodes, and the range they may move within | required | — |
+| `update_config` → `max_unavailable = 1` | replace one node at a time during upgrades | one at a time is the default; written so the choice is visible | more for faster upgrades of big groups |
+| `aws_eks_addon` → `addon_name = "eks-pod-identity-agent"` | installs the agent that hands roles to pods | Pod Identity associations do nothing | never |
+| `aws_eks_access_entry` and `aws_eks_access_policy_association` with `for_each` | extra roles that may run `kubectl` as admins. Project 5 adds the pipeline's role here | only the creator can use the cluster | add roles; `access_scope` `type = "cluster"` means every namespace |
+| `data "http"` → `url` | downloads the controller's official permissions, pinned to release `v3.5.0`, so it can't change under you | you'd paste a very long JSON file into the repository | when you upgrade the controller: change the version here and in `stack/eks.tf` together |
+| `aws_iam_role.lbc`, trust `pods.eks.amazonaws.com`, `sts:AssumeRole` and `sts:TagSession` | a role only EKS Pod Identity may hand out | — | — |
+| `aws_iam_role_policy` → `policy = data.http.lbc_policy.response_body` | puts the downloaded permissions on the role | the controller can't build load balancers | — |
+| `aws_eks_pod_identity_association` → `namespace`, `service_account`, `role_arn` | only pods using that exact service account get the role | the controller has no permissions | never |
+| `output "ready"` | a value that only exists once the nodes and the association do, so the in-cluster pieces wait for both | the controller could be installed before it has permissions, and fail | — |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** eight folders under `modules/`, each with one `main.tf`. Run `terraform fmt -recursive` at the top of the repository; it prints nothing if every file is already tidy.
+
+</See>
+
+## The stack
+
+The stack is one whole environment. It calls every module and connects their outputs to each other's inputs. Every difference between environments arrives as a variable.
+
+<Steps>
+
+<Step title="The inputs: stack/variables.tf">
+
+```hcl title="stack/variables.tf"
+variable "environment" {
+  description = "The environment's short name: dev, prod or dev-usw2"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]{2,9}$", var.environment))
+    error_message = "Use 2 to 9 lower-case letters, digits or dashes, so every AWS name stays under its length limit."
+  }
+}
+
+variable "vpc_cidr" {
+  description = "The VPC's range. Different in every environment and region"
+  type        = string
+}
+
+variable "single_nat_gateway" {
+  description = "One NAT gateway instead of one per zone. Cheaper; loses outbound internet in zone 2 if zone 1 fails"
+  type        = bool
+}
+
+variable "image_tag" {
+  description = "The order service image to start with. After the first apply, the pipeline releases new versions"
+  type        = string
+}
+
+variable "desired_count" {
+  description = "How many order service tasks to start with"
+  type        = number
+}
+
+variable "task_cpu" {
+  description = "CPU units for each task. 256 is a quarter of a vCPU"
+  type        = number
+}
+
+variable "task_memory" {
+  description = "Memory for each task, in MiB"
+  type        = number
+}
+
+variable "db_instance_class" {
+  description = "The database server's size"
+  type        = string
+}
+
+variable "db_multi_az" {
+  description = "Keep a standby database in the second zone"
+  type        = bool
+}
+
+variable "backup_retention_days" {
+  description = "Days of automatic database backups"
+  type        = number
+}
+
+variable "deletion_protection" {
+  description = "Protect the load balancer, database and bucket from deletion"
+  type        = bool
+}
+
+variable "log_retention_days" {
+  description = "Days to keep container logs"
+  type        = number
+}
+
+variable "alarm_email" {
+  description = "Where alarm emails go. Empty means no emails"
+  type        = string
+}
+
+variable "domain_name" {
+  description = "A domain you own for a trusted certificate. Empty means self-signed"
+  type        = string
+}
+
+variable "zone_id" {
+  description = "The Route 53 hosted zone for domain_name. Empty when domain_name is empty"
+  type        = string
+}
+
+variable "enable_eks" {
+  description = "Also run the order service on EKS. Costs about $2.40 a day for the control plane alone"
+  type        = bool
+}
+
+variable "eks_node_instance_type" {
+  description = "EC2 size for each EKS node"
+  type        = string
+}
+
+variable "eks_node_count" {
+  description = "How many EKS nodes"
+  type        = number
+}
+
+variable "eks_admin_role_arns" {
+  description = "Extra IAM roles allowed to manage the cluster, such as the CI agent's role"
+  type        = list(string)
+}
+```
+
+Each variable's `description` says what it's for, which matters more than its name: it's the documentation the next person reads. `type` catches a wrong kind of value before anything is built. None has a `default`, on purpose: every environment must choose every value, so nothing is decided silently. [Variables, locals and outputs](/lessons/terraform-variables/) covers the syntax.
+
+| Variable | Why it's an input | The validation |
+|---|---|---|
+| `environment` | goes into every name | 2 to 9 characters, so `quickcart-<environment>-canary` fits AWS's 32-character limit for target group names |
+| `vpc_cidr` | each environment and region needs its own range, so they can be connected later | checked in the network module |
+| `single_nat_gateway`, `db_multi_az`, `deletion_protection`, `backup_retention_days`, `log_retention_days` | the cost-against-safety choices that differ between dev and prod | — |
+| `image_tag`, `desired_count`, `task_cpu`, `task_memory`, `db_instance_class` | sizes and the first image | — |
+| `alarm_email`, `domain_name`, `zone_id` | optional extras; empty means off | — |
+| `enable_eks`, `eks_node_instance_type`, `eks_node_count`, `eks_admin_role_arns` | whether this environment also runs EKS, and how | — |
+
+</Step>
+
+<Step title="The wiring: stack/main.tf">
+
+```hcl title="stack/main.tf"
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+    }
+    tls = {
+      source = "hashicorp/tls"
+    }
+    helm = {
+      source = "hashicorp/helm"
+    }
+    kubernetes = {
+      source = "hashicorp/kubernetes"
+    }
+    http = {
+      source = "hashicorp/http"
+    }
+  }
+}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
+
+locals {
+  name     = "quickcart-${var.environment}"
+  app_port = 8080
+  image    = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.region}.amazonaws.com/quickcart-orders:${var.image_tag}"
+}
+
+module "network" {
+  source = "../modules/network"
+
+  name               = local.name
+  cidr               = var.vpc_cidr
+  single_nat_gateway = var.single_nat_gateway
+}
+
+module "security" {
+  source = "../modules/security"
+
+  name     = local.name
+  vpc_id   = module.network.vpc_id
+  app_port = local.app_port
+}
+
+module "certificate" {
+  source = "../modules/certificate"
+
+  name        = local.name
+  domain_name = var.domain_name
+  zone_id     = var.zone_id
+}
+
+module "alb" {
+  source = "../modules/alb"
+
+  name                = local.name
+  vpc_id              = module.network.vpc_id
+  public_subnet_ids   = module.network.public_subnet_ids
+  security_group_id   = module.security.alb_id
+  certificate_arn     = module.certificate.arn
+  app_port            = local.app_port
+  deletion_protection = var.deletion_protection
+}
+
+module "data" {
+  source = "../modules/data"
+
+  name                  = local.name
+  subnet_ids            = module.network.data_subnet_ids
+  security_group_id     = module.security.db_id
+  instance_class        = var.db_instance_class
+  multi_az              = var.db_multi_az
+  backup_retention_days = var.backup_retention_days
+  deletion_protection   = var.deletion_protection
+}
+
+data "aws_iam_policy_document" "ecs_tasks_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "execution" {
+  name               = "${local.name}-ecs-execution"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "execution" {
+  role       = aws_iam_role.execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "read_db_secret" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [module.data.db_secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "read_db_secret" {
+  name   = "read-db-secret"
+  role   = aws_iam_role.execution.id
+  policy = data.aws_iam_policy_document.read_db_secret.json
+}
+
+resource "aws_ecs_cluster" "this" {
+  name = "${local.name}-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "disabled"
+  }
+}
+
+module "orders" {
+  source = "../modules/ecs-service"
+
+  for_each = {
+    stable = var.desired_count
+    canary = 0
+  }
+
+  name               = each.key == "stable" ? "${local.name}-orders" : "${local.name}-orders-canary"
+  cluster_arn        = aws_ecs_cluster.this.arn
+  image              = local.image
+  cpu                = var.task_cpu
+  memory             = var.task_memory
+  app_port           = local.app_port
+  desired_count      = each.value
+  subnet_ids         = module.network.app_subnet_ids
+  security_group_id  = module.security.app_id
+  target_group_arn   = module.alb.target_group_arns[each.key]
+  execution_role_arn = aws_iam_role.execution.arn
+  log_retention_days = var.log_retention_days
+
+  environment_variables = {
+    APP_ENV = var.environment
+    DB_HOST = module.data.db_address
+  }
+
+  secrets = {
+    DB_PASSWORD = "${module.data.db_secret_arn}:password::"
+  }
+
+  depends_on = [module.alb, aws_iam_role_policy_attachment.execution]
+}
+
+resource "aws_cloudwatch_log_group" "ops" {
+  name              = "/ecs/${local.name}-ops"
+  retention_in_days = var.log_retention_days
+}
+
+module "alarms" {
+  source = "../modules/alarms"
+
+  name                           = local.name
+  alb_arn_suffix                 = module.alb.arn_suffix
+  stable_target_group_arn_suffix = module.alb.target_group_arn_suffixes["stable"]
+  db_identifier                  = module.data.db_identifier
+  alarm_email                    = var.alarm_email
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `terraform` → `required_providers` | the stack uses four providers. Versions are pinned once, in each environment's `main.tf`, not here | Terraform guesses the sources | never |
+| `local.name` | `quickcart-dev`, `quickcart-prod`, …: the prefix on every name | — | — |
+| `local.app_port = 8080` | one place for the app's port | the port would be typed in four modules | if the app changes port |
+| `local.image` | the image address, built from the account, the region and the tag. In `us-west-2` it points at the replicated copy | a hard-coded address would pull from `us-east-1` in every region | — |
+| each `module` block → `source` | which folder the module's code is in | required | — |
+| the arguments in each `module` block | the module's variables, fed from this stack's variables and other modules' outputs. That's how the pieces connect | Terraform stops: a required variable is missing | — |
+| `aws_iam_role.execution` and its attachment | the ECS execution role, with AWS's managed policy for pulling images and writing logs | tasks can't start | — |
+| `aws_iam_role_policy.read_db_secret` | adds permission to read **only** this environment's database secret: least privilege from Project 1 | tasks fail to start with a secrets error (see [Troubleshooting](#troubleshooting)) | — |
+| `aws_ecs_cluster` → `setting` `containerInsights` | the cluster, with Container Insights off to save money | the account's default is used | `enabled` in prod for per-task metrics, at extra cost |
+| `module "orders"` → `for_each = { stable = …, canary = 0 }` | the same module twice: the stable service with its count, and an idle canary service with none | — | — |
+| `name = each.key == "stable" ? … : …` | `quickcart-dev-orders` and `quickcart-dev-orders-canary` | — | — |
+| `target_group_arn = module.alb.target_group_arns[each.key]` | each service registers with its own target group | — | — |
+| `environment_variables` and `secrets` | the app learns its environment and database host; the password comes from the secret | — | — |
+| `depends_on = [module.alb, …]` | the listener must exist before ECS attaches a service to its target groups | ECS fails with "target group does not have an associated load balancer" | never |
+| `aws_cloudwatch_log_group.ops` | a log group Project 5's operations jobs write to | Project 5's jobs have nowhere to write | — |
+
+</Step>
+
+<Step title="The EKS side: stack/eks.tf">
+
+```hcl title="stack/eks.tf"
+module "eks" {
+  source = "../modules/eks"
+  count  = var.enable_eks ? 1 : 0
+
+  name               = local.name
+  subnet_ids         = module.network.app_subnet_ids
+  node_instance_type = var.eks_node_instance_type
+  node_count         = var.eks_node_count
+  admin_role_arns    = var.eks_admin_role_arns
+}
+
+resource "helm_release" "lbc" {
+  count = var.enable_eks ? 1 : 0
+
+  name       = "aws-load-balancer-controller"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  version    = "3.5.0"
+  namespace  = "kube-system"
+
+  set = [
+    { name = "clusterName", value = module.eks[0].cluster_name },
+    { name = "region", value = data.aws_region.current.region },
+    { name = "vpcId", value = module.network.vpc_id },
+    { name = "serviceAccount.name", value = "aws-load-balancer-controller" },
+  ]
+
+  depends_on = [module.eks]
+}
+
+resource "kubernetes_labels" "readiness_gate" {
+  count = var.enable_eks ? 1 : 0
+
+  api_version = "v1"
+  kind        = "Namespace"
+
+  metadata {
+    name = "default"
+  }
+
+  labels = {
+    "elbv2.k8s.aws/pod-readiness-gate-inject" = "enabled"
+  }
+
+  depends_on = [helm_release.lbc]
+}
+
+resource "kubernetes_deployment_v1" "orders" {
+  count = var.enable_eks ? 1 : 0
+
+  metadata {
+    name      = "orders"
+    namespace = "default"
+  }
+
+  spec {
+    replicas = 2
+
+    selector {
+      match_labels = { app = "orders" }
+    }
+
+    strategy {
+      type = "RollingUpdate"
+
+      rolling_update {
+        max_unavailable = "0"
+        max_surge       = "1"
+      }
+    }
+
+    template {
+      metadata {
+        labels = { app = "orders" }
+      }
+
+      spec {
+        termination_grace_period_seconds = 40
+
+        container {
+          name  = "app"
+          image = local.image
+
+          port {
+            container_port = local.app_port
+          }
+
+          env {
+            name  = "APP_ENV"
+            value = var.environment
+          }
+
+          readiness_probe {
+            http_get {
+              path = "/health"
+              port = local.app_port
+            }
+            period_seconds = 5
+          }
+
+          resources {
+            requests = { cpu = "100m", memory = "128Mi" }
+            limits   = { memory = "256Mi" }
+          }
+
+          lifecycle {
+            pre_stop {
+              exec {
+                command = ["sleep", "15"]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [kubernetes_labels.readiness_gate]
+}
+
+resource "kubernetes_service_v1" "orders" {
+  count = var.enable_eks ? 1 : 0
+
+  metadata {
+    name      = "orders"
+    namespace = "default"
+  }
+
+  spec {
+    selector = { app = "orders" }
+
+    port {
+      port        = 80
+      target_port = local.app_port
+    }
+  }
+}
+
+resource "kubernetes_ingress_v1" "orders" {
+  count = var.enable_eks ? 1 : 0
+
+  wait_for_load_balancer = true
+
+  metadata {
+    name      = "orders"
+    namespace = "default"
+
+    annotations = {
+      "alb.ingress.kubernetes.io/scheme"                  = "internet-facing"
+      "alb.ingress.kubernetes.io/target-type"             = "ip"
+      "alb.ingress.kubernetes.io/healthcheck-path"        = "/health"
+      "alb.ingress.kubernetes.io/listen-ports"            = jsonencode([{ HTTP = 80 }, { HTTPS = 443 }])
+      "alb.ingress.kubernetes.io/ssl-redirect"            = "443"
+      "alb.ingress.kubernetes.io/certificate-arn"         = module.certificate.arn
+      "alb.ingress.kubernetes.io/target-group-attributes" = "deregistration_delay.timeout_seconds=30"
+    }
+  }
+
+  spec {
+    ingress_class_name = "alb"
+
+    rule {
+      http {
+        path {
+          path      = "/"
+          path_type = "Prefix"
+
+          backend {
+            service {
+              name = kubernetes_service_v1.orders[0].metadata[0].name
+              port {
+                number = 80
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [helm_release.lbc, kubernetes_deployment_v1.orders]
+}
+```
+
+Everything EKS needs, including what you installed with Helm and `kubectl` in Project 3. Each resource has `count = var.enable_eks ? 1 : 0`, so one variable switches the whole side on or off.
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `module "eks"` → `count` | builds the cluster only when `enable_eks` is true | — | — |
+| `helm_release` → `repository`, `chart`, `version`, `namespace` | the same Helm install as Project 3, done by Terraform. The version matches the policy in `modules/eks` | — | together with the policy URL |
+| `set = [{ name, value }, …]` | the `--set` values from Project 3's command | the controller can't find its cluster, region or VPC | — |
+| `depends_on = [module.eks]` | install only once the nodes and permissions exist | the install waits for pods that can't schedule, then times out | never |
+| `kubernetes_labels` → `api_version`, `kind`, `metadata`, `labels` | adds the readiness-gate label to the existing `default` namespace, as `kubectl label` did | new pods get no readiness gate, and releases can drop requests | never |
+| `kubernetes_deployment_v1` | Project 3's Deployment, field for field: 2 replicas, `max_unavailable = 0`, `max_surge = 1`, the readiness probe, requests and limits, and the `preStop` sleep. HCL spells the YAML names in `snake_case` | — | — |
+| `kubernetes_service_v1` | the fixed name in front of the pods | — | — |
+| `kubernetes_ingress_v1` → `annotations` | the same annotations as Project 3; `certificate-arn` now comes from the certificate module | — | — |
+| `wait_for_load_balancer = true` | `apply` waits until the controller has built the load balancer, so its address can be an output | the output would be empty on the first apply | never |
+| `depends_on = [helm_release.lbc, …]` | create the Ingress after the controller, and delete it **before** the controller on `destroy`, so the controller is still running to delete its load balancer | the load balancer is left behind, still billing, and blocks the VPC's deletion | never |
+
+<Note title="Providers configured from the thing they manage">
+
+The `helm` and `kubernetes` providers (configured in each environment's `main.tf`) take their address from the cluster this same stack creates. Terraform handles that on a first build and on a full `destroy`. What it can't handle is switching `enable_eks` from `true` to `false` on an environment that has EKS: the providers lose their address before they can delete what's inside the cluster. To remove EKS, destroy the whole environment; see [Troubleshooting](#troubleshooting).
+
+</Note>
+
+</Step>
+
+<Step title="The outputs: stack/outputs.tf">
+
+```hcl title="stack/outputs.tf"
+output "ecs_url" {
+  description = "The order service on ECS"
+  value       = "https://${module.alb.dns_name}"
+}
+
+output "eks_url" {
+  description = "The order service on EKS. Empty when EKS is off"
+  value       = var.enable_eks ? "https://${kubernetes_ingress_v1.orders[0].status[0].load_balancer[0].ingress[0].hostname}" : ""
+}
+
+output "eks_cluster_name" {
+  description = "The EKS cluster's name. Empty when EKS is off"
+  value       = var.enable_eks ? module.eks[0].cluster_name : ""
+}
+
+output "eks_endpoint" {
+  description = "The Kubernetes API address. Empty when EKS is off"
+  value       = var.enable_eks ? module.eks[0].endpoint : ""
+}
+
+output "eks_ca_data" {
+  description = "The cluster's certificate authority. Empty when EKS is off"
+  value       = var.enable_eks ? module.eks[0].ca_data : ""
+}
+
+output "cluster_name" {
+  description = "The ECS cluster"
+  value       = aws_ecs_cluster.this.name
+}
+
+output "services" {
+  description = "The stable and canary ECS services"
+  value       = { for k, m in module.orders : k => m.service_name }
+}
+
+output "https_listener_arn" {
+  description = "The listener a canary release re-weights"
+  value       = module.alb.https_listener_arn
+}
+
+output "target_group_arns" {
+  description = "The stable and canary target groups"
+  value       = module.alb.target_group_arns
+}
+
+output "alb_arn_suffix" {
+  description = "The load balancer, as CloudWatch names it"
+  value       = module.alb.arn_suffix
+}
+
+output "target_group_arn_suffixes" {
+  description = "The target groups, as CloudWatch names them"
+  value       = module.alb.target_group_arn_suffixes
+}
+
+output "app_subnet_ids" {
+  description = "Where one-off operations tasks run"
+  value       = module.network.app_subnet_ids
+}
+
+output "app_security_group_id" {
+  description = "The security group one-off operations tasks use to reach the database"
+  value       = module.security.app_id
+}
+
+output "execution_role_arn" {
+  description = "The role that lets a task pull images, read the database secret and write logs"
+  value       = aws_iam_role.execution.arn
+}
+
+output "ops_log_group" {
+  description = "Where one-off operations tasks write their output"
+  value       = aws_cloudwatch_log_group.ops.name
+}
+
+output "db_address" {
+  description = "The database's host name"
+  value       = module.data.db_address
+}
+
+output "db_secret_arn" {
+  description = "The secret holding the database password"
+  value       = module.data.db_secret_arn
+}
+
+output "bucket_name" {
+  description = "The private assets bucket"
+  value       = module.data.bucket_name
+}
+```
+
+These are what the outside world needs: your `curl` tests, and Project 5's pipeline and operations jobs. Only outputs can be read from outside a module, so this list is the stack's public interface.
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `stack/` holds four files, and `terraform fmt -recursive` still prints nothing.
+
+</See>
+
+## The environments
+
+<Steps>
+
+<Step title="The dev environment">
+
+```hcl title="envs/dev/main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 3.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.38"
+    }
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.5"
+    }
+  }
+}
+
+variable "region" { type = string }
+variable "environment" { type = string }
+variable "vpc_cidr" { type = string }
+variable "single_nat_gateway" { type = bool }
+variable "image_tag" { type = string }
+variable "desired_count" { type = number }
+variable "task_cpu" { type = number }
+variable "task_memory" { type = number }
+variable "db_instance_class" { type = string }
+variable "db_multi_az" { type = bool }
+variable "backup_retention_days" { type = number }
+variable "deletion_protection" { type = bool }
+variable "log_retention_days" { type = number }
+variable "alarm_email" { type = string }
+variable "domain_name" { type = string }
+variable "zone_id" { type = string }
+variable "enable_eks" { type = bool }
+variable "eks_node_instance_type" { type = string }
+variable "eks_node_count" { type = number }
+variable "eks_admin_role_arns" { type = list(string) }
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project     = "quickcart"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+provider "helm" {
+  kubernetes = {
+    host                   = module.stack.eks_endpoint
+    cluster_ca_certificate = base64decode(module.stack.eks_ca_data)
+    exec = {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.stack.eks_cluster_name, "--region", var.region]
+    }
+  }
+}
+
+provider "kubernetes" {
+  host                   = module.stack.eks_endpoint
+  cluster_ca_certificate = base64decode(module.stack.eks_ca_data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.stack.eks_cluster_name, "--region", var.region]
+  }
+}
+
+module "stack" {
+  source = "../../stack"
+
+  environment            = var.environment
+  vpc_cidr               = var.vpc_cidr
+  single_nat_gateway     = var.single_nat_gateway
+  image_tag              = var.image_tag
+  desired_count          = var.desired_count
+  task_cpu               = var.task_cpu
+  task_memory            = var.task_memory
+  db_instance_class      = var.db_instance_class
+  db_multi_az            = var.db_multi_az
+  backup_retention_days  = var.backup_retention_days
+  deletion_protection    = var.deletion_protection
+  log_retention_days     = var.log_retention_days
+  alarm_email            = var.alarm_email
+  domain_name            = var.domain_name
+  zone_id                = var.zone_id
+  enable_eks             = var.enable_eks
+  eks_node_instance_type = var.eks_node_instance_type
+  eks_node_count         = var.eks_node_count
+  eks_admin_role_arns    = var.eks_admin_role_arns
+}
+
+output "stack" {
+  description = "Everything the stack exposes: addresses, names and IDs"
+  value       = module.stack
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version = ">= 1.10.0"` | refuse older Terraform, which has no `use_lockfile` | an old Terraform fails later with a confusing backend error | — |
+| `required_providers` with `version` | pins each provider's major version for every environment | each environment could pick up a different, newer major version | when you upgrade on purpose |
+| the one-line `variable` blocks | the values `terraform.tfvars` sets. The descriptions live in the stack, so they aren't repeated here | Terraform refuses values for variables it doesn't know | when the stack gains a variable |
+| `provider "aws"` → `region = var.region` | where everything is built. This one line is how the second region works | — | — |
+| `default_tags` with `Environment` | every resource is tagged with its environment | — | — |
+| `provider "helm"` → `kubernetes = { host, cluster_ca_certificate, exec }` | how Helm reaches the cluster: its address, its certificate, and a token from `aws eks get-token`. Helm provider 3 writes this as an object with `=` | Helm can't reach the cluster | — |
+| `provider "kubernetes"` | the same three things, written as blocks in this provider's older style | the Kubernetes objects can't be created | — |
+| `module "stack"` | the whole environment, with every value passed through | — | — |
+| `output "stack"` | everything the stack outputs, as one object | — | — |
+
+```hcl title="envs/dev/backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "dev/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+The same backend block as [Terraform state](/lessons/terraform-state/), with this environment's own `key`. Because the key is written in the folder's own file, there's no way to run dev's code against prod's state by typing the wrong option.
+
+```hcl title="envs/dev/terraform.tfvars"
+region                 = "us-east-1"
+environment            = "dev"
+vpc_cidr               = "10.20.0.0/16"
+single_nat_gateway     = true
+image_tag              = "v1"
+desired_count          = 2
+task_cpu               = 256
+task_memory            = 512
+db_instance_class      = "db.t4g.micro"
+db_multi_az            = false
+backup_retention_days  = 1
+deletion_protection    = false
+log_retention_days     = 7
+alarm_email            = ""
+domain_name            = ""
+zone_id                = ""
+enable_eks             = true
+eks_node_instance_type = "t3.small"
+eks_node_count         = 2
+eks_admin_role_arns    = []
+```
+
+Terraform reads `terraform.tfvars` in the folder you run it from automatically, so there's no `-var-file` option to forget or get wrong.
+
+</Step>
+
+<Step title="The prod environment">
+
+Copy dev's `main.tf` unchanged:
+
+```sh
+cp envs/dev/main.tf envs/prod/main.tf
+```
+
+| Part | What it means |
+|---|---|
+| `cp` | copy a file |
+| `envs/dev/main.tf` | from dev |
+| `envs/prod/main.tf` | to prod, byte for byte |
+
+Then create its own backend and values:
+
+```hcl title="envs/prod/backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "prod/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+```hcl title="envs/prod/terraform.tfvars"
+region                 = "us-east-1"
+environment            = "prod"
+vpc_cidr               = "10.30.0.0/16"
+single_nat_gateway     = false
+image_tag              = "v1"
+desired_count          = 3
+task_cpu               = 512
+task_memory            = 1024
+db_instance_class      = "db.t4g.small"
+db_multi_az            = true
+backup_retention_days  = 7
+deletion_protection    = true
+log_retention_days     = 30
+alarm_email            = ""
+domain_name            = ""
+zone_id                = ""
+enable_eks             = false
+eks_node_instance_type = "t3.small"
+eks_node_count         = 2
+eks_admin_role_arns    = []
+```
+
+</Step>
+
+<Step title="The second region">
+
+```sh
+cp envs/dev/main.tf envs/dev-usw2/main.tf
+```
+
+| Part | What it means |
+|---|---|
+| `cp` | copy dev's `main.tf`, unchanged, to the second region's folder |
+
+```hcl title="envs/dev-usw2/backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "dev-usw2/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+The **state** stays in the `us-east-1` bucket. Only the infrastructure moves.
+
+```hcl title="envs/dev-usw2/terraform.tfvars"
+region                 = "us-west-2"
+environment            = "dev-usw2"
+vpc_cidr               = "10.40.0.0/16"
+single_nat_gateway     = true
+image_tag              = "v1"
+desired_count          = 2
+task_cpu               = 256
+task_memory            = 512
+db_instance_class      = "db.t4g.micro"
+db_multi_az            = false
+backup_retention_days  = 1
+deletion_protection    = false
+log_retention_days     = 7
+alarm_email            = ""
+domain_name            = ""
+zone_id                = ""
+enable_eks             = false
+eks_node_instance_type = "t3.small"
+eks_node_count         = 2
+eks_admin_role_arns    = []
+```
+
+</Step>
+
+<Step title="Check the environments differ only in values">
+
+```sh
+diff envs/dev/main.tf envs/prod/main.tf
+```
+
+| Part | What it means |
+|---|---|
+| `diff` | compare two files and print every line that differs |
+| the two paths | dev's and prod's `main.tf` |
+
+It prints **nothing**: the files are identical. Now compare the values:
+
+```sh
+diff envs/dev/terraform.tfvars envs/prod/terraform.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `diff` | the same comparison, on the values |
+
+<See>
+
+A list of changed lines: `environment`, `vpc_cidr`, `single_nat_gateway`, `desired_count`, the task and database sizes, `db_multi_az`, `backup_retention_days`, `deletion_protection`, `log_retention_days` and `enable_eks`. That list **is** the difference between dev and prod, all of it, in one screen.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** commit your work. `git add .` then `git commit -m "QuickCart infrastructure as code"` records every file. `git status` afterwards says `nothing to commit, working tree clean`.
+
+</See>
+
+## Build dev from empty
+
+<Steps>
+
+<Step title="Initialise dev">
+
+```sh
+cd envs/dev
+```
+
+| Part | What it means |
+|---|---|
+| `cd envs/dev` | work in the dev environment. The folder you're in decides which environment you change |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to dev's state, find the modules, and download all five providers |
+
+<See>
+
+Lines about initialising modules, the backend and the providers, ending with `Terraform has been successfully initialized!`. A new `.terraform.lock.hcl` appears: commit it.
+
+</See>
+
+</Step>
+
+<Step title="Read the plan before you apply it">
+
+```sh
+terraform plan -out=tfplan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | work out everything that would be created, without creating it |
+| `-out=tfplan` | save exactly this plan, so the apply does this and nothing else |
+
+<See>
+
+A long list of resources, each marked `will be created`, ending with `Plan: 76 to add, 0 to change, 0 to destroy.` If your count is different, check you copied every file. Nothing should say `destroy`: there's nothing to destroy yet.
+
+</See>
+
+Scroll through it. Look for `module.stack.module.network.aws_nat_gateway.this["us-east-1a"]`: only one NAT gateway, because dev sets `single_nat_gateway = true`. The plan is where you check the values did what you meant, before any money is spent.
+
+</Step>
+
+<Step title="Build it, and time it">
+
+Note the time, then:
+
+```sh
+terraform apply tfplan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply tfplan` | carry out the saved plan. No question is asked: you already reviewed it |
+
+<See>
+
+Resources being created for 20 to 30 minutes. The database, the EKS cluster and the NAT gateway take the longest. It ends with `Apply complete!` and the `stack` output. Write down how long it took.
+
+</See>
+
+</Step>
+
+<Step title="Test both runtimes">
+
+```sh
+terraform output stack
+```
+
+| Part | What it means |
+|---|---|
+| `terraform output stack` | print the stack's outputs from the state |
+
+<See>
+
+Among the values, `ecs_url` and `eks_url`, both starting `https://`.
+
+</See>
+
+Test each one with `curl`, as in Project 3. Replace `ECS_URL` and `EKS_URL` with the two values:
+
+```sh ph="ECS_URL"
+curl -k ECS_URL/health
+```
+
+| Part | What it means |
+|---|---|
+| `curl -k` | fetch, accepting the self-signed certificate |
+| `ECS_URL/health` | the ECS load balancer's health page |
+
+```output
+{"status":"ok","version":"v1"}
+```
+
+```sh ph="EKS_URL"
+curl -k EKS_URL/health
+```
+
+| Part | What it means |
+|---|---|
+| `EKS_URL/health` | the same page, through the EKS load balancer |
+
+```output
+{"status":"ok","version":"v1"}
+```
+
+</Step>
+
+<Step title="Plan again: it must be clean">
+
+```sh
+terraform plan -detailed-exitcode
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | compare code, state and AWS again |
+| `-detailed-exitcode` | also report the result as a number: `0` means no changes, `2` means changes, `1` means an error. A pipeline can check it |
+
+```output
+No changes. Your infrastructure matches the configuration.
+```
+
+Check the number:
+
+```sh
+echo $?
+```
+
+| Part | What it means |
+|---|---|
+| `echo $?` | print the exit code of the command that just ran |
+
+```output
+0
+```
+
+Anything else means something shows a change on every plan. [Troubleshooting](#troubleshooting) lists the usual causes.
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** both URLs answer `ok`, and a second plan says `No changes` with exit code `0`. You wrote down how long the apply took.
+
+</See>
+
+## The second region
+
+<Steps>
+
+<Step title="Build dev in us-west-2">
+
+```sh
+cd ../dev-usw2
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../dev-usw2` | up one folder, then into the second region's environment |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to `dev-usw2/terraform.tfstate` and download the providers |
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan, show, and build once you type `yes` |
+
+<See>
+
+A plan with no EKS resources (it's off here) and one NAT gateway in a `us-west-2` zone. Type `yes`. About 15 minutes later: `Apply complete!`.
+
+</See>
+
+```sh
+terraform output stack
+```
+
+| Part | What it means |
+|---|---|
+| `terraform output stack` | the second region's addresses |
+
+Test its `ecs_url` with `curl -k` and `/health`, as before. It answers `{"status":"ok","version":"v1"}`, served from Oregon by the image replication copied there.
+
+</Step>
+
+<Step title="Write down what didn't translate">
+
+A region is "just a variable" only if the code never assumed one. Fill this in for your notes; it's the evidence that you checked.
+
+| Thing | Moves with `region`? | How this code handles it |
+|---|---|---|
+| Availability zone names | no: `us-east-1a` doesn't exist in `us-west-2` | looked up with `data "aws_availability_zones"` |
+| ACM certificates | no: certificates are regional | the certificate module runs again in each region |
+| Container images | no: ECR is regional | replication, set up in `shared/` |
+| S3 bucket names | no: they're unique worldwide | the region is part of the bucket's name |
+| IAM role names | no: IAM is global, so two regions' roles would clash | `quickcart-dev-usw2-…` differs from `quickcart-dev-…` |
+| The state bucket | stays in `us-east-1` on purpose | one place for every environment's state |
+| Instance types and database classes | usually, but not every type exists in every region | checked: `t3.small` and `db.t4g.micro` exist in both |
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** the second region's `ecs_url` answers `ok`, and `terraform plan -detailed-exitcode` there exits with `0`.
+
+</See>
+
+## Plan production
+
+<Steps>
+
+<Step title="Plan prod without building it">
+
+```sh
+cd ../prod
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../prod` | into the prod environment's folder |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to `prod/terraform.tfstate`, which doesn't exist yet |
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | show what prod would be, without building it |
+
+<See>
+
+A plan with **two** NAT gateways and two Elastic IPs, a database with `multi_az = true` and `deletion_protection = true`, a load balancer with `enable_deletion_protection = true`, three tasks' worth of `desired_count`, and no EKS resources. Every difference traces back to a line in `prod/terraform.tfvars`.
+
+</See>
+
+Building prod is optional. If you do, [Clean up](#clean-up) shows the extra step its deletion protection needs.
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** a prod plan that differs from dev's only in the ways its values say.
+
+</See>
+
+## Prove it
+
+The claim is that this environment is disposable: it can be destroyed and rebuilt from nothing, with no clicks, and come back clean. Prove it with a timed run in dev.
+
+<Steps>
+
+<Step title="Destroy dev completely">
+
+```sh
+cd ../dev
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../dev` | back to dev |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything in dev's state, and do it once you type `yes` |
+
+<See>
+
+`Plan: 0 to add, 0 to change, N to destroy.` Type `yes`. The Kubernetes objects go first, then the controller, the cluster, and the network last. It ends with `Destroy complete!`. Write down how long it took.
+
+</See>
+
+</Step>
+
+<Step title="Rebuild from empty">
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | build everything again from the same code and values |
+
+Type `yes`, and time it. Then run `terraform plan -detailed-exitcode` and `echo $?` again: `No changes` and `0`.
+
+</Step>
+
+<Step title="Check nothing secret is in the code or the plan">
+
+```sh
+git grep -n -i -E "password|secret_key|BEGIN RSA|BEGIN PRIVATE" -- ':!*.md'
+```
+
+| Part | What it means |
+|---|---|
+| `git grep -n -i` | search every file git tracks, printing line numbers, ignoring case |
+| `-E "password\|secret_key\|BEGIN RSA\|BEGIN PRIVATE"` | any of these words, as one pattern |
+| `-- ':!*.md'` | skip Markdown notes |
+
+<See>
+
+Only lines that mention the **secret's ARN or name**, like `DB_PASSWORD = "${module.data.db_secret_arn}:password::"`, and the `manage_master_user_password` setting. No actual password or key.
+
+</See>
+
+</Step>
+
+</Steps>
+
+Fill in the teardown log. It's your evidence:
+
+| Run | What | Took | Result |
+|---|---|---|---|
+| 1 | `apply` dev, us-east-1, from empty | your time, usually 20 to 30 minutes | both URLs answer `ok` |
+| 2 | second `plan` | about a minute | `No changes`, exit code `0` |
+| 3 | `apply` dev-usw2 | your time | its URL answers `ok` |
+| 4 | `destroy` dev | your time, usually 15 to 25 minutes | `Destroy complete!` |
+| 5 | `apply` dev again, from empty | your time | both URLs answer `ok` |
+| 6 | second `plan` | about a minute | `No changes`, exit code `0` |
+
+**The pass mark:** run 5 finishes with no step outside Terraform, and run 6 is clean.
+
+## Troubleshooting
+
+<Mistake title="the state bucket doesn't exist">
+
+```output title="terraform init stops with a message containing"
+S3 bucket "quickcart-tfstate-111122223333" does not exist.
+```
+
+**Why:** the bucket was deleted after the Terraform state lesson, or the name has the wrong account ID.
+
+**The fix:** create it again as [Terraform state](/lessons/terraform-state/) shows, with versioning on, and check the name in every `backend.tf` matches it exactly.
+
+</Mistake>
+
+<Mistake title="tasks fail to start with a secrets error">
+
+```output title="The ECS task's stopped reason starts with"
+ResourceInitializationError: unable to pull secrets or registry auth
+```
+
+**Why:** the execution role can't read the database secret, or the tasks can't reach Secrets Manager. The first happens if the `read_db_secret` policy points at the wrong ARN; the second if the app subnets have no working route to a NAT gateway.
+
+**The fix:** read the rest of the stopped reason. `AccessDeniedException` means the policy: check `terraform state show module.stack.aws_iam_role_policy.read_db_secret`. A timeout means the network: check the app route tables send `0.0.0.0/0` to a NAT gateway that's **Available**.
+
+</Mistake>
+
+<Mistake title="the second region's tasks can't find the image">
+
+```output title="The stopped reason in us-west-2 says something like"
+CannotPullContainerError: pull image manifest has been retried 7 time(s): failed to resolve ref 111122223333.dkr.ecr.us-west-2.amazonaws.com/quickcart-orders:v1: not found
+```
+
+**Why:** replication only copies images pushed **after** it was turned on. The `v1` image was pushed before `shared/` was applied. Your retry count may differ.
+
+**The fix:** push the image again under a new tag, like `v1.1`, set `image_tag = "v1.1"` in both dev folders' values, and apply. Pushing is a build step, not infrastructure, so it doesn't count as a manual infrastructure step.
+
+</Mistake>
+
+<Mistake title="the second plan is never clean">
+
+```output title="Every plan shows something like"
+  # module.stack.module.orders["stable"].aws_ecs_service.this will be updated in-place
+  ~ resource "aws_ecs_service" "this" {
+      ~ desired_count = 3 -> 2
+```
+
+**Why:** something outside Terraform changes a value on purpose, and Terraform keeps trying to change it back. Here, scaling changed the task count. It's the same for a pipeline changing the task definition or the listener's weights.
+
+**The fix:** decide who owns the value. If something else should, add it to that resource's `lifecycle` `ignore_changes`, as the ECS and load balancer modules do. If nothing should, find out who changed it: [Who changed what](/lessons/cloudtrail/) shows how, and [Operating Terraform](/lessons/operating-terraform/) covers drift.
+
+</Mistake>
+
+<Mistake title="destroy can't delete the VPC">
+
+```output title="terraform destroy stops with an error containing"
+DependencyViolation: The vpc 'vpc-0example1234567' has dependencies and cannot be deleted.
+```
+
+**Why:** something Terraform didn't create is still in the VPC. Almost always, it's a load balancer or security group made by the EKS load balancer controller, because the Ingress was removed after the controller was, or by hand.
+
+**The fix:** in **EC2 > Load Balancers** and **EC2 > Security Groups**, filter by the VPC ID and delete anything whose name starts with `k8s-`. Then run `terraform destroy` again; it carries on where it stopped.
+
+</Mistake>
+
+<Mistake title="switching EKS off fails">
+
+```output title="A plan after changing enable_eks to false stops with an error like"
+Error: Get "http://localhost/api/v1/namespaces/default/services/orders": dial tcp [::1]:80: connect: connection refused
+```
+
+**Why:** the Helm and Kubernetes providers take the cluster's address from the stack. With `enable_eks = false`, that address is empty before the objects inside the cluster are deleted, so the providers fall back to `localhost` and can't reach the cluster to delete them. Your exact message may differ.
+
+**The fix:** set `enable_eks` back to `true`, then `terraform destroy` the whole environment and apply it again with `false`. In dev that's a few minutes of rebuild, which is the point of this project.
+
+</Mistake>
+
+<Mistake title="destroying prod is refused">
+
+```output title="terraform destroy stops with an error ending"
+api error InvalidParameterCombination: Cannot delete protected DB Instance, please disable deletion protection and try again.
+```
+
+**Why:** that's `deletion_protection = true` doing its job.
+
+**The fix:** in [Clean up](#clean-up).
+
+</Mistake>
+
+<Mistake title="a lock is held">
+
+```output title="Any command stops with"
+Error: Error acquiring the state lock
+```
+
+**Why:** another command is running against the same environment, or one crashed and left its lock behind.
+
+**The fix:** read the `Who` and `Created` lines, check that nobody is really running Terraform, then `terraform force-unlock` with the lock's ID, as [Terraform state](/lessons/terraform-state/) shows.
+
+</Mistake>
+
+## Clean up
+
+Destroy in the opposite order to building: environments first, the shared layer last.
+
+<Steps>
+
+<Step title="Destroy the second region">
+
+```sh
+cd envs/dev-usw2
+```
+
+| Part | What it means |
+|---|---|
+| `cd envs/dev-usw2` | from the top of the repository, into the second region |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove everything in this environment, once you type `yes` |
+
+```output
+Destroy complete! Resources: 58 destroyed.
+```
+
+</Step>
+
+<Step title="Destroy dev">
+
+```sh
+cd ../dev
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../dev` | into dev |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove dev, EKS included |
+
+<See>
+
+`Destroy complete!` after 15 to 25 minutes.
+
+</See>
+
+</Step>
+
+<Step title="Destroy prod, if you built it">
+
+Skip this if you only planned prod. Otherwise, in `envs/prod/terraform.tfvars`, change `deletion_protection = true` to `false`, then:
+
+```sh
+cd ../prod
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../prod` | into prod |
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | turn deletion protection off on the database and load balancer. Read the plan: it should only change those settings and `skip_final_snapshot` |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | now prod can be removed |
+
+Then change the value back to `true` and commit nothing: prod's protection belongs in the code.
+
+</Step>
+
+<Step title="Destroy the shared layer">
+
+```sh
+cd ../../shared
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../../shared` | up two folders, then into `shared/` |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | delete the repositories in both regions, and the replication rule. `force_delete` empties them first |
+
+```output
+Destroy complete! Resources: 7 destroyed.
+```
+
+**Keep the state bucket** if you're going on to [Project 5](/projects/05-the-pipeline/). It costs pennies. If you're not, empty and delete it as [Terraform state](/lessons/terraform-state/) shows.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Check nothing is left billing, in **both** regions. Switch the console between **US East (N. Virginia)** and **US West (Oregon)** for each:
+
+| Where | Should show |
+|---|---|
+| EKS > Clusters | nothing |
+| ECS > Clusters | nothing |
+| RDS > Databases | nothing |
+| EC2 > Load Balancers | nothing |
+| VPC > NAT gateways | nothing **Available** (deleted ones stay listed for a while) |
+| EC2 > Elastic IPs | nothing |
+| Secrets Manager | nothing starting `rds!` (RDS deletes its secret with the database; one scheduled for deletion is fine) |
+
+<See>
+
+All empty in both regions. **Resource Groups & Tag Editor > Tag Editor**, with **All regions** and the tag `Project = quickcart`, finds nothing except the state bucket, which was created by hand and has no such tag.
+
+</See>
+
+</Step>
+
+</Steps>

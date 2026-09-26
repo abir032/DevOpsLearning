@@ -1,0 +1,67 @@
+---
+/*
+ * Your first resource: a plan reader.
+ * Teaches: which change updates in place and which forces replacement,
+ * and how the plan's first symbol tells you.
+ */
+import { CASES, codeHtml, legendHtml, planHtml, sayHtml } from "../../scripts/tf-plan-reader";
+const first = CASES.tag;
+---
+<div class="viz" data-track="code" data-viz="tf-plan-reader">
+  <div class="viz-controls">
+    <span class="lbl" id="pr-lbl">Change main.tf</span>
+    <div class="seg wide" role="group" aria-labelledby="pr-lbl">
+      {Object.entries(CASES).map(([k, c], i) => (
+        <button type="button" data-c={k} aria-pressed={String(i === 0)}>{c.label}</button>
+      ))}
+    </div>
+  </div>
+  <ul class="pr-legend" aria-label="Plan symbols" set:html={legendHtml(first.sym)} />
+  <div class="pr-grid">
+    <pre class="plan-out pr-code" tabindex="0" aria-label="main.tf after the change" set:html={codeHtml(first)} />
+    <pre class="plan-out pr-plan" tabindex="0" aria-label="terraform plan output" set:html={planHtml(first)} />
+  </div>
+  <p class="viz-hint">Real Terraform output, trimmed to the lines that matter.</p>
+  <div class="viz-say good" aria-live="polite" set:html={sayHtml(first)} />
+</div>
+
+<style is:global>
+  [data-viz="tf-plan-reader"] .pr-legend { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 14px 16px 4px; }
+  [data-viz="tf-plan-reader"] .pr-legend li { display: flex; align-items: center; gap: 8px; margin: 0; padding: 5px 10px; border: 1px solid var(--rule); border-radius: 8px; font-size: 14px; color: var(--ink-2); background: var(--bg); }
+  [data-viz="tf-plan-reader"] .pr-legend b { font-family: var(--mono); font-size: 14px; min-width: 2.2ch; text-align: center; color: var(--ink); }
+  [data-viz="tf-plan-reader"] .pr-legend li.on { color: var(--ink); font-weight: 700; border-width: 2px; padding: 4px 9px; }
+  [data-viz="tf-plan-reader"] .pr-legend li.on.create,
+  [data-viz="tf-plan-reader"] .pr-legend li.on.update { border-color: var(--ok); background: var(--ok-bg); }
+  [data-viz="tf-plan-reader"] .pr-legend li.on.update { border-color: var(--warn); background: var(--warn-bg); }
+  [data-viz="tf-plan-reader"] .pr-legend li.on.replace,
+  [data-viz="tf-plan-reader"] .pr-legend li.on.destroy { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="tf-plan-reader"] .pr-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 10px 16px 0; }
+  [data-viz="tf-plan-reader"] .pr-grid .plan-out { margin: 0; font-size: 12.5px; white-space: pre; overflow-x: auto; }
+  [data-viz="tf-plan-reader"] .viz-hint { padding-top: 10px; margin: 0; }
+</style>
+
+<script>
+  import { CASES, codeHtml, legendHtml, planHtml, sayHtml } from "../../scripts/tf-plan-reader";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-plan-reader"]').forEach((root) => {
+    if (!once(root)) return;
+    const legend = root.querySelector<HTMLElement>(".pr-legend")!;
+    const code = root.querySelector<HTMLElement>(".pr-code")!;
+    const plan = root.querySelector<HTMLElement>(".pr-plan")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-c]")];
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-c]");
+      if (!b) return;
+      const c = CASES[b.dataset.c!];
+      press(btns, (x) => x === b);
+      legend.innerHTML = legendHtml(c.sym);
+      code.innerHTML = codeHtml(c);
+      plan.innerHTML = planHtml(c);
+      say.className = "viz-say" + (c.tone ? " " + c.tone : "");
+      say.innerHTML = sayHtml(c);
+    });
+  }));
+</script>

@@ -1,0 +1,59 @@
+---
+import Base from "../layouts/Base.astro";
+import { href, lessonBySlug, lessonHref } from "../data/curriculum";
+import { readySlugs } from "../lib/lessons";
+
+const ready = await readySlugs();
+/* A question someone actually asks, and the lesson that answers it. */
+const QS: [string, string][] = [
+  ["Why can't my server reach the internet to download updates?", "routing"],
+  ["Why can anyone on the internet reach my database?", "vpc"],
+  ["My request just times out. Is it my code or the network?", "security-groups"],
+  ["What does /16 or /24 mean in an address range?", "subnets-and-cidr"],
+  ["How do I put HTTPS and my own domain in front of my app?", "dns-and-https"],
+  ["The site falls over when traffic spikes. What do I do?", "auto-scaling"],
+  ["How do I spread traffic across more than one server?", "load-balancers"],
+  ["Where should the database password go, if not in the code?", "secrets"],
+  ["How do I change production data without breaking it?", "sql-safely"],
+  ["How would I even know if checkout was failing?", "alarms"],
+  ["Who deleted that resource, and when?", "cloudtrail"],
+  ["It works on my laptop but not on the server. Why?", "images-and-containers"],
+  ["Why do my Docker builds take so long?", "dockerfile"],
+  ["Why do releases drop a few requests every time?", "zero-downtime-releases"],
+  ["Should we use ECS or Kubernetes?", "ecs-or-eks"],
+  ["Why did Terraform try to create everything again?", "terraform-state"],
+  ["Two of us ran terraform apply at once. Is that a problem?", "terraform-state"],
+  ["I removed one item from a list and Terraform wants to destroy three things. Why?", "terraform-loops"],
+  ["Someone changed something in the console. What does Terraform do now?", "operating-terraform"],
+  ["How do I run the same setup for dev and staging?", "environments-and-regions"],
+  ["How do I stop someone deploying without tests passing?", "continuous-integration"],
+  ["How do I release to a few users first, and roll back automatically?", "canary-pipeline"],
+  ["Rolling, blue/green or canary — which one?", "release-strategies"],
+  ["How do we measure whether we're getting better at shipping?", "dora-metrics"],
+  ["Something is down right now. Where do I look first?", "where-to-look-first"],
+];
+---
+<Base title="Which lesson do I need?" description="Common DevOps questions, each mapped to the lesson that answers it." current={{ page: "which-lesson" }}>
+  <div class="page">
+    <div class="read" data-pagefind-body>
+      <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+        <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">Which lesson do I need?</span>
+      </nav>
+      <header class="mod-hero" data-track="start">
+        <h1>Which lesson do I need?</h1>
+        <p>Start from the problem in front of you. Every lesson can be read on its own; it tells you at the top if anything should come first.</p>
+      </header>
+      <ul class="qs">
+        {QS.map(([q, slug]) => {
+          const l = lessonBySlug(slug)!;
+          return (
+            <li data-track={l.module.track}>
+              <span class="qq">{q}</span>
+              <span class="qa"><a href={lessonHref(slug)}>{l.title}</a>{!ready.has(slug) && " (being written)"}<span>{`${l.module.id} – ${l.module.title}`}</span></span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  </div>
+</Base>

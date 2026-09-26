@@ -1,0 +1,82 @@
+---
+/*
+ * Running SQL safely: a transaction sandbox.
+ * Teaches: inside a transaction a wrong UPDATE is private and undoable;
+ * without one, autocommit makes it permanent the moment it runs.
+ */
+import { fresh, sandboxHtml } from "../../scripts/sql-sandbox";
+const s = fresh();
+---
+<div class="viz" data-track="cloud" data-viz="sql-sandbox">
+  <div class="viz-controls">
+    <span class="lbl" id="sq-lbl">Run a statement</span>
+    <div class="sq-btns" role="group" aria-labelledby="sq-lbl">
+      <button class="btn" type="button" data-a="begin">START TRANSACTION</button>
+      <button class="btn" type="button" data-a="select">SELECT the pending orders</button>
+      <button class="btn line" type="button" data-a="update">UPDATE with the WHERE</button>
+      <button class="btn" type="button" data-a="nowhere">UPDATE with no WHERE</button>
+      <button class="btn" type="button" data-a="rollback">ROLLBACK</button>
+      <button class="btn" type="button" data-a="commit">COMMIT</button>
+      <button class="btn" type="button" data-a="reset">Start again</button>
+    </div>
+  </div>
+  <pre class="sq-out" tabindex="0" role="region" aria-label="What the mysql client printed" set:html={s.out} />
+  <div class="sq-stage" set:html={sandboxHtml(s)} />
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Three orders are stuck as <code>pending</code> and need cancelling. Start with <b>START TRANSACTION</b>, or see what happens without it.</div>
+</div>
+
+<style is:global>
+  [data-viz="sql-sandbox"] .sq-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  [data-viz="sql-sandbox"] .sq-btns .btn { min-height: 36px; padding: 0 12px; font-size: 13.5px; }
+  [data-viz="sql-sandbox"] .sq-out { margin: 14px 16px 0; background: var(--code-bg); color: var(--code-ink); font-family: var(--mono); font-size: 12.5px; line-height: 1.55; padding: 10px 13px; border-radius: 9px; white-space: pre; overflow-x: auto; min-height: 64px; }
+  [data-viz="sql-sandbox"] .sq-out .d { color: var(--code-dim); }
+  [data-viz="sql-sandbox"] .sq-stage { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px 16px; }
+  [data-viz="sql-sandbox"] .sq-pane { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px 4px; background: var(--bg); transition: border-color .2s; }
+  [data-viz="sql-sandbox"] .sq-pane.tx { border-color: var(--line); }
+  [data-viz="sql-sandbox"] .sq-h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 8px; font-size: 14.5px; }
+  [data-viz="sql-sandbox"] .sq-chip { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--sunk); color: var(--ink-2); }
+  [data-viz="sql-sandbox"] .sq-chip.on { background: var(--line); color: var(--on-line); }
+  [data-viz="sql-sandbox"] .sq-t { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
+  [data-viz="sql-sandbox"] .sq-t th { text-align: left; font-family: var(--font); font-size: 12px; color: var(--ink-3); font-weight: 700; padding: 3px 6px; border-bottom: 1px solid var(--rule); }
+  [data-viz="sql-sandbox"] .sq-t td { padding: 3px 6px; border-bottom: 1px solid var(--rule); }
+  [data-viz="sql-sandbox"] .sq-t tr.cx td:nth-child(3) { color: var(--bad); font-weight: 700; }
+  [data-viz="sql-sandbox"] .sq-t tr.dirty td { background: var(--warn-bg); }
+  [data-viz="sql-sandbox"] .sq-note { margin: 6px 0; font-size: 12.5px; color: var(--ink-2); min-height: 1.4em; }
+  @media (max-width: 700px) {
+    [data-viz="sql-sandbox"] .sq-stage { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { fresh, run, sandboxHtml, type Act } from "../../scripts/sql-sandbox";
+  import { tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="sql-sandbox"]').forEach((root) => {
+    if (!once(root)) return;
+    const stage = root.querySelector<HTMLElement>(".sq-stage")!;
+    const out = root.querySelector<HTMLElement>(".sq-out")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const begin = root.querySelector<HTMLButtonElement>('[data-a="begin"]')!;
+    let s = fresh();
+
+    function render() {
+      stage.innerHTML = sandboxHtml(s);
+      out.innerHTML = s.out;
+      begin.disabled = s.inTx;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-a]");
+      if (!b || b.disabled) return;
+      if (b.dataset.a === "reset") {
+        s = fresh(); render();
+        tell(say, "Ready", "The table is back as it was. Three orders are <code>pending</code>.");
+        return;
+      }
+      const [step, html, tone] = run(s, b.dataset.a as Act);
+      render();
+      tell(say, step, html, tone);
+    });
+  }));
+</script>

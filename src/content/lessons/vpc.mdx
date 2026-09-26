@@ -1,0 +1,338 @@
+---
+time: 25 minutes
+level: Beginner
+before: []
+cost: free
+quiz:
+  - q: What makes a subnet public?
+    answer: 1
+    options:
+      - t: A setting on the subnet called Public
+        why: There is no such setting. People look for it because the console groups subnets as "public" and "private", but those are just names.
+      - t: Its route table sends 0.0.0.0/0 to an internet gateway
+        why: That one route is the whole difference. Without it, nothing on the internet can reach the subnet, whatever else you do.
+      - t: The servers in it have public IP addresses
+        why: A public IP is needed too, but on its own it does nothing. Without the route to the internet gateway, traffic to that address has no way in.
+      - t: Its name contains the word public
+        why: Names are only labels for people. AWS ignores them completely.
+  - q: Where should QuickCart's database go?
+    answer: 1
+    options:
+      - t: In a public subnet, so the app can reach it
+        why: The app never talks to the database directly. Putting it in a public subnet only helps attackers.
+      - t: In a private subnet — the API reaches it from inside the VPC
+        why: The API and the database are neighbours inside the VPC, joined by the local route. The internet never needs to reach the database.
+      - t: Outside the VPC entirely
+        why: Then the API couldn't reach it privately. Everything that talks privately needs to be inside the VPC.
+      - t: It doesn't matter, as long as it has a strong password
+        why: A password is the last line of defence, not the first. Exposed databases get attacked constantly; a private subnet means attackers never get to try the password.
+  - q: API servers in a private subnet need to download security updates. What lets them reach out without letting anything reach in?
+    answer: 1
+    options:
+      - t: An internet gateway
+        why: Routing a subnet to the internet gateway makes it public, which is what we are avoiding.
+      - t: A NAT gateway
+        why: A NAT gateway is a one-way door. Connections the server starts go out, and their replies come back. Nothing on the internet can start a connection in.
+      - t: Making the subnet public for a few minutes
+        why: That works, but it exposes the servers while it's open, and someone will forget to close it.
+      - t: A second VPC
+        why: A second VPC is just another private network. It doesn't give either one a way to the internet.
+  - q: How many addresses does 10.0.0.0/16 contain?
+    answer: 2
+    options:
+      - t: "16"
+        why: The 16 is the number of fixed bits, not the number of addresses.
+      - t: "256"
+        why: That's a /24, where 24 bits are fixed and 8 are free.
+      - t: "65,536"
+        why: 16 bits are fixed, which leaves 16 free. Two to the power of 16 is 65,536.
+      - t: About 4.3 billion
+        why: That is every IPv4 address there is, a /0.
+  - q: How many availability zones does one subnet live in?
+    answer: 0
+    options:
+      - t: Exactly one
+        why: Each subnet is in one zone. That's why QuickCart makes a matching set of subnets in a second zone, so losing one building doesn't take the site down.
+      - t: Exactly two
+        why: No. For two zones you create two subnets, one in each.
+      - t: All of them in the region
+        why: That's the VPC, not the subnet. A VPC spans every zone in its region; each subnet is in just one.
+      - t: None — subnets aren't tied to zones
+        why: They are. You choose the zone when you create the subnet, and you can't change it afterwards.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, week one">
+
+QuickCart's first backend was a single server with a public internet address. The API that the app talks to ran on it, and so did the database holding every order.
+
+The app only ever needed to reach the API. Nothing outside ever needed to reach the database directly. But because the whole server faced the internet, **anyone could try**.
+
+</Story>
+
+<Case>
+
+In early 2017, attackers scanned the internet for MongoDB databases that anyone could connect to. They found tens of thousands with nothing in front of them, deleted the data, and left a ransom note in its place. The same thing then happened to exposed Elasticsearch and other databases.
+
+Most of those databases were never meant to face the internet at all. There was simply nothing stopping anyone from reaching them.
+
+</Case>
+
+So QuickCart needs two things at once:
+
+- The app can reach the **API**, from anywhere in the world.
+- Nobody can reach the **database** — except the API.
+
+A VPC is how you get both.
+
+</Part>
+
+<Part id="idea">
+
+A **VPC** — Virtual Private Cloud — is a private section of AWS's network that belongs to your account. Other AWS customers can't see into it, and the internet can't reach anything inside it **unless you open a way in**.
+
+<YouKnow title="You already know this: the app sandbox">
+
+On iOS and Android, your app's files live in a sandbox. Other apps can't read them unless you deliberately share something. A VPC is the same idea for servers: everything is private by default, and you choose exactly what to expose.
+
+</YouKnow>
+
+### It starts with a range of addresses
+
+Every server in a VPC gets an internal address, like `10.0.11.24`. When you create the VPC, you choose the range those addresses come from, written like `10.0.0.0/16`. This way of writing a range is called CIDR.
+
+| You write | It means | How many addresses |
+|---|---|---|
+| `10.0.0.0/16` | every address from 10.0.0.0 to 10.0.255.255 | 65,536 |
+| `10.0.1.0/24` | every address from 10.0.1.0 to 10.0.1.255 | 256 |
+| `10.0.1.0/28` | 10.0.1.0 to 10.0.1.15 | 16 |
+
+The number after the slash is how many bits of the address are fixed. **A smaller number means a bigger range.** You don't need to do the maths by hand yet — remember that /16 is big and /24 is small. The [subnets lesson](/lessons/subnets-and-cidr/) goes further.
+
+### Then you slice it into subnets
+
+A **subnet** is a slice of the VPC's range. Each subnet lives in exactly one availability zone — one physical data centre site. QuickCart's VPC gets three kinds:
+
+| Subnet | Range | What lives there | Reachable from the internet? |
+|---|---|---|---|
+| Public | `10.0.1.0/24` | The load balancer — the front door | Yes |
+| App | `10.0.11.0/24` | The API servers | No |
+| Database | `10.0.21.0/24` | The database | No |
+
+### What makes a subnet public or private
+
+This is the part people get wrong. There is **no setting called public**. Every subnet has a **route table** — a short list of rules saying where traffic goes. One line decides everything:
+
+| The route table says | So the subnet is |
+|---|---|
+| `0.0.0.0/0 → internet gateway` | **Public.** Traffic can come in from, and go out to, the internet |
+| `0.0.0.0/0 → NAT gateway` | **Private.** It can reach out — to download updates — but nothing can reach in |
+| no `0.0.0.0/0` line at all | **Isolated.** It can only talk to things inside the VPC |
+
+`0.0.0.0/0` means *anywhere I don't have a more specific rule for* — in practice, the internet.
+
+<Key>A subnet is public or private only because of what its route table says. Nothing else.</Key>
+
+### The pieces, in one table
+
+| Piece | What it is | QuickCart uses it for |
+|---|---|---|
+| VPC | The whole private network | Everything lives inside it |
+| Subnet | A slice of it, in one zone | Keeping the database away from the internet |
+| Route table | The rules for where traffic goes | Deciding which subnets are public |
+| Internet gateway | The door to the internet | Letting customers reach the load balancer |
+| NAT gateway | A one-way door out | API servers downloading updates, with nothing getting in |
+
+Everything inside the VPC can still talk to everything else inside it, through a route called `local` that every route table has and you can't remove. That is how the API reaches the database: the database is unreachable from the internet, but not from its neighbours.
+
+</Part>
+
+<Part id="see">
+
+Below is QuickCart's network. Send an order from the app and watch the path it takes. Then send an attack straight at the database. **Switch the database subnet between private and public** and try again.
+
+<VpcJourney />
+
+**What to notice:** nothing about the database changed between the two attacks — not the server, not the password. Only one line in one route table. That is why the route table is the first thing to check when something is, or isn't, reachable.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">nothing in this lab costs money.</Cost>
+
+You'll build a small version of QuickCart's network in the AWS console: a VPC, one public subnet, one private subnet, and the route that makes the difference. It takes about 15 minutes.
+
+Before you start, check the region selector at the top right of the console says **N. Virginia (us-east-1)**. Everything in this lab goes in that region.
+
+<Steps>
+
+<Step title="Create the VPC">
+
+<ConsolePath path="VPC > Your VPCs > Create VPC" />
+
+| Field | Enter |
+|---|---|
+| Resources to create | **VPC only** |
+| Name tag | `quickcart-vpc` |
+| IPv4 CIDR block | **IPv4 CIDR manual input** |
+| IPv4 CIDR | `10.0.0.0/16` |
+| IPv6 CIDR block | **No IPv6 CIDR block** |
+| Tenancy | **Default** |
+
+Choose **Create VPC**.
+
+<See>
+
+The VPC's details page, with **State: Available**.
+
+</See>
+
+</Step>
+
+<Step title="Create two subnets">
+
+<ConsolePath path="VPC > Subnets > Create subnet" />
+
+For **VPC ID**, choose `quickcart-vpc`. Then fill in the first subnet, choose **Add new subnet**, and fill in the second:
+
+| Subnet name | Availability Zone | IPv4 subnet CIDR block |
+|---|---|---|
+| `quickcart-public-a` | us-east-1a | `10.0.1.0/24` |
+| `quickcart-app-a` | us-east-1a | `10.0.11.0/24` |
+
+Choose **Create subnet**.
+
+<See>
+
+Two subnets in the list. Right now **both are private** — neither has a route to the internet yet.
+
+</See>
+
+<Mistake title="the second subnet uses the same range">
+
+If you copy the first subnet's range into the second, creation fails:
+
+```output title="The console shows"
+The CIDR '10.0.1.0/24' conflicts with another subnet
+```
+
+**Why:** two subnets in one VPC can't share addresses, or the VPC wouldn't know which one an address belongs to.
+
+**The fix:** give each subnet its own range inside the VPC's range — here `10.0.11.0/24` for the second.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the internet gateway and attach it">
+
+<ConsolePath path="VPC > Internet gateways > Create internet gateway" />
+
+| Field | Enter |
+|---|---|
+| Name tag | `quickcart-igw` |
+
+Choose **Create internet gateway**. Then choose **Actions → Attach to VPC**, pick `quickcart-vpc`, and choose **Attach internet gateway**.
+
+<See>
+
+**State: Attached**. On its own this makes nothing public — no subnet is using the gateway yet.
+
+</See>
+
+</Step>
+
+<Step title="Make the public subnet public">
+
+<ConsolePath path="VPC > Route tables > Create route table" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-rt-public` |
+| VPC | `quickcart-vpc` |
+
+Choose **Create route table**. On its **Routes** tab, choose **Edit routes**, then **Add route**:
+
+| Destination | Target |
+|---|---|
+| `0.0.0.0/0` | **Internet Gateway**, then `quickcart-igw` |
+
+Choose **Save changes**. Then open the **Subnet associations** tab, choose **Edit subnet associations**, tick `quickcart-public-a`, and choose **Save associations**.
+
+<See>
+
+The route table lists two routes: `10.0.0.0/16 → local` and `0.0.0.0/0 → igw-…`. One subnet is associated. **That subnet is now public.** You changed a route table; you never touched the subnet itself.
+
+</See>
+
+</Step>
+
+<Step title="Confirm the other subnet is still private">
+
+<ConsolePath path="VPC > Subnets > quickcart-app-a > Route table" />
+
+<See>
+
+Only one route: `10.0.0.0/16 → local`. No way to the internet. The subnet is private because of what is *missing*.
+
+</See>
+
+</Step>
+
+<Step title="See the whole thing as a map">
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Resource map" />
+
+<See>
+
+A diagram: `quickcart-public-a` joined to `quickcart-rt-public`, which joins to `quickcart-igw`. `quickcart-app-a` joins to the VPC's main route table, which goes nowhere outside.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="VPC > Your VPCs > quickcart-vpc > Actions > Delete VPC" />
+
+AWS lists everything that will go with it: the subnets, the route table and the internet gateway. Type `delete` in the box and choose **Delete**.
+
+<See>
+
+The VPC is gone from the list, along with everything inside it. Nothing is left running.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| VPC | Your private network on AWS. Closed by default |
+| Subnet | A slice of the VPC, in one availability zone |
+| Route table | The rules for where a subnet's traffic goes |
+| Public subnet | Route table sends `0.0.0.0/0` to the internet gateway |
+| Private subnet | Route table sends `0.0.0.0/0` to a NAT gateway — out only |
+| Isolated subnet | No `0.0.0.0/0` route at all |
+| `local` route | Always there. Everything in the VPC can reach everything else |
+| `/16` and `/24` | 65,536 addresses and 256 addresses |
+| Can't reach something? | Check the route table first |
+
+</Cheat>
+
+</Part>

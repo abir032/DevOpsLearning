@@ -1,0 +1,70 @@
+---
+/*
+ * Terraform modules: inputs -> resources -> outputs.
+ * Teaches: a module is sealed. Values go in through variables, come out
+ * through outputs, and a change to one input reaches exactly the resources
+ * (and the outputs) that use it.
+ */
+import { WIRING, wiringCols, wiringPlan, wiringSay } from "../../scripts/tf-module-wiring";
+const first = WIRING.none;
+const inputs = ["name", "cidr", "zones", "tags"] as const;
+---
+<div class="viz" data-track="code" data-viz="tf-module-wiring">
+  <div class="viz-controls">
+    <span class="lbl" id="mw-lbl">Change one input</span>
+    <div class="seg" role="group" aria-labelledby="mw-lbl">
+      <button type="button" data-s="none" aria-pressed="true">Nothing</button>
+      {inputs.map((k) => <button type="button" data-s={k} aria-pressed="false"><code>{WIRING[k].label}</code></button>)}
+    </div>
+    <button class="btn" type="button" data-s="peek">Read a resource from outside</button>
+  </div>
+  <div class="mw" set:html={wiringCols(first)} />
+  <pre class="plan-out" tabindex="0" aria-label="terraform plan output" set:html={wiringPlan(first)} />
+  <div class="viz-say good" aria-live="polite" set:html={wiringSay(first)} />
+</div>
+
+<script>
+  import { WIRING, wiringCols, wiringPlan, wiringSay } from "../../scripts/tf-module-wiring";
+  import { press, reduced } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="tf-module-wiring"]').forEach((root) => {
+    if (!once(root)) return;
+    const mw = root.querySelector<HTMLElement>(".mw")!;
+    const plan = root.querySelector<HTMLElement>(".plan-out")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-s]")];
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-s]");
+      if (!b) return;
+      const s = WIRING[b.dataset.s!];
+      press(btns, (x) => x === b);
+      mw.innerHTML = wiringCols(s, !reduced());
+      plan.innerHTML = wiringPlan(s);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = wiringSay(s);
+    });
+  }));
+</script>
+
+<style is:global>
+  [data-viz="tf-module-wiring"] { container-type: inline-size; }
+  [data-viz="tf-module-wiring"] .mw { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1.15fr) 18px minmax(0, 1fr); gap: 8px; padding: 14px 16px; align-items: stretch; }
+  [data-viz="tf-module-wiring"] .mw-col { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+  [data-viz="tf-module-wiring"] .mw-col:nth-child(3) { border: 2px solid var(--code); }
+  [data-viz="tf-module-wiring"] .mw-col.sealed { border-style: dashed; border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="tf-module-wiring"] .mw-col h3 { margin: 0 0 2px; font-size: 15px; font-weight: 800; }
+  [data-viz="tf-module-wiring"] .mw-col small { display: block; color: var(--ink-3); font-size: 12.5px; margin-bottom: 10px; }
+  [data-viz="tf-module-wiring"] .chip code { font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; background: none; padding: 0; }
+  [data-viz="tf-module-wiring"] .seg code { font-family: var(--mono); font-size: 13px; background: none; padding: 0; color: inherit; }
+  [data-viz="tf-module-wiring"] .mw-arrow { position: relative; }
+  [data-viz="tf-module-wiring"] .mw-arrow::before { content: ""; position: absolute; top: 50%; left: 0; right: 4px; border-top: 2px solid var(--code); }
+  [data-viz="tf-module-wiring"] .mw-arrow::after { content: ""; position: absolute; top: calc(50% - 5px); right: 0; border: 6px solid transparent; border-left-color: var(--code); border-right: 0; }
+  [data-viz="tf-module-wiring"] .plan-out { overflow-x: auto; white-space: pre; }
+  @container (max-width: 620px) {
+    [data-viz="tf-module-wiring"] .mw { grid-template-columns: minmax(0, 1fr); }
+    [data-viz="tf-module-wiring"] .mw-arrow { height: 18px; }
+    [data-viz="tf-module-wiring"] .mw-arrow::before { top: 0; bottom: 4px; left: 50%; right: auto; border-top: 0; border-left: 2px solid var(--code); }
+    [data-viz="tf-module-wiring"] .mw-arrow::after { top: auto; bottom: 0; right: auto; left: calc(50% - 5px); border: 6px solid transparent; border-top-color: var(--code); border-bottom: 0; }
+  }
+</style>

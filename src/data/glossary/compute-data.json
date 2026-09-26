@@ -1,0 +1,386 @@
+[
+  {
+    "term": "EC2 instance",
+    "lesson": "ec2",
+    "match": [
+      "EC2 instance",
+      "EC2 instances"
+    ],
+    "def": "A virtual server you rent from AWS by the second. It starts as a copy of an AMI."
+  },
+  {
+    "term": "AMI",
+    "lesson": "ec2",
+    "match": [
+      "AMI",
+      "Amazon Machine Image"
+    ],
+    "def": "Amazon Machine Image: the starting disk every EC2 instance is copied from — an operating system and anything already installed."
+  },
+  {
+    "term": "User data",
+    "lesson": "ec2",
+    "match": [
+      "user data"
+    ],
+    "def": "A script an EC2 instance runs once, as root, on its first boot. How a plain AMI becomes your server without anyone logging in. Not secret."
+  },
+  {
+    "term": "Instance profile",
+    "lesson": "ec2",
+    "match": [
+      "instance profile"
+    ],
+    "def": "The wrapper that attaches an IAM role to an EC2 instance, so software on it gets short-lived AWS credentials with no stored keys."
+  },
+  {
+    "term": "IMDSv2",
+    "lesson": "ec2",
+    "match": [
+      "IMDSv2"
+    ],
+    "def": "Version 2 of the instance metadata service. Every request needs a token from a PUT first, which protects the instance's role credentials."
+  },
+  {
+    "term": "Session Manager",
+    "lesson": "ec2",
+    "match": [
+      "Session Manager"
+    ],
+    "def": "Part of AWS Systems Manager. A shell on a server with no open inbound port and no SSH key; access is checked against IAM and can be logged."
+  },
+  {
+    "term": "Key pair",
+    "lesson": "ec2",
+    "match": [
+      "key pair"
+    ],
+    "def": "An SSH public and private key for logging in to an instance. QuickCart uses Session Manager instead, so there are no keys to lose."
+  },
+  {
+    "term": "Application Load Balancer (ALB)",
+    "lesson": "load-balancers",
+    "match": [
+      "Application Load Balancer"
+    ],
+    "def": "AWS's load balancer for HTTP and HTTPS. It can route by path or hostname, and handle HTTPS for the servers behind it."
+  },
+  {
+    "term": "Listener",
+    "lesson": "load-balancers",
+    "match": [
+      "listener"
+    ],
+    "def": "A port and protocol a load balancer listens on, like HTTPS on 443, and the rules for what to do with requests that arrive."
+  },
+  {
+    "term": "Target group",
+    "lesson": "load-balancers",
+    "match": [
+      "target group"
+    ],
+    "def": "The list of servers behind a load balancer, plus the health check that decides which of them get traffic."
+  },
+  {
+    "term": "Health check",
+    "lesson": "load-balancers",
+    "match": [
+      "health check",
+      "health checks"
+    ],
+    "def": "A small request, like GET /health, a load balancer sends each target every few seconds. Fail enough in a row and the target gets no traffic."
+  },
+  {
+    "term": "Deregistration delay",
+    "lesson": "load-balancers",
+    "match": [
+      "deregistration delay",
+      "connection draining"
+    ],
+    "def": "How long a load balancer lets requests already in progress finish when a target is being removed. Default 300 seconds."
+  },
+  {
+    "term": "Auto Scaling group",
+    "lesson": "auto-scaling",
+    "match": [
+      "Auto Scaling group",
+      "Auto Scaling groups"
+    ],
+    "def": "A set of identical servers that AWS keeps at the number you ask for. It launches servers when there are too few, terminates them when there are too many, and replaces any that fail."
+  },
+  {
+    "term": "Launch template",
+    "lesson": "auto-scaling",
+    "match": [
+      "launch template",
+      "launch templates"
+    ],
+    "def": "A saved, versioned recipe for launching a server: image, instance type, security group, role and start-up script. An Auto Scaling group launches every server from one."
+  },
+  {
+    "term": "Desired capacity",
+    "lesson": "auto-scaling",
+    "match": [
+      "desired capacity"
+    ],
+    "def": "How many servers an Auto Scaling group should have right now, between its minimum and maximum. Scaling policies change this number."
+  },
+  {
+    "term": "Health check grace period",
+    "lesson": "auto-scaling",
+    "match": [
+      "grace period"
+    ],
+    "def": "How long an Auto Scaling group ignores health checks on a new server, so a slow start isn't mistaken for a failure. Set it longer than the real start-up time."
+  },
+  {
+    "term": "Target tracking",
+    "lesson": "auto-scaling",
+    "match": [
+      "target tracking"
+    ],
+    "def": "A scaling policy that keeps a metric near a target, such as average CPU at 50%, by adding or removing servers. Adds quickly, removes slowly."
+  },
+  {
+    "term": "Instance refresh",
+    "lesson": "auto-scaling",
+    "match": [
+      "Instance refresh"
+    ],
+    "def": "Replacing every server in an Auto Scaling group in batches, waiting for each new one to be healthy. Used to roll out a new launch template version."
+  },
+  {
+    "term": "RDS",
+    "lesson": "rds",
+    "match": [
+      "RDS"
+    ],
+    "def": "Relational Database Service: AWS runs a database server such as MySQL or PostgreSQL for you, including patching, backups and failover."
+  },
+  {
+    "term": "Multi-AZ",
+    "lesson": "rds",
+    "match": [
+      "Multi-AZ"
+    ],
+    "def": "An RDS setting that keeps a synchronous standby copy of the database in another availability zone, and switches to it automatically if the primary fails."
+  },
+  {
+    "term": "Failover",
+    "lesson": "rds",
+    "match": [
+      "failover",
+      "fails over"
+    ],
+    "def": "Switching from a failed primary to a standby. In RDS Multi-AZ, the endpoint name moves to the standby, typically in 60 to 120 seconds."
+  },
+  {
+    "term": "Read replica",
+    "lesson": "rds",
+    "match": [
+      "read replica",
+      "read replicas"
+    ],
+    "def": "An asynchronous copy of a database, with its own endpoint, that you can query to take read work off the primary. It can lag slightly behind."
+  },
+  {
+    "term": "Point-in-time restore",
+    "lesson": "rds",
+    "match": [
+      "point-in-time restore",
+      "Point-in-time restore"
+    ],
+    "def": "Creating a new database as it was at any second within the backup retention period, using RDS automated backups and change logs."
+  },
+  {
+    "term": "DB subnet group",
+    "lesson": "rds",
+    "match": [
+      "DB subnet group"
+    ],
+    "def": "The list of subnets RDS may place a database in. It must cover at least two availability zones, and should hold only private subnets."
+  },
+  {
+    "term": "Parameter group",
+    "lesson": "rds",
+    "match": [
+      "parameter group"
+    ],
+    "def": "The engine settings for an RDS database, such as max_connections. The default one can't be edited, so you create your own to change a setting."
+  },
+  {
+    "term": "Snapshot (RDS)",
+    "lesson": "rds",
+    "match": [
+      "manual snapshot",
+      "manual snapshots"
+    ],
+    "def": "A saved copy of a whole RDS database at one moment. Manual snapshots are kept until you delete them, even after the database is gone."
+  },
+  {
+    "term": "Transaction",
+    "lesson": "sql-safely",
+    "match": [
+      "a transaction"
+    ],
+    "def": "A group of database changes that happen all together or not at all. Nothing in it is permanent or visible to anyone else until you COMMIT."
+  },
+  {
+    "term": "COMMIT and ROLLBACK",
+    "lesson": "sql-safely",
+    "match": [
+      "ROLLBACK"
+    ],
+    "def": "The two ways to end a transaction. COMMIT makes its changes permanent and visible to everyone; ROLLBACK throws them all away."
+  },
+  {
+    "term": "Autocommit",
+    "lesson": "sql-safely",
+    "match": [
+      "autocommit"
+    ],
+    "def": "MySQL's default: any statement run outside a transaction is committed, and so permanent, the moment it finishes."
+  },
+  {
+    "term": "DDL",
+    "lesson": "sql-safely",
+    "match": [
+      "DDL"
+    ],
+    "def": "Statements that change a database's structure, such as CREATE, ALTER, DROP and TRUNCATE. In MySQL they commit at once and can't be rolled back."
+  },
+  {
+    "term": "Undo script",
+    "lesson": "sql-safely",
+    "match": [
+      "undo script"
+    ],
+    "def": "A statement, written and saved before a change to production data, that puts the old values back if the change turns out to be wrong after it's committed."
+  },
+  {
+    "term": "Port forwarding (Session Manager)",
+    "lesson": "sql-safely",
+    "match": [
+      "port forwarding"
+    ],
+    "def": "A Session Manager tunnel from a port on your laptop, through an instance in the VPC, to a private host such as a database. No inbound port or SSH key needed."
+  },
+  {
+    "term": "S3 bucket",
+    "lesson": "s3",
+    "match": [
+      "S3 bucket",
+      "S3 buckets"
+    ],
+    "def": "A container for files (objects) in S3. It lives in one region, and its name must be unique across every AWS account."
+  },
+  {
+    "term": "Object key (S3)",
+    "lesson": "s3",
+    "match": [
+      "object key"
+    ],
+    "def": "An object's full name in its bucket, like receipts/order-1001.pdf. S3 has no real folders; the slashes are just part of the name."
+  },
+  {
+    "term": "Block Public Access",
+    "lesson": "s3",
+    "match": [
+      "Block Public Access"
+    ],
+    "def": "Four S3 switches, on by default for new buckets, that override any setting or policy that would make a bucket or its objects public."
+  },
+  {
+    "term": "Presigned URL",
+    "lesson": "s3",
+    "match": [
+      "presigned URL",
+      "presigned URLs"
+    ],
+    "def": "A link to one private S3 object that anyone can use until it expires. It is signed with the credentials of someone allowed to read the object."
+  },
+  {
+    "term": "Delete marker",
+    "lesson": "s3",
+    "match": [
+      "delete marker"
+    ],
+    "def": "What S3 adds on top of an object when you delete it in a versioned bucket. The object looks deleted; delete the marker and it's back."
+  },
+  {
+    "term": "Bucket policy",
+    "lesson": "s3",
+    "match": [
+      "bucket policy",
+      "bucket policies"
+    ],
+    "def": "A JSON policy attached to an S3 bucket, saying what anyone may or may not do to it and its objects."
+  },
+  {
+    "term": "Storage class",
+    "lesson": "s3",
+    "match": [
+      "storage class",
+      "storage classes"
+    ],
+    "def": "How S3 stores an object, trading monthly price against how quickly and cheaply it can be read: Standard, Standard-IA, Glacier and others."
+  },
+  {
+    "term": "Lifecycle rule",
+    "lesson": "s3",
+    "match": [
+      "lifecycle rule",
+      "lifecycle rules"
+    ],
+    "def": "An S3 rule that moves objects to cheaper storage classes, or deletes old versions, on a schedule."
+  },
+  {
+    "term": "SSE-S3",
+    "lesson": "s3",
+    "match": [
+      "SSE-S3"
+    ],
+    "def": "S3's default encryption at rest, with keys AWS creates and manages. Applied to every new object automatically, at no extra cost."
+  },
+  {
+    "term": "Secret",
+    "lesson": "secrets",
+    "match": [
+      "a secret store"
+    ],
+    "def": "Any value that lets someone in, such as a database password or an API key. Keep it in one place, and give everything else only its name."
+  },
+  {
+    "term": "Secrets Manager",
+    "lesson": "secrets",
+    "match": [
+      "Secrets Manager"
+    ],
+    "def": "AWS's store for secrets. It encrypts them, hands them only to callers IAM allows, keeps the previous value, and can change them on a schedule."
+  },
+  {
+    "term": "Parameter Store",
+    "lesson": "secrets",
+    "match": [
+      "Parameter Store"
+    ],
+    "def": "Part of AWS Systems Manager: a store for settings. Standard parameters cost nothing to store; a SecureString parameter is encrypted."
+  },
+  {
+    "term": "SecureString",
+    "lesson": "secrets",
+    "match": [
+      "SecureString"
+    ],
+    "def": "A Parameter Store parameter encrypted with a KMS key. Read it with --with-decryption."
+  },
+  {
+    "term": "Rotation (secrets)",
+    "lesson": "secrets",
+    "match": [
+      "automatic rotation",
+      "secret rotation"
+    ],
+    "def": "Changing a secret on a schedule, so an old leaked copy stops working by itself. Secrets Manager can do it for you."
+  }
+]

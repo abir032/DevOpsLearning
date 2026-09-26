@@ -1,0 +1,12 @@
+[
+  { "term": "Deployment circuit breaker", "lesson": "zero-downtime-releases", "match": ["circuit breaker"],
+    "def": "An ECS setting that notices when a release's new tasks keep failing to start, stops the release, and goes back to the last working version by itself." },
+  { "term": "Readiness gate", "lesson": "kubernetes-and-eks", "match": ["readiness gate"],
+    "def": "An extra condition on a Kubernetes pod: it only counts as ready once the load balancer says it is healthy, so old pods are not removed too early during a release." },
+  { "term": "EKS Pod Identity", "lesson": "kubernetes-and-eks", "match": ["Pod Identity"],
+    "def": "The way to give one Kubernetes service account its own IAM role, so only the pods that need AWS permissions get them." },
+  { "term": "AWS Load Balancer Controller", "lesson": "kubernetes-and-eks", "match": ["AWS Load Balancer Controller"],
+    "def": "A program installed inside an EKS cluster that watches for Ingress objects and builds real AWS load balancers for them." },
+  { "term": "Abort criteria", "lesson": "canary-pipeline", "match": ["abort criteria"],
+    "def": "The conditions, written down before a canary starts, that stop it and send all traffic back to the stable version, such as an error rate above 1%." }
+]

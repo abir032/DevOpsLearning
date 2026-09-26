@@ -1,0 +1,340 @@
+[
+  {
+    "term": "IAM",
+    "lesson": "iam",
+    "match": [
+      "IAM"
+    ],
+    "def": "Identity and Access Management: the part of AWS that decides, for every request, whether the caller is allowed to do it."
+  },
+  {
+    "term": "Root user",
+    "lesson": "iam",
+    "match": [
+      "root user"
+    ],
+    "def": "The login an AWS account was created with. It can do everything and no IAM policy can limit it, so it gets MFA and is almost never used."
+  },
+  {
+    "term": "IAM role",
+    "lesson": "iam",
+    "match": [
+      "IAM role",
+      "IAM roles"
+    ],
+    "def": "An identity with no password and no permanent keys. Whatever assumes it gets temporary credentials that expire on their own."
+  },
+  {
+    "term": "IAM policy",
+    "lesson": "iam",
+    "match": [
+      "IAM policy",
+      "IAM policies",
+      "permissions policy"
+    ],
+    "def": "A JSON document of statements, each with an Effect, Actions and Resources, that allows or denies requests."
+  },
+  {
+    "term": "Least privilege",
+    "lesson": "iam",
+    "match": [
+      "least privilege",
+      "least-privilege"
+    ],
+    "def": "Giving each identity exactly the actions and resources it needs, and nothing more."
+  },
+  {
+    "term": "Access key",
+    "lesson": "iam",
+    "match": [
+      "access keys",
+      "access key"
+    ],
+    "def": "A long-lived ID and secret that let a program call AWS. It works until deleted, so a leaked one is dangerous. Prefer roles."
+  },
+  {
+    "term": "Trust policy",
+    "lesson": "iam",
+    "match": [
+      "trust policy"
+    ],
+    "def": "The part of a role that says who or what may assume it, such as the EC2 service."
+  },
+  {
+    "term": "Explicit deny",
+    "lesson": "iam",
+    "match": [
+      "explicit Deny",
+      "explicit deny"
+    ],
+    "def": "A policy statement with Effect Deny that matches a request. It beats every Allow."
+  },
+  {
+    "term": "Implicit deny",
+    "lesson": "iam",
+    "match": [
+      "implicit deny"
+    ],
+    "def": "The default answer in IAM: if no policy allows a request, it is denied."
+  },
+  {
+    "term": "ARN",
+    "lesson": "iam",
+    "match": [
+      "ARN",
+      "ARNs"
+    ],
+    "def": "Amazon Resource Name: the unique ID of an AWS resource, like arn:aws:s3:::quickcart-menu-photos-111122223333."
+  },
+  {
+    "term": "DNS",
+    "lesson": "dns-and-https",
+    "match": [
+      "DNS"
+    ],
+    "def": "The Domain Name System: turns a name like example.com into an IP address, through a chain of servers."
+  },
+  {
+    "term": "Hosted zone",
+    "lesson": "dns-and-https",
+    "match": [
+      "hosted zone"
+    ],
+    "def": "Where a domain's DNS records live in Route 53. It only takes effect once the registrar points to its name servers."
+  },
+  {
+    "term": "Name servers",
+    "lesson": "dns-and-https",
+    "match": [
+      "name servers",
+      "name server"
+    ],
+    "def": "The servers in charge of a domain's records. The registrar tells the world which ones they are."
+  },
+  {
+    "term": "Registrar",
+    "lesson": "dns-and-https",
+    "match": [
+      "registrar"
+    ],
+    "def": "The company you bought a domain from. It sets which name servers answer for the domain."
+  },
+  {
+    "term": "Alias record",
+    "lesson": "dns-and-https",
+    "match": [
+      "alias record",
+      "alias records"
+    ],
+    "def": "A Route 53 record that points a name, even the domain's root, at an AWS resource such as a load balancer, and follows its addresses as they change."
+  },
+  {
+    "term": "TTL",
+    "lesson": "dns-and-https",
+    "match": [
+      "TTL"
+    ],
+    "def": "Time to live: how many seconds a DNS answer may be cached before it must be asked for again."
+  },
+  {
+    "term": "ACM",
+    "lesson": "dns-and-https",
+    "match": [
+      "ACM"
+    ],
+    "def": "AWS Certificate Manager: free, trusted TLS certificates for load balancers and other AWS services, renewed automatically."
+  },
+  {
+    "term": "TLS certificate",
+    "lesson": "dns-and-https",
+    "match": [
+      "TLS certificate",
+      "certificate authority"
+    ],
+    "def": "A file proving a key belongs to a domain, signed by an authority browsers trust. It is what puts the padlock on HTTPS."
+  },
+  {
+    "term": "Self-signed certificate",
+    "lesson": "dns-and-https",
+    "match": [
+      "self-signed certificate"
+    ],
+    "def": "A certificate you made yourself. The traffic is encrypted, but nobody trusted vouches for it, so browsers warn."
+  },
+  {
+    "term": "TLS termination",
+    "lesson": "dns-and-https",
+    "match": [
+      "TLS termination"
+    ],
+    "def": "Decrypting HTTPS at the load balancer, so the servers behind it never handle certificates."
+  },
+  {
+    "term": "Reserved addresses",
+    "lesson": "subnets-and-cidr",
+    "match": [
+      "reserved addresses",
+      "five reserved addresses"
+    ],
+    "def": "The five addresses AWS keeps in every subnet: the first four and the last. A /24 has 256 addresses but only 251 you can use."
+  },
+  {
+    "term": "Prefix length",
+    "lesson": "subnets-and-cidr",
+    "match": [
+      "prefix length"
+    ],
+    "def": "The number after the slash in a CIDR range, like the 24 in /24. It is how many bits are fixed; the rest decide how many addresses the range holds."
+  },
+  {
+    "term": "Octet",
+    "lesson": "subnets-and-cidr",
+    "match": [
+      "octet",
+      "octets"
+    ],
+    "def": "One of the four numbers in an IPv4 address, from 0 to 255. Each is 8 bits, so an address is 32 bits."
+  },
+  {
+    "term": "VPC peering",
+    "lesson": "subnets-and-cidr",
+    "match": [
+      "VPC peering"
+    ],
+    "def": "A private connection between two VPCs. It only works if their address ranges don't overlap."
+  },
+  {
+    "term": "Local route",
+    "lesson": "routing",
+    "match": [
+      "local route"
+    ],
+    "def": "The route for the VPC's own range, present in every route table and impossible to remove. It lets everything in a VPC reach everything else."
+  },
+  {
+    "term": "Main route table",
+    "lesson": "routing",
+    "match": [
+      "main route table"
+    ],
+    "def": "The route table a VPC starts with. Any subnet not given its own table uses it, so it is safest left with only the local route."
+  },
+  {
+    "term": "Longest prefix match",
+    "lesson": "routing",
+    "match": [
+      "longest prefix match",
+      "most specific match wins",
+      "most specific route wins"
+    ],
+    "def": "The rule for choosing between routes: when several match a packet, the one with the biggest number after the slash wins."
+  },
+  {
+    "term": "VPC endpoint",
+    "lesson": "routing",
+    "match": [
+      "VPC endpoint",
+      "VPC endpoints"
+    ],
+    "def": "A private path from your VPC to an AWS service such as S3 or Secrets Manager, so the traffic never goes over the internet."
+  },
+  {
+    "term": "Gateway endpoint",
+    "lesson": "routing",
+    "match": [
+      "gateway endpoint"
+    ],
+    "def": "A free VPC endpoint for S3 or DynamoDB. It works by adding a route for the service's prefix list to your route tables."
+  },
+  {
+    "term": "Interface endpoint",
+    "lesson": "routing",
+    "match": [
+      "interface endpoint"
+    ],
+    "def": "A VPC endpoint for most other AWS services. It puts a network interface with a private address in your subnet, and bills by the hour."
+  },
+  {
+    "term": "Prefix list",
+    "lesson": "routing",
+    "match": [
+      "prefix list"
+    ],
+    "def": "A named list of address ranges, with an ID starting pl-. AWS keeps one per service, such as S3, and gateway endpoint routes point at it."
+  },
+  {
+    "term": "Shared responsibility model",
+    "lesson": "what-the-cloud-is",
+    "match": [
+      "shared responsibility model"
+    ],
+    "def": "How security is split: AWS secures the buildings, hardware and its own services; you secure what you put in them, such as access, network rules, patches and data."
+  },
+  {
+    "term": "AWS Budgets",
+    "lesson": "what-the-cloud-is",
+    "match": [
+      "AWS Budgets"
+    ],
+    "def": "Sends you an alert when spending crosses, or is forecast to cross, a limit you set. It warns; it never stops anything."
+  },
+  {
+    "term": "Global service",
+    "lesson": "what-the-cloud-is",
+    "match": [
+      "global service"
+    ],
+    "def": "An AWS service that isn't tied to one region, such as IAM. The console's region selector shows Global on its pages."
+  },
+  {
+    "term": "Stateful firewall",
+    "lesson": "security-groups",
+    "match": [
+      "groups are stateful",
+      "stateful firewall"
+    ],
+    "def": "A firewall that remembers each allowed connection and lets its replies back automatically. Security groups are stateful."
+  },
+  {
+    "term": "Network ACL",
+    "lesson": "security-groups",
+    "match": [
+      "network ACL",
+      "network ACLs"
+    ],
+    "def": "A stateless firewall on a whole subnet, with numbered allow and deny rules. Replies need their own rule. Usually left at the default."
+  },
+  {
+    "term": "Ephemeral port",
+    "lesson": "security-groups",
+    "match": [
+      "ephemeral port"
+    ],
+    "def": "The random high-numbered port a client uses for one connection, where the reply comes back. Usually somewhere in 1024 to 65535."
+  },
+  {
+    "term": "504 Gateway Timeout",
+    "lesson": "security-groups",
+    "match": [
+      "504 Gateway Timeout"
+    ],
+    "def": "What a load balancer returns when it couldn't get an answer from a server in time. Behind an AWS load balancer, often a security group dropping traffic."
+  },
+  {
+    "term": "Zone ID",
+    "lesson": "regions-and-zones",
+    "match": [
+      "zone ID",
+      "zone IDs"
+    ],
+    "def": "A code like use1-az2 that names the same availability zone in every AWS account. Zone names like us-east-1a can point at different zones in different accounts."
+  },
+  {
+    "term": "AWS Health Dashboard",
+    "lesson": "regions-and-zones",
+    "match": [
+      "AWS Health Dashboard"
+    ],
+    "def": "Where AWS reports problems with its own services, by region and zone. Worth checking early in an incident."
+  }
+]

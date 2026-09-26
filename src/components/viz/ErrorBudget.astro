@@ -1,0 +1,128 @@
+---
+/*
+ * Reliability targets: an error budget burning down.
+ * Teaches: the SLO sets how much failure you can afford, and the budget left
+ * decides how boldly you release.
+ */
+---
+<div class="viz" data-track="ship" data-viz="budget">
+  <div class="viz-controls">
+    <span class="lbl" id="eb-lbl">Target (SLO)</span>
+    <div class="seg" role="group" aria-labelledby="eb-lbl">
+      <button type="button" data-slo="99" aria-pressed="false">99%</button>
+      <button type="button" data-slo="99.9" aria-pressed="true">99.9%</button>
+      <button type="button" data-slo="99.99" aria-pressed="false">99.99%</button>
+    </div>
+  </div>
+  <div class="viz-controls eb-events">
+    <span class="lbl">Something happens</span>
+    <button class="btn" type="button" data-ev="deploy">A bad deploy: 20 minutes down</button>
+    <button class="btn" type="button" data-ev="db">A slow database: 1 hour at 5% errors</button>
+    <button class="btn" type="button" data-ev="blip">A network blip: 2 minutes down</button>
+    <button class="btn line" type="button" data-ev="reset">Start a new month</button>
+  </div>
+  <div class="eb">
+    <div class="eb-top">
+      <div><span class="eb-num" data-n="left">43.2</span><small>minutes of budget left, of <b data-n="total">43.2</b> this month</small></div>
+      <div class="eb-policy" data-n="policy" data-level="ok">Ship freely</div>
+    </div>
+    <div class="eb-bar" role="img" aria-label="Error budget left: 100%" data-n="bar"><div data-n="fill"></div></div>
+    <ol class="eb-log" data-n="log" aria-label="What has used the budget this month"><li class="eb-none">Nothing has gone wrong yet this month.</li></ol>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">A new month</span>At <b>99.9%</b>, QuickCart may fail for <b>43.2 minutes</b> in a 30-day month. Use the buttons to make things go wrong.</div>
+</div>
+
+<style is:global>
+  [data-viz="budget"] .eb-events { border-top: 0; padding-top: 0; }
+  [data-viz="budget"] .eb { padding: 14px 16px 8px; }
+  [data-viz="budget"] .eb-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 10px; margin-bottom: 10px; }
+  [data-viz="budget"] .eb-num { display: block; font-size: 40px; font-weight: 900; letter-spacing: -.02em; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  [data-viz="budget"] .eb-top small { font-size: 13.5px; color: var(--ink-2); }
+  [data-viz="budget"] .eb-policy { font-weight: 800; font-size: 15px; padding: 6px 12px; border-radius: 999px; border: 2px solid var(--ok); color: var(--ok); background: var(--ok-bg); }
+  [data-viz="budget"] .eb-policy[data-level="care"] { border-color: var(--warn); color: var(--warn); background: var(--warn-bg); }
+  [data-viz="budget"] .eb-policy[data-level="stop"] { border-color: var(--bad); color: var(--bad); background: var(--bad-bg); }
+  [data-viz="budget"] .eb-bar { height: 18px; border-radius: 9px; background: var(--sunk); border: 1px solid var(--rule); overflow: hidden; }
+  [data-viz="budget"] .eb-bar div { height: 100%; width: 100%; background: var(--ok); transition: width .45s ease, background .3s; }
+  [data-viz="budget"] .eb-bar div.care { background: var(--warn); }
+  [data-viz="budget"] .eb-bar div.stop { background: var(--bad); }
+  [data-viz="budget"] .eb-log { list-style: none; margin: 12px 0 4px; padding: 0; font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+  [data-viz="budget"] .eb-log li { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px dashed var(--rule); padding: 3px 0; }
+  [data-viz="budget"] .eb-log li b { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  [data-viz="budget"] .eb-none { color: var(--ink-3); border-bottom: 0 !important; }
+  @media (prefers-reduced-motion: reduce) { [data-viz="budget"] .eb-bar div { transition: none; } }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  const MONTH = 30 * 24 * 60; /* minutes in a 30-day month */
+  /* each event, as minutes of complete failure: 1 hour at 5% errors counts as 3 minutes */
+  const EVENTS: Record<string, { label: string; cost: number; how: string }> = {
+    deploy: { label: "Bad deploy, 20 minutes down", cost: 20, how: "Every request failed for 20 minutes." },
+    db: { label: "Slow database, 1 hour at 5% errors", cost: 3, how: "One request in twenty failed for an hour. That counts the same as 3 minutes of everything failing." },
+    blip: { label: "Network blip, 2 minutes down", cost: 2, how: "Everything failed for 2 minutes." },
+  };
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="budget"]').forEach((root) => {
+    if (!once(root)) return;
+    const q = (n: string) => root.querySelector<HTMLElement>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const sloBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-slo]")];
+    let slo = 99.9;
+    let used = 0;
+    const log: [string, number][] = [];
+    const budget = () => MONTH * (100 - slo) / 100;
+    const fmt = (m: number) => (Math.round(m * 10) / 10).toLocaleString("en-US", { maximumFractionDigits: 1 });
+
+    function level(left: number, total: number): ["ok" | "care" | "stop", string, string] {
+      const f = left / total;
+      if (f <= 0) return ["stop", "Freeze: reliability work only", "The budget is <b>spent</b>. The team stops releasing new features until the month resets, and spends the time making the service more reliable."];
+      if (f < 0.25) return ["stop", "Slow down", "Less than a quarter of the budget is left. Only small, low-risk changes go out, and each one is watched closely."];
+      if (f < 0.5) return ["care", "Ship carefully", "Half the budget is gone. Releases continue, but risky ones wait, and the team looks at what caused the failures."];
+      return ["ok", "Ship freely", "Plenty of budget left. Release as normal, and try bolder changes."];
+    }
+
+    function render(): string {
+      const total = budget();
+      const left = total - used;
+      const [lv, name, advice] = level(left, total);
+      q("left").textContent = fmt(Math.max(0, left));
+      q("total").textContent = fmt(total);
+      const pol = q("policy");
+      pol.textContent = name;
+      pol.dataset.level = lv;
+      const pct = Math.max(0, Math.min(100, (left / total) * 100));
+      const fill = q("fill");
+      fill.style.width = pct + "%";
+      fill.className = lv === "ok" ? "" : lv;
+      q("bar").setAttribute("aria-label", `Error budget left: ${Math.round(pct)}%`);
+      q("log").innerHTML = log.length
+        ? log.map(([l, c]) => `<li><span>${l}</span><b>${fmt(c)} min</b></li>`).join("") + (left < 0 ? `<li><span>Over budget by</span><b>${fmt(-left)} min</b></li>` : "")
+        : '<li class="eb-none">Nothing has gone wrong yet this month.</li>';
+      return advice;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.slo) {
+        slo = Number(b.dataset.slo);
+        press(sloBtns, (x) => x === b);
+        const advice = render();
+        tell(say, `Target: ${slo}%`, `At <b>${slo}%</b>, the budget is <b>${fmt(budget())} minutes</b> a month. The same failures now use ${fmt((used / budget()) * 100)}% of it. ${advice}`, used > budget() ? "bad" : "");
+      } else if (b.dataset.ev === "reset") {
+        used = 0; log.length = 0;
+        render();
+        tell(say, "A new month", `The budget resets to <b>${fmt(budget())} minutes</b>. Last month's failures no longer count.`, "good");
+      } else if (b.dataset.ev) {
+        const ev = EVENTS[b.dataset.ev];
+        used += ev.cost;
+        log.push([ev.label, ev.cost]);
+        const advice = render();
+        const left = budget() - used;
+        tell(say, left < 0 ? "Over budget" : `${fmt(Math.max(0, left))} minutes left`, `${ev.how} ${advice}`, left <= 0 ? "bad" : left / budget() < 0.5 ? "" : "good");
+      }
+    });
+  }));
+</script>

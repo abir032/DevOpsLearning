@@ -1,0 +1,36 @@
+{
+  "_comment": "The build fails if any of these appear in the built site (dist/). Patterns are regular expressions; 'allow' lists matches that are fine, such as the course's placeholder values. Private strings (real names and the like) live in forbidden-strings.local.json, which git ignores, or in the FORBIDDEN_STRINGS environment variable (a JSON array) on CI.",
+  "strings": [],
+  "patterns": [
+    {
+      "name": "12-digit AWS account ID",
+      "re": "(?<![\\d.])\\d{12}(?![\\d.])",
+      "allow": [
+        "111122223333",
+        "123456789012"
+      ]
+    },
+    {
+      "name": "AWS resource ID",
+      "re": "\\b(?:vpc|subnet|sg|igw|nat|rtb|eni|vpce|i)-[0-9a-f]{17}\\b",
+      "allow": [
+        "vpc-0123456789abcdef0",
+        "vpc-1234567890abcdef0",
+        "vpc-0fedcba9876543210"
+      ]
+    },
+    {
+      "name": "email address",
+      "re": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+      "allow": [
+        "@example.com",
+        "noreply@example.com"
+      ]
+    },
+    {
+      "name": "real domain in a URL",
+      "re": "https?://(?!(?:[a-z0-9-]+\\.)*(?:example\\.com|example\\.org|localhost|127\\.0\\.0\\.1|registry\\.terraform\\.io|www\\.w3\\.org|jcgt\\.org|raw\\.githubusercontent\\.com|aws\\.github\\.io|pkg\\.jenkins\\.io|rpm\\.releases\\.hashicorp\\.com|truststore\\.pki\\.rds\\.amazonaws\\.com|www\\.shellcheck\\.net))[a-z0-9.-]+\\.[a-z]{2,}",
+      "allow": []
+    }
+  ]
+}

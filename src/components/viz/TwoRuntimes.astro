@@ -1,0 +1,195 @@
+---
+/*
+ * Project 3: one image, two runtimes.
+ * Teaches: the same image runs on ECS and on EKS, but the pieces around it,
+ * and the way each one swaps v1 for v2, are different.
+ */
+const ecsSlots = [522, 586, 650, 714];
+const eksSlots = [
+  { id: "a0", x: 528 }, { id: "a1", x: 583 },
+  { id: "b0", x: 658 }, { id: "b1", x: 713 },
+];
+---
+<div class="viz" data-track="box" data-viz="two-runtimes">
+  <div class="viz-controls">
+    <span class="lbl" id="tr-lbl">Show</span>
+    <div class="seg" role="group" aria-labelledby="tr-lbl">
+      <button type="button" data-show="both" aria-pressed="true">Both</button>
+      <button type="button" data-show="ecs" aria-pressed="false">ECS</button>
+      <button type="button" data-show="eks" aria-pressed="false">EKS</button>
+    </div>
+    <button class="btn line" type="button" data-act="release">Release v2</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see both runtimes</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 800 390" role="img" aria-labelledby="tr-title">
+      <title id="tr-title">What you build in Project 3. Customers reach two HTTPS load balancers. The top one sends traffic to an ECS service with two tasks on Fargate. The bottom one was built by the load balancer controller, and sends traffic through an Ingress and a Service to two pods on two EC2 nodes in an EKS cluster. Both runtimes pull the same order service image from ECR.</title>
+
+      <g class="tr-lane" data-lane="ecs">
+        <text class="vz-label" x="170" y="30">ECS on Fargate</text>
+        <path class="vz-wire" d="M140 190 L170 85" /><path class="vz-wire" d="M300 85 L330 85" /><path class="vz-wire" d="M480 85 L510 85" />
+        <rect class="vz-node tr-ecs" x="170" y="60" width="130" height="50" rx="8" />
+        <text class="vz-t" x="235" y="81" text-anchor="middle">Load balancer</text>
+        <text class="vz-s" x="235" y="98" text-anchor="middle">you create it</text>
+        <rect class="vz-node tr-ecs" x="330" y="60" width="150" height="50" rx="8" />
+        <text class="vz-t" x="405" y="81" text-anchor="middle">ECS service</text>
+        <text class="vz-s" x="405" y="98" text-anchor="middle">keeps 2 tasks running</text>
+        <rect class="tr-area tr-ecs" x="510" y="45" width="275" height="105" rx="10" />
+        <text class="vz-s" x="522" y="64" font-weight="700">Fargate: no servers for you to see</text>
+        {ecsSlots.map((x, i) => (
+          <g class="tr-slot" data-slot={`e${i}`} data-state={i < 2 ? "v1" : "empty"}>
+            <rect x={x} y="84" width="56" height="44" rx="7" />
+            <text class="vz-t" x={x + 28} y="104" text-anchor="middle">{i < 2 ? "v1" : ""}</text>
+            <text class="vz-s tr-note" x={x + 28} y="120" text-anchor="middle">{i < 2 ? "task" : ""}</text>
+          </g>
+        ))}
+      </g>
+
+      <rect class="tr-ecr" x="510" y="166" width="275" height="36" rx="18" />
+      <text class="vz-t" x="647" y="189" text-anchor="middle">ECR: one quickcart-orders image</text>
+
+      <g class="tr-lane" data-lane="eks">
+        <text class="vz-label" x="170" y="238">EKS</text>
+        <path class="vz-wire" d="M140 190 L170 290" /><path class="vz-wire" d="M300 290 L330 290" /><path class="vz-wire" d="M480 290 L510 290" />
+        <rect class="vz-node tr-eks" x="170" y="265" width="130" height="50" rx="8" />
+        <text class="vz-t" x="235" y="286" text-anchor="middle">Load balancer</text>
+        <text class="vz-s" x="235" y="303" text-anchor="middle">the controller builds it</text>
+        <rect class="vz-node tr-eks" x="330" y="265" width="150" height="50" rx="8" />
+        <text class="vz-t" x="405" y="286" text-anchor="middle">Ingress, Service</text>
+        <text class="vz-s" x="405" y="303" text-anchor="middle">Deployment: 2 pods</text>
+        <rect class="tr-area tr-eks" x="510" y="215" width="275" height="160" rx="10" />
+        <text class="vz-s" x="522" y="234" font-weight="700">2 EC2 nodes: yours to size and upgrade</text>
+        <rect class="tr-nodebox" x="520" y="245" width="120" height="118" rx="8" />
+        <rect class="tr-nodebox" x="650" y="245" width="120" height="118" rx="8" />
+        <text class="vz-s" x="580" y="355" text-anchor="middle">node 1</text>
+        <text class="vz-s" x="710" y="355" text-anchor="middle">node 2</text>
+        {eksSlots.map((s) => (
+          <g class="tr-slot" data-slot={s.id} data-state={s.id.endsWith("0") ? "v1" : "empty"}>
+            <rect x={s.x} y="262" width="50" height="60" rx="7" />
+            <text class="vz-t" x={s.x + 25} y="288" text-anchor="middle">{s.id.endsWith("0") ? "v1" : ""}</text>
+            <text class="vz-s tr-note" x={s.x + 25} y="306" text-anchor="middle">{s.id.endsWith("0") ? "pod" : ""}</text>
+          </g>
+        ))}
+      </g>
+
+      <rect class="vz-node" x="20" y="162" width="120" height="56" rx="10" />
+      <text class="vz-t" x="80" y="186" text-anchor="middle">Customers</text>
+      <text class="vz-s" x="80" y="203" text-anchor="middle">HTTPS only</text>
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>One image, two ways to run it. Choose <b>Release v2</b> to watch each runtime swap v1 for v2 while customers keep ordering.</div>
+</div>
+
+<style is:global>
+  [data-viz="two-runtimes"] .tr-lane { transition: opacity .2s; }
+  [data-viz="two-runtimes"] .tr-lane.dim { opacity: .28; }
+  [data-viz="two-runtimes"] .tr-ecs { stroke: var(--box); }
+  [data-viz="two-runtimes"] .tr-eks { stroke: var(--cloud); }
+  [data-viz="two-runtimes"] .tr-area { fill: none; stroke-width: 1.5; stroke-dasharray: 6 4; }
+  [data-viz="two-runtimes"] .tr-nodebox { fill: var(--bg); stroke: var(--rule-2); stroke-width: 1.5; }
+  [data-viz="two-runtimes"] .tr-ecr { fill: color-mix(in srgb, var(--box) 10%, var(--surface)); stroke: var(--box); stroke-width: 1.5; }
+  [data-viz="two-runtimes"] .tr-slot rect { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.5; transition: fill .2s, stroke .2s; }
+  [data-viz="two-runtimes"] .tr-slot[data-state="empty"] { opacity: 0; }
+  [data-viz="two-runtimes"] .tr-slot[data-state="start"] rect { fill: var(--warn-bg); stroke: var(--warn); stroke-dasharray: 4 3; }
+  [data-viz="two-runtimes"] .tr-slot[data-state="v2"] rect { fill: var(--ok-bg); stroke: var(--ok); stroke-width: 2.5; }
+  [data-viz="two-runtimes"] .tr-slot[data-state="drain"] rect { fill: var(--sunk); stroke: var(--ink-3); stroke-dasharray: 4 3; }
+  [data-viz="two-runtimes"] .tr-slot[data-state="drain"] text { fill: var(--ink-3); }
+</style>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type State = "empty" | "v1" | "start" | "v2" | "drain";
+  const NOTE: Record<State, [string, string]> = {
+    empty: ["", ""], v1: ["v1", "serving"], start: ["v2", "starting"], v2: ["v2", "serving"], drain: ["v1", "draining"],
+  };
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="two-runtimes"]').forEach((root) => {
+    if (!once(root)) return;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const showBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-show]")];
+    const lanes = [...root.querySelectorAll<SVGGElement>("[data-lane]")];
+    const releaseBtn = root.querySelector<HTMLButtonElement>('[data-act="release"]')!;
+    const kind = (id: string) => (id.startsWith("e") ? "task" : "pod");
+    let show = "both";
+    let run = 0;
+
+    function set(id: string, s: State) {
+      const g = root.querySelector<SVGGElement>(`[data-slot="${id}"]`)!;
+      g.dataset.state = s;
+      const [a, b] = NOTE[s];
+      const t = g.querySelectorAll("text");
+      t[0].textContent = a;
+      t[1].textContent = s === "empty" ? "" : `${kind(id)} ${b}`.replace("task serving", "task").replace("pod serving", "pod");
+    }
+    function reset() {
+      run++;
+      ["e0", "e1", "a0", "b0"].forEach((id) => set(id, "v1"));
+      ["e2", "e3", "a1", "b1"].forEach((id) => set(id, "empty"));
+      releaseBtn.disabled = false;
+    }
+    function setShow(v: string) {
+      show = v;
+      press(showBtns, (b) => b.dataset.show === v);
+      lanes.forEach((l) => l.classList.toggle("dim", v !== "both" && l.dataset.lane !== v));
+      const msg: Record<string, string> = {
+        both: "Both runtimes pull the <b>same image</b> from ECR. Every difference you measure is a difference between the platforms, not between two apps.",
+        ecs: "<b>ECS on Fargate:</b> you create the load balancer and pick it in the service form. There are no servers in your account; AWS runs the tasks.",
+        eks: "<b>EKS:</b> a controller inside the cluster builds the load balancer from your Ingress. The pods run on two EC2 nodes that you size, pay for and upgrade.",
+      };
+      tell(say, v === "both" ? "One image, two runtimes" : v === "ecs" ? "The ECS path" : "The EKS path", msg[v]);
+    }
+
+    async function release() {
+      const me = ++run;
+      const live = () => me === run;
+      releaseBtn.disabled = true;
+      const both = show === "both";
+      if (show !== "eks") {
+        tell(say, "ECS, step 1 of 4", "ECS starts <b>two new v2 tasks</b> next to the old ones. Minimum healthy 100% means it never removes a v1 task first, so four run for a moment.");
+        set("e2", "start"); set("e3", "start");
+        await beat(1400); if (!live()) return;
+        set("e2", "v2"); set("e3", "v2");
+        tell(say, "ECS, step 2 of 4", "Both v2 tasks pass <code>/health</code> twice. The load balancer starts sending them orders.");
+        await beat(1400); if (!live()) return;
+        set("e0", "drain"); set("e1", "drain");
+        tell(say, "ECS, step 3 of 4", "The v1 tasks leave the target group and <b>drain for 30 seconds</b>, so orders already in progress finish.");
+        await beat(1600); if (!live()) return;
+        set("e0", "empty"); set("e1", "empty");
+        tell(say, "ECS, step 4 of 4", "ECS stops the v1 tasks. Gunicorn hears the stop signal and exits cleanly. <b>Two v2 tasks, zero failed orders.</b>", both ? "" : "good");
+        if (both) await beat(1600);
+        if (!live()) return;
+      }
+      if (show !== "ecs") {
+        tell(say, "EKS, step 1 of 4", "maxSurge 1: Kubernetes adds <b>one</b> v2 pod. maxUnavailable 0: no v1 pod goes until it is ready.");
+        set("a1", "start");
+        await beat(1400); if (!live()) return;
+        set("a1", "v2");
+        tell(say, "EKS, step 2 of 4", "The readiness gate waits until the <b>load balancer</b> says the new pod is healthy, not just Kubernetes.");
+        await beat(1400); if (!live()) return;
+        set("a0", "drain");
+        tell(say, "EKS, step 3 of 4", "The old pod's <code>preStop</code> sleeps 15 seconds, so the load balancer stops sending to it before it stops.");
+        await beat(1500); if (!live()) return;
+        set("a0", "empty"); set("b1", "start");
+        tell(say, "EKS, step 4 of 4", "Then the same again on the second node, one pod at a time.");
+        await beat(1300); if (!live()) return;
+        set("b1", "v2"); await beat(900); if (!live()) return;
+        set("b0", "drain"); await beat(1300); if (!live()) return;
+        set("b0", "empty");
+        tell(say, "Released", "Both runtimes now serve <b>v2</b>, with zero failed requests. ECS needed three settings; EKS needed those plus a readiness gate and a preStop wait.", "good");
+      }
+      releaseBtn.disabled = false;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.show) { reset(); setShow(b.dataset.show); }
+      else if (b.dataset.act === "release") { reset(); run++; release(); }
+      else if (b.dataset.act === "reset") { reset(); setShow(show); }
+    });
+    return () => { run++; };
+  }));
+</script>

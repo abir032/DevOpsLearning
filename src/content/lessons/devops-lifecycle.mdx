@@ -1,0 +1,295 @@
+---
+time: 25 minutes
+level: Beginner
+before: []
+cost: free
+quiz:
+  - q: QuickCart ships forty changes together once a month. A bug appears straight after the release. Why is it slow to fix?
+    answer: 2
+    options:
+      - t: Because the developers are slow
+        why: The same developers fix bugs in hours when changes ship one at a time. The process slows them down, not their skill.
+      - t: Because monthly releases always contain more bugs per change
+        why: Each change isn't necessarily worse. The trouble is what happens when forty arrive together.
+      - t: Because any of the forty changes could be the cause, and the one that is was written weeks ago
+        why: Right. First the team has to find the culprit among forty suspects. Then its author has to remember code they wrote a month ago.
+      - t: Because bugs can only be fixed in the next release
+        why: That's often true in a monthly process, but it's a result of the batch, not the reason the bug is hard to find.
+  - q: In most slow delivery processes, where does a change spend most of its time?
+    answer: 0
+    options:
+      - t: Waiting between stages, for other changes, testers, meetings or a release window
+        why: Right. The actual work, writing and testing the change, is often a small fraction of the total. The rest is queueing.
+      - t: Being written
+        why: Writing it usually takes hours or days. The weeks come from waiting.
+      - t: Being built
+        why: Automated builds take minutes.
+      - t: Being deployed
+        why: Even a slow manual deploy takes an evening, not weeks.
+  - q: Why is the lifecycle drawn as a loop and not a straight line?
+    answer: 3
+    options:
+      - t: Because it looks better in diagrams
+        why: The shape carries meaning. A straight line would hide the most important arrow.
+      - t: Because every change has to be deployed twice
+        why: A change is deployed once per environment, but that's not what the loop means.
+      - t: Because operations teams work in circles
+        why: It's not about any team. It's about what happens to what you learn.
+      - t: Because what you learn by monitoring feeds straight back into what you plan next
+        why: Right. Monitoring shows what users actually do and what breaks. That becomes the next plan. The faster the loop, the faster you learn.
+  - q: What is the difference between "release" and "deploy" in the loop?
+    answer: 1
+    options:
+      - t: They mean exactly the same thing
+        why: People often use them interchangeably, but they're separate steps, and keeping them separate is powerful.
+      - t: Release is deciding a change may go to users; deploy is putting it on the servers
+        why: Right. In many teams the release decision is simply "the tests passed". Later, feature flags let you deploy code and release the feature separately.
+      - t: Deploy happens before build
+        why: You can't deploy something that hasn't been built.
+      - t: Release is only for mobile apps
+        why: Every kind of software has a release decision, whether it's a meeting, an approval or passing tests.
+  - q: What makes smaller batches practical, rather than just more work?
+    answer: 2
+    options:
+      - t: Hiring more testers
+        why: More people testing by hand doesn't scale to many releases a day.
+      - t: Releasing only on Fridays
+        why: That's a big-batch habit. Small batches ship whenever a change is ready.
+      - t: Automating the build, the tests and the deploy, so each trip round the loop costs almost nothing
+        why: Right. When every trip is automatic, sending one change round is as cheap as sending forty, and much safer.
+      - t: Skipping the test stage for small changes
+        why: Small changes still need testing. Automation makes that testing fast, not optional.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, release night">
+
+QuickCart releases once a month. For three weeks, everyone writes code. Then the team merges it all, fixes the conflicts, and hands a build to Noor, who tests it by hand for a week.
+
+On release night, the whole team joins a call at 9pm. The release goes out at 11pm. At 11:20pm, some customers are being charged the wrong total.
+
+There are forty changes in the release. Nobody knows which one did it. It takes until the next afternoon to find a promo-code change written four weeks earlier. The fix will go out in next month's release.
+
+</Story>
+
+<Case title="This really happened: the talk that started it">
+
+In 2009, two engineers from a large photo-sharing website gave a conference talk called *10+ Deploys Per Day: Dev and Ops Cooperation*. At the time, most companies released every few weeks or months, and a developer releasing ten times a day sounded reckless.
+
+The talk explained how they did it: small changes, automated everything, and developers and operations engineers working as one team, sharing the same tools and the same goals. It is widely credited with starting the DevOps movement. The first DevOpsDays conference was held later that year.
+
+</Case>
+
+QuickCart's problem isn't bad code. It's that each change waits for thirty-nine others, and travels round the whole process with them.
+
+</Part>
+
+<Part id="idea">
+
+Every change to software goes through the same eight stages, whether it's a new app feature or a one-line fix. People usually draw them as a loop.
+
+<YouKnow title="You already know this: an app release">
+
+You write a feature, build the app, send it to TestFlight or an internal testing track, submit it for review, release it to a percentage of users, and watch the crash reports. What you see in the crash reports decides what you fix next.
+
+That's the same loop. The DevOps lifecycle is just its name, applied to the servers too.
+
+</YouKnow>
+
+### The eight stages
+
+| Stage | What happens | In QuickCart's app world |
+|---|---|---|
+| **Plan** | Decide what to build next | Picking tickets for the sprint |
+| **Code** | Write the change, and have someone review it | A pull request |
+| **Build** | Turn the code into something that can run | Archiving the app |
+| **Test** | Check it works and hasn't broken anything else | Unit tests, then TestFlight |
+| **Release** | Decide it's allowed to go to users | Submitting for review |
+| **Deploy** | Put it on the servers | The store making the build available |
+| **Operate** | Keep it running: capacity, fixes, incidents | Answering support tickets |
+| **Monitor** | Watch what it does: errors, speed, usage | Crash reports and analytics |
+
+The first four are often called *dev*, and the last four *ops*. The whole point of DevOps is that **one team owns the whole loop**. The people who write a change see it run, and see it fail.
+
+### Release and deploy are different things
+
+They sound the same, but they're separate steps. **Release** is the decision that a change may reach users. **Deploy** is putting the new code on the servers. Keeping them apart is useful: later in this module, [feature flags](/lessons/feature-flags/) let you deploy code today and release the feature next week.
+
+### The loop is only as fast as its slowest wait
+
+Look at QuickCart's promo-code change. The work on it took about two days. But it took 35 days to reach customers:
+
+| Stage | Working on it | Waiting |
+|---|---|---|
+| Code | 2 days | 19 days, for the other 39 changes |
+| Build | 1 day of merge conflicts | |
+| Test | 1 hour of testing this change | 7 days, for everything else to be tested |
+| Release | | 4 days, for the monthly window |
+| Deploy | 2 hours | |
+| **Total** | **about 3 days** | **about 30 days** |
+
+Most of its life, the change was sitting in a queue. That's normal for big batches. Making people work faster barely helps. Making the batch smaller does.
+
+### Why small batches win
+
+| With big batches | With small batches |
+|---|---|
+| A bug could be in any of forty changes | A bug is almost certainly in the one change that just shipped |
+| Feedback arrives weeks after the code was written | Feedback arrives while the author still remembers the code |
+| Release day is scary, so it happens rarely, so batches grow | Releases are boring, so they happen often, so batches stay small |
+| Merging three weeks of work causes conflicts | Merging a few hours of work rarely does |
+
+Small batches only work if each trip round the loop is cheap. That's why the rest of this course automates the build, the tests and the deploy.
+
+<Key>A change only helps anyone once it reaches users. In most teams it spends most of its trip waiting, not being worked on, and smaller batches shrink the wait.</Key>
+
+</Part>
+
+<Part id="see">
+
+Follow one change round the loop. First with small batches, then switch to **Big batches** and send another. Watch the clock in the middle, and where the change gets stuck.
+
+<LifecycleLoop />
+
+**What to notice:** in big batches, the red stages aren't slow because anyone is lazy. The change is waiting: for other changes, for testers, for a release window. The work itself takes about the same time in both runs.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">you only read your own project's history.</Cost>
+
+You'll take one change you shipped recently and map its trip round the loop: when it started, when it reached users, and where it waited. This is called a **value stream map**, and it's how teams find their slowest step. About 15 minutes.
+
+You need a project in git that you've shipped something from, such as your own app. If you don't have one, use QuickCart's numbers from the table in [the idea](#idea) and do the last two steps.
+
+<Steps>
+
+<Step title="Pick one change">
+
+Choose something small that reached users in the last month or two: a bug fix or a small feature. Write down one word that appears in its commit messages, like `photo` or `checkout`.
+
+</Step>
+
+<Step title="Find when the work started">
+
+Open the terminal in your project's folder, then list the commits that mention your word, oldest first. Put your own word in place of the highlighted one:
+
+```sh ph="photo"
+git log --reverse --format="%h  %ad  %s" --date=short -i --grep="photo"
+```
+
+| Part | What it means |
+|---|---|
+| `git log` | list commits, newest first |
+| `--reverse` | oldest first instead, so the first line is when the work started |
+| `--format="%h  %ad  %s"` | show each commit as its short ID (`%h`), its date (`%ad`) and its message (`%s`) |
+| `--date=short` | print dates as year-month-day |
+| `-i` | ignore upper and lower case when searching |
+| `--grep="photo"` | only commits whose message contains this word. Replace it with yours |
+
+```output
+19f7ca8  2026-08-31  Add photo field to menu items
+29c9c89  2026-09-02  Resize photos on upload
+15374d9  2026-09-03  Merge pull request #41 from menu-photos
+```
+
+Yours will show your own commits. The first line is when coding started. A line like the last one, a merge, is when the change joined the main branch.
+
+<Mistake title="nothing is printed">
+
+If the command prints nothing and returns straight away, no commit message contains your word.
+
+**Why:** `--grep` only searches commit messages, not the code. Your team may have described the change differently.
+
+**The fix:** try another word, such as the ticket number. To browse recent history instead, drop the search: `git log --format="%h  %ad  %s" --date=short -20` shows the last 20 commits.
+
+</Mistake>
+
+</Step>
+
+<Step title="Find when it reached users">
+
+This part isn't in git. Look where your team records releases: the App Store Connect or Play Console release history, a release notes page, or a deploy log. Write down the date the change was available to users.
+
+</Step>
+
+<Step title="Fill in the map">
+
+Copy this table into a note and fill it in for your change. Guess where you have to; rough days are fine.
+
+| Stage | Working on it | Waiting | Waiting for what? |
+|---|---|---|---|
+| Code, including review | | | |
+| Build | | | |
+| Test | | | |
+| Release | | | |
+| Deploy | | | |
+| **Total** | | | |
+
+Add up each column.
+
+<See>
+
+Two totals. For most teams, **Waiting** is several times bigger than **Working on it**.
+
+</See>
+
+</Step>
+
+<Step title="Find the biggest wait, and one way to shrink it">
+
+Circle the row with the biggest wait. These are the usual causes, and the lessons that fix them:
+
+| If it waited for | The usual fix | Where it's taught |
+|---|---|---|
+| Other changes, to release together | Release each change on its own | This module |
+| Someone to test it by hand | Automated tests on every change | [Continuous integration](/lessons/continuous-integration/) |
+| An approval meeting or release window | Automated checks as the approval, and safer ways to release | [Ways to release](/lessons/release-strategies/) |
+| Someone to run the deploy | A pipeline that deploys | [Continuous delivery](/lessons/continuous-delivery/) |
+| A feature being finished | Ship it switched off, behind a flag | [Feature flags](/lessons/feature-flags/) |
+
+Write one sentence: *"Our biggest wait is ___, and we could shrink it by ___."*
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing to delete. `git log` only reads history; it never changes anything.
+
+Keep your map. In the next lesson you'll turn the same history into four numbers that measure how well a team delivers.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Stage | In one line |
+|---|---|
+| Plan | Decide what to build next, using what monitoring showed |
+| Code | Write it, and have it reviewed |
+| Build | Turn code into something that runs |
+| Test | Check it works and broke nothing else |
+| Release | Decide it may go to users |
+| Deploy | Put it on the servers |
+| Operate | Keep it running |
+| Monitor | Watch errors, speed and usage. Feeds the next plan |
+| Batch size | How many changes travel together. Smaller is safer |
+| Value stream map | Working time vs waiting time, stage by stage |
+| `git log --reverse --grep=WORD` | When the work on a change started |
+
+</Cheat>
+
+</Part>

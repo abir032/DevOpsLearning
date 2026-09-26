@@ -1,0 +1,72 @@
+---
+/*
+ * CloudTrail: an event history lookup.
+ * Teaches: filter to the change you care about, then read who, what, when
+ * and from where. Data events are not in event history.
+ */
+import { LOOKUPS, tableHtml, sayHtml } from "../../scripts/trail-lookup-viz";
+const first = sayHtml("all", null);
+---
+<div class="viz" data-track="cloud" data-viz="trail-lookup">
+  <div class="viz-controls">
+    <span class="lbl" id="tl-lbl">Lookup attribute</span>
+    <div class="seg wide" role="group" aria-labelledby="tl-lbl">
+      {LOOKUPS.map((l, i) => <button type="button" data-l={l.k} aria-pressed={String(i === 0)}>{l.label}</button>)}
+    </div>
+  </div>
+  <div class="tl-body">
+    <div class="tl-h">CloudTrail event history, us-east-1, the last hour</div>
+    <div class="tl-wrap" tabindex="0" role="region" aria-label="Matching events" set:html={tableHtml("all", null)} />
+    <div class="tl-rec-wrap" />
+  </div>
+  <div class="viz-say" aria-live="polite" set:html={first.html} />
+</div>
+
+<style is:global>
+  [data-viz="trail-lookup"] .tl-body { padding: 14px 16px 8px; }
+  [data-viz="trail-lookup"] .tl-h { font-size: 13.5px; font-weight: 700; color: var(--ink-2); margin-bottom: 6px; }
+  [data-viz="trail-lookup"] .tl-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--bg); }
+  [data-viz="trail-lookup"] .tl-tbl { width: 100%; min-width: 620px; border-collapse: collapse; font-size: 13.5px; }
+  [data-viz="trail-lookup"] .tl-tbl th { text-align: left; padding: 8px 10px; background: var(--sunk); color: var(--ink-2); font-size: 12.5px; border-bottom: 1px solid var(--rule); }
+  [data-viz="trail-lookup"] .tl-tbl td { padding: 6px 10px; border-bottom: 1px solid var(--rule); }
+  [data-viz="trail-lookup"] .tl-tbl tr:last-child td { border-bottom: 0; }
+  [data-viz="trail-lookup"] .tl-tbl tr.ro td { color: var(--ink-2); }
+  [data-viz="trail-lookup"] .tl-tbl tr.open td { background: color-mix(in srgb, var(--cloud) 10%, var(--surface)); }
+  [data-viz="trail-lookup"] .tl-tbl code { font-family: var(--mono); font-size: 12.5px; }
+  [data-viz="trail-lookup"] .tl-ev { background: none; border: 0; padding: 2px 0; font: inherit; font-weight: 700; color: var(--cloud-t); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; text-align: left; }
+  [data-viz="trail-lookup"] .tl-none { margin: 0; padding: 14px; font-size: 14.5px; color: var(--ink-2); }
+  [data-viz="trail-lookup"] .tl-rec-h { font-size: 13.5px; font-weight: 700; color: var(--ink-2); margin: 12px 0 6px; }
+  [data-viz="trail-lookup"] .tl-rec { margin: 0 0 6px; max-height: 320px; overflow: auto; font-size: 12.5px; white-space: pre; }
+</style>
+
+<script>
+  import { tableHtml, recordHtml, sayHtml } from "../../scripts/trail-lookup-viz";
+  import { press } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="trail-lookup"]').forEach((root) => {
+    if (!once(root)) return;
+    const wrap = root.querySelector<HTMLElement>(".tl-wrap")!;
+    const rec = root.querySelector<HTMLElement>(".tl-rec-wrap")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const lBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-l]")];
+    let k = "all";
+    let open: string | null = null;
+
+    function render(focusEv = false) {
+      press(lBtns, (b) => b.dataset.l === k);
+      wrap.innerHTML = tableHtml(k, open);
+      rec.innerHTML = recordHtml(open);
+      const s = sayHtml(k, open);
+      say.className = "viz-say" + (s.tone ? " " + s.tone : "");
+      say.innerHTML = s.html;
+      if (focusEv && open) wrap.querySelector<HTMLButtonElement>(`[data-ev="${open}"]`)?.focus();
+    }
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b) return;
+      if (b.dataset.l) { k = b.dataset.l; open = null; render(); }
+      else if (b.dataset.ev) { open = open === b.dataset.ev ? null : b.dataset.ev; render(true); }
+    });
+  }));
+</script>

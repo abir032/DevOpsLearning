@@ -1,0 +1,1068 @@
+---
+time: 55 minutes
+level: Intermediate
+before: [terraform-modules, terraform-state]
+cost: pennies
+quiz:
+  - q: QuickCart's envs/dev and envs/stg folders are set up correctly. Which files differ between them?
+    answer: 1
+    options:
+      - t: main.tf, because each environment builds different things
+        why: If main.tf differs, the environments slowly stop matching, and stg no longer tests what dev and prod run. main.tf should be the same file in every folder.
+      - t: backend.tf's key, and the values in terraform.tfvars
+        why: The key gives each environment its own state file. terraform.tfvars holds everything else that's allowed to differ. The code itself is identical.
+      - t: The network module, which has a copy per environment
+        why: There is one module, shared by every environment. A copy per environment is exactly the drift modules exist to prevent.
+      - t: Nothing; Terraform tells environments apart by folder name
+        why: Terraform doesn't know or care what the folder is called. It uses whatever state key and values it's given.
+  - q: Leo copies envs/dev to envs/stg and edits terraform.tfvars, but not backend.tf. His first stg plan says "8 to add, 1 to change, 6 to destroy". Why?
+    answer: 3
+    options:
+      - t: stg's address range is invalid
+        why: 10.20.0.0/16 is a valid range. An invalid one would fail the validation rule before any plan was made.
+      - t: The network module has a bug
+        why: The same module built dev with no problem. The module is working exactly as written.
+      - t: The state bucket's versioning is off
+        why: Versioning keeps old copies of state. It doesn't decide which state a folder reads.
+      - t: Both folders use dev's state key, so stg's plan wants to turn dev's VPC into stg's
+        why: With the same key, the stg folder reads dev's state. To Terraform, dev's VPC is the one it manages, and stg's values mean replacing it. Give each folder its own key before the first init.
+  - q: What is the main risk of keeping dev and prod as two workspaces of one folder?
+    answer: 0
+    options:
+      - t: Nothing on screen shows which workspace is selected, so it's easy to apply to the wrong one
+        why: The folder, files and commands look identical in both. Only terraform workspace show tells them apart, and people forget to check.
+      - t: Workspaces don't support remote state
+        why: They do. With the S3 backend, each workspace's state is stored under its own path in the bucket.
+      - t: Workspaces can't use variables
+        why: They can. You still pass a different tfvars file for each one; forgetting it is another risk.
+      - t: Workspaces cost extra
+        why: Workspaces are just separate state files. They cost nothing.
+  - q: A module works in us-east-1 but fails in eu-west-1 with "Value (us-east-1a) for parameter availabilityZone is invalid". What's the lasting fix?
+    answer: 2
+    options:
+      - t: Add eu-west-1a to the module's list of zone names
+        why: Then the list works in two regions and fails in the third. The next region hits the same bug.
+      - t: Build Europe by hand in the console
+        why: That gives up on the code for exactly the case it should make easy, and the two regions stop matching.
+      - t: Look the zone names up with the aws_availability_zones data source
+        why: The data source asks AWS which zones the current region has, so the module picks the right names in any region.
+      - t: Use the same region for everything
+        why: That avoids the error by giving up on the second region.
+  - q: A module builds an S3 bucket in its default region and a certificate in us-east-1. What must the module and its caller do?
+    answer: 1
+    options:
+      - t: Nothing; Terraform uses us-east-1 automatically for certificates
+        why: Terraform uses whatever provider configuration it's given. Without being told, the certificate goes to the default region.
+      - t: The module lists aws.us_east_1 in configuration_aliases, and the caller maps it with providers = { … }
+        why: configuration_aliases says the module needs a second AWS provider. The caller's providers setting decides which of its provider configurations fills that slot.
+      - t: The module writes its own provider block for us-east-1
+        why: A module with its own provider block can't be used with count or for_each, or removed cleanly. Providers belong in the root.
+      - t: Use two separate state files
+        why: That's a different question. One root can build in two regions and keep one state.
+  - q: envs/dev-eu builds in eu-west-1. What is the region setting in its backend.tf?
+    answer: 3
+    options:
+      - t: eu-west-1, the region it builds in
+        why: The backend's region is where the state bucket is, not where resources go. The bucket hasn't moved.
+      - t: Either; Terraform finds the bucket in any region
+        why: Terraform looks for the bucket in the region you give it. The wrong region makes init fail.
+      - t: The backend block doesn't have a region setting
+        why: It does, and it's required unless your login already sets one.
+      - t: us-east-1, because that's where the state bucket is
+        why: Every folder's state goes to the same bucket, in the bucket's region, with its own key. Only the provider's region changes.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, dev becomes three">
+
+Maya built QuickCart's dev network with Terraform, in one folder. It needed a staging copy, so Leo copied the folder to `stg`, changed the address range, and ran `terraform plan`.
+
+The plan said **8 to add, 1 to change, 6 to destroy**. It wanted to replace a VPC that stg didn't have yet. The copied folder still had dev's `backend.tf`, with dev's state key. Leo's "stg" was reading dev's memory, and planning to turn dev into stg. He read the plan, stopped, and fixed the key.
+
+Six months later, QuickCart opened in Ireland. "The region is just a variable," they said. The apply failed half-way: the VPC was built in eu-west-1, and the first subnet was refused. Someone, long ago, had typed `us-east-1a` into the code.
+
+</Story>
+
+Both problems come from the same place: the difference between environments lived in more places than anyone could see.
+
+<Case title="A very common mistake">
+
+A team keeps dev and prod as two **workspaces** of one Terraform folder. An engineer switches to prod to check something, then carries on with dev work an hour later, forgetting to switch back. The folder, the files and the commands look the same in both workspaces. The plan shows changes that look like the dev experiment they expected, and they apply it to production. Nothing on the screen said which environment they were in.
+
+</Case>
+
+This lesson is about keeping environments apart in a way you can see, making them differ only where you choose, and reaching a second region without surprises.
+
+</Part>
+
+<Part id="idea">
+
+An environment is a complete copy of QuickCart's infrastructure: **dev** for trying things, **stg** for checking a release, **prod** for customers. They should be built from **the same code**, so that what you tested in stg is what runs in prod.
+
+So there are only two things that may differ between environments:
+
+| What differs | Why | Where it lives |
+|---|---|---|
+| **The values** | stg may use three zones where dev uses two, and each environment needs its own address range | `terraform.tfvars` |
+| **The state** | Each environment's resources must be remembered separately, or one environment's apply can change another | `backend.tf`: a different `key` |
+
+<Key>Environments differ only in their values and their state key; the code is the same file everywhere.</Key>
+
+### One folder per environment
+
+Each environment gets a small root module of its own. All of them call the same child module:
+
+```text title="Layout"
+quickcart-envs/
+  modules/
+    network/            the shared code: one copy only
+  envs/
+    dev/
+      main.tf           the same in every folder
+      variables.tf      the same in every folder
+      backend.tf        differs: the state key
+      terraform.tfvars  differs: the values
+    stg/                the same four files
+```
+
+To work on an environment you `cd` into its folder. The folder name is in your prompt, your shell history and your terminal's title. You can see where you are.
+
+Here's dev's folder, file by file. First, `main.tf`:
+
+```hcl title="envs/dev/main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      Project     = "quickcart"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
+module "network" {
+  source = "../../modules/network"
+
+  name       = "quickcart-${var.environment}"
+  cidr_block = var.vpc_cidr
+  zone_count = var.zone_count
+}
+
+output "vpc_id" {
+  description = "The ID of this environment's VPC"
+  value       = module.network.vpc_id
+}
+
+output "zones" {
+  description = "The availability zones this environment uses"
+  value       = module.network.zones
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `required_version`, `required_providers` | Terraform 1.10 or later and AWS provider 6.x, the same in every environment | Each environment might run a different version | When you upgrade, in every folder at once |
+| `provider "aws"` → `region = var.region` | The region is a **variable**, so the same file builds in any region | Terraform uses your login's default region, which may differ between people | Never; change the value in `terraform.tfvars` |
+| `default_tags` → `tags` | Every resource this provider builds gets these tags, including ones inside modules. `Environment` comes from a variable | No tags unless each resource sets its own | To add tags your team requires everywhere |
+| `module "network"` → `source` | The shared module, two folders up. Every environment points at the same one | Required | Never per environment |
+| `name` | `quickcart-dev`, `quickcart-stg`: built from the environment's name | Required by the module | — |
+| `cidr_block`, `zone_count` | Passed straight through from this folder's variables | `cidr_block` is required; `zone_count` falls back to the module's default | Never here; change the values instead |
+| `output "vpc_id"`, `output "zones"` | Print what was built, so you can check it | Nothing printed after apply | — |
+
+The variables it needs:
+
+```hcl title="envs/dev/variables.tf"
+variable "environment" {
+  description = "Which environment this folder builds"
+  type        = string
+
+  validation {
+    condition     = contains(["dev", "stg", "prod"], var.environment)
+    error_message = "environment must be dev, stg or prod."
+  }
+}
+
+variable "region" {
+  description = "The AWS region to build in"
+  type        = string
+}
+
+variable "vpc_cidr" {
+  description = "The VPC's address range. Different for every environment"
+  type        = string
+}
+
+variable "zone_count" {
+  description = "How many availability zones to use"
+  type        = number
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `environment` → validation | Only `dev`, `stg` or `prod` are accepted | A typo creates resources with a strange name | When you add an environment |
+| No defaults on any variable | Every environment must set every value in its own `terraform.tfvars` | A default would quietly apply to any environment that forgot to set it, like prod getting dev's range | Never, for values that should be decided per environment |
+| `description`, `type` | Explain each value and reject the wrong kind | Mistakes show up later, with vaguer errors | — |
+
+Where this environment's state lives. The only line that differs between folders is `key`:
+
+```hcl title="envs/dev/backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "dev/network/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `bucket` | The one state bucket, shared by every environment | Required | Never |
+| `key` | **This environment's own state file.** `dev/network/…` for dev, `stg/network/…` for stg | Required | Once, when you create the folder. Never copy it unchanged |
+| `region` | Where the **bucket** is. Stays `us-east-1` even when this environment builds somewhere else | Terraform may look for the bucket in the wrong region | Only if the bucket moves |
+| `encrypt`, `use_lockfile` | Encrypt the state, and allow one command at a time. [Terraform state](/lessons/terraform-state/) explains both | No encryption setting; no locking | Never |
+
+And the values, the part that's allowed to differ:
+
+```hcl title="envs/dev/terraform.tfvars"
+environment = "dev"
+region      = "us-east-1"
+vpc_cidr    = "10.10.0.0/16"
+zone_count  = 2
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `terraform.tfvars` | Terraform reads a file with exactly this name automatically. No `-var-file` flag needed, so nobody can forget it | Terraform asks for each value, one by one, when you plan | — |
+| `environment = "dev"` | Names everything `quickcart-dev` and tags it `Environment = dev` | Asked for at plan time | — |
+| `region` | Where dev is built | Asked for at plan time | For a copy in another region |
+| `vpc_cidr` | dev's address range. Every environment gets a different one, so they can be connected later without clashing | Asked for at plan time | — |
+| `zone_count` | Two zones for dev, to keep it small | Asked for at plan time | — |
+
+stg's folder has the **same** `main.tf` and `variables.tf`. Only these two files are its own:
+
+```hcl title="envs/stg/backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "stg/network/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+```hcl title="envs/stg/terraform.tfvars"
+environment = "stg"
+region      = "us-east-1"
+vpc_cidr    = "10.20.0.0/16"
+zone_count  = 3
+```
+
+| Setting | Why it's different for stg |
+|---|---|
+| `key = "stg/network/terraform.tfstate"` | stg's own memory. Nothing stg does can touch dev's state |
+| `environment = "stg"` | Names and tags everything `stg` |
+| `vpc_cidr = "10.20.0.0/16"` | Its own range, so it never overlaps dev's |
+| `zone_count = 3` | Closer to production, which uses three zones |
+
+<Mistake title="copying a folder with its backend">
+
+```output title="stg's first plan says"
+  # module.network.aws_vpc.this must be replaced
+
+Plan: 8 to add, 1 to change, 6 to destroy.
+```
+
+**Why:** `envs/stg/backend.tf` still says `key = "dev/network/terraform.tfstate"`. The stg folder is reading dev's state, so dev's VPC looks like the one it manages, and stg's values mean replacing it. In a brand-new environment, any plan that says `destroy` is a warning sign.
+
+**The fix:** don't apply. Change the `key` to stg's own path, then run `terraform init -reconfigure`, which sets the folder up again with the new backend without copying any state across. The next plan should only add.
+
+</Mistake>
+
+### Workspaces, and why folders are safer
+
+Terraform has another way to keep environments apart: **workspaces**. One folder has several states, and you switch between them:
+
+```sh
+terraform workspace new stg
+```
+
+| Part | What it means |
+|---|---|
+| `terraform workspace new` | create a new workspace and switch to it |
+| `stg` | its name |
+
+```output
+Created and switched to workspace "stg"!
+
+You're now on a new, empty workspace. Workspaces isolate their state,
+so if you run "terraform plan" Terraform will not see any existing state
+for this configuration.
+```
+
+```sh
+terraform workspace show
+```
+
+| Part | What it means |
+|---|---|
+| `terraform workspace show` | print which workspace you're in now |
+
+```output
+stg
+```
+
+With the S3 backend, the first workspace, called `default`, uses your `key` as it is. Every other workspace's state goes under `env:/`, like `env:/stg/dev/network/terraform.tfstate`. The code can read the current name as `terraform.workspace`.
+
+| | Workspaces | One folder per environment |
+|---|---|---|
+| Which one am I in? | Only `terraform workspace show` says. Easy to forget | The folder you're in: it's in your prompt |
+| Values for each environment | You must pass the right `-var-file` every time | `terraform.tfvars` in the folder, read automatically |
+| Environments in different AWS accounts | Awkward: one backend and one login for all | Easy: each folder has its own settings |
+| Applying to the wrong environment | **Easy**: same folder, same files, invisible difference | Hard: you'd have to be in the wrong folder |
+| Good for | Short-lived identical copies, like one per pull request, created and destroyed by a pipeline | Long-lived environments people work in: dev, stg, prod |
+
+Folders cost a few copied files. Workspaces save them, and hide the one thing you most need to see.
+
+### A second region
+
+QuickCart opening in Europe means building in `eu-west-1` (Ireland) as well as `us-east-1`. There are two ways, for two different needs.
+
+**The everyday way: a folder whose region is different.** The region is already a variable, so a Europe copy of dev is one more folder: the same `main.tf` and `variables.tf`, with its own key and values:
+
+```hcl title="envs/dev-eu/terraform.tfvars"
+environment = "dev"
+region      = "eu-west-1"
+vpc_cidr    = "10.30.0.0/16"
+zone_count  = 2
+```
+
+| Setting | Why |
+|---|---|
+| `region = "eu-west-1"` | The only reason this folder exists |
+| `environment = "dev"` | It's still dev, just in Europe |
+| `vpc_cidr = "10.30.0.0/16"` | Its own range. Regions are often connected later, and overlapping ranges can't be |
+
+Its `backend.tf` uses `key = "dev-eu/network/terraform.tfstate"`, and keeps `region = "us-east-1"`, because that's where the bucket is. You'll build it in the lab.
+
+**When one root needs two regions at once: provider aliases.** Some things must be in a particular region. The classic case: a certificate for a CloudFront distribution must be in `us-east-1`, even when everything else is in Europe. So the root has **two** AWS provider configurations, and gives the second one a name, an **alias**.
+
+A module that needs both says so with `configuration_aliases`:
+
+```hcl title="modules/help-site/main.tf"
+terraform {
+  required_providers {
+    aws = {
+      source                = "hashicorp/aws"
+      version               = "~> 6.0"
+      configuration_aliases = [aws.us_east_1]
+    }
+  }
+}
+
+variable "domain_name" {
+  description = "The help site's address, like help.example.com"
+  type        = string
+}
+
+resource "aws_s3_bucket" "site" {
+  bucket_prefix = "quickcart-help-"
+}
+
+resource "aws_acm_certificate" "site" {
+  provider = aws.us_east_1
+
+  domain_name       = var.domain_name
+  validation_method = "DNS"
+}
+
+output "bucket_name" {
+  description = "The bucket holding the help pages"
+  value       = aws_s3_bucket.site.bucket
+}
+
+output "certificate_arn" {
+  description = "The certificate, for a CloudFront distribution"
+  value       = aws_acm_certificate.site.arn
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `configuration_aliases = [aws.us_east_1]` | Says: "as well as the normal AWS provider, I need a second one, which I call `aws.us_east_1`." The caller decides which real configuration that is | Terraform warns about an undefined provider, and the module's interface doesn't say it needs two regions | When the module needs another region |
+| `version = "~> 6.0"` | The provider versions the module works with | Any version is assumed to work | When the module needs a newer feature |
+| `variable "domain_name"` | The site's address, from the caller | — | — |
+| `aws_s3_bucket` → `bucket_prefix` | AWS adds a unique ending to the name. S3 bucket names are unique across all of AWS, in every region | Without `bucket` or `bucket_prefix`, Terraform generates a random name | Use `bucket` for an exact name |
+| No `provider` on the bucket | It uses the default AWS provider: wherever the caller builds | — | — |
+| `aws_acm_certificate` → `provider = aws.us_east_1` | Build this one resource with the second provider: in `us-east-1` | It would be built in the default region, where CloudFront can't use it | — |
+| `domain_name` | The name the certificate is for | Required | — |
+| `validation_method = "DNS"` | Prove you own the domain with a DNS record. [DNS and HTTPS](/lessons/dns-and-https/) covers this | Required | `EMAIL` if you can't add DNS records |
+| `output "bucket_name"`, `output "certificate_arn"` | Hand the results back to the caller | The caller can't use them | — |
+
+The root makes both configurations and maps them onto the module's names:
+
+```hcl title="envs/help-site/main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "eu-west-1"
+}
+
+provider "aws" {
+  alias  = "virginia"
+  region = "us-east-1"
+}
+
+module "help_site" {
+  source = "../../modules/help-site"
+
+  providers = {
+    aws           = aws
+    aws.us_east_1 = aws.virginia
+  }
+
+  domain_name = "help.example.com"
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| The first `provider "aws"` | The **default** configuration, with no alias: Europe | Resources with no `provider` setting have nowhere to go | — |
+| `alias = "virginia"` | A second configuration, referred to as `aws.virginia` | Two `provider "aws"` blocks without an alias are an error | — |
+| `region = "us-east-1"` | Where the aliased configuration builds | — | — |
+| `providers` → `aws = aws` | The module's default provider is the root's default: Europe | This line alone could be left out; it's the default | — |
+| `providers` → `aws.us_east_1 = aws.virginia` | Fill the module's `aws.us_east_1` slot with the root's `aws.virginia`. The names on each side can differ | Terraform stops, as below | — |
+| `domain_name` | The module's input | Required | — |
+
+<Mistake title="not passing the second provider">
+
+```output title="Terraform stops with"
+Error: Missing required provider configuration
+
+  on main.tf line 21:
+  21: module "help_site" {
+
+The child module requires an additional configuration for provider
+hashicorp/aws, with the local name "aws.us_east_1".
+
+Refer to the module's documentation to understand the intended purpose of
+this additional provider configuration, and then add an entry for
+aws.us_east_1 in the "providers" meta-argument in the module block to choose
+which provider configuration the module should use for that purpose.
+```
+
+**Why:** the module declared it needs `aws.us_east_1`, and the root didn't say which configuration to use.
+
+**The fix:** add the `providers` block to the `module` block, as above. And never put a `provider` block inside a module: a module that has its own provider can't be used with `count` or `for_each`, and can't be removed cleanly.
+
+</Mistake>
+
+<Note title="A shortcut for a single resource">
+
+Since AWS provider 6.0, most resources also accept their own `region` setting, like `region = "us-east-1"` on the certificate. For one resource in another region, that's simpler than an alias. Aliases are still how you give a whole module, or many resources, a second region.
+
+</Note>
+
+### What doesn't move to a second region
+
+"The region is just a variable" is only true if nothing else in the code belongs to one region. These are the usual ones:
+
+| Thing | What happens in a new region | What to do |
+|---|---|---|
+| **Availability zone names** | `us-east-1a` doesn't exist in eu-west-1 | Look them up with `data "aws_availability_zones"`, as the network module does |
+| **AMI IDs** (server images) | Each region has its own IDs for the same image | Look them up with `data "aws_ami"` |
+| **ACM certificates** | Regional: a certificate in us-east-1 can't be used by a load balancer in eu-west-1 | Issue one per region. CloudFront is the exception: always us-east-1 |
+| **Services and instance types** | Not every one is offered in every region | Check before you promise a date |
+| **IAM roles, Route 53, CloudFront** | Global: one of each serves every region | Create them once, in one folder, not per region |
+| **S3 bucket names** | Global: the name must be unique across all of AWS | Put the region in the name, or use `bucket_prefix` |
+| **The state bucket** | Stays where it is | Same bucket, same backend `region`, a new `key` |
+| **Cost** | Everything is paid for twice, plus data sent between regions | Build the second region small, and grow it |
+
+<Mistake title="a zone name typed into the code">
+
+```output title="Apply stops half-way, with a message like"
+Error: creating EC2 Subnet: InvalidParameterValue: Value (us-east-1a) for parameter availabilityZone is invalid. Subnets can currently only be created in the following availability zones: eu-west-1a, eu-west-1b, eu-west-1c.
+```
+
+The exact wording may differ.
+
+**Why:** the code named a zone from us-east-1. The VPC was created first, then the subnet was refused, so the apply stopped with half the network built.
+
+**The fix:** look zone names up with the `aws_availability_zones` data source, as the network module does, and run `terraform apply` again. Terraform remembers the VPC it already built and carries on from there.
+
+</Mistake>
+
+</Part>
+
+<Part id="see">
+
+Here are QuickCart's three folders side by side: dev, stg, and dev in Europe. Pick an environment to see what's really different about it. Then switch the module to zone names typed in by hand, and try each environment again.
+
+<TfEnvMatrix />
+
+**What to notice:** the shared code never changes. Everything that makes stg "stg" or Europe "Europe" is in the table: a state key and four values. The typed-in zone names work in dev and stg, because they're both in us-east-1, which is exactly why that bug survives until the day you open a second region.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">three small state files in your S3 bucket. VPCs, subnets, internet gateways and route tables are free, and you start no servers.</Cost>
+
+You'll build dev and stg from the same code, prove the folders differ only in values, then build dev again in Europe by changing variables. About 30 minutes.
+
+You need the state bucket from [Terraform state](/lessons/terraform-state/), Terraform 1.10 or later, and a working AWS login. Each region allows five VPCs by default; this lab adds two to us-east-1 and one to eu-west-1.
+
+<Steps>
+
+<Step title="Make the folders">
+
+```sh
+mkdir -p quickcart-envs/modules/network quickcart-envs/envs/dev quickcart-envs/envs/stg quickcart-envs/envs/dev-eu
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir -p` | make directories, including any missing parent folders |
+| `quickcart-envs/modules/network` | the shared module |
+| `quickcart-envs/envs/dev`, `…/stg`, `…/dev-eu` | one folder per environment |
+
+```sh
+cd quickcart-envs
+```
+
+| Part | What it means |
+|---|---|
+| `cd quickcart-envs` | move into the project folder |
+
+</Step>
+
+<Step title="Write the shared module">
+
+These are the three files of the network module from [Modules](/lessons/terraform-modules/#idea), where every line is explained. Create each one in `modules/network/`:
+
+```hcl title="modules/network/variables.tf"
+variable "name" {
+  description = "Name prefix for every resource, like quickcart-dev"
+  type        = string
+}
+
+variable "cidr_block" {
+  description = "The VPC's address range, like 10.10.0.0/16"
+  type        = string
+
+  validation {
+    condition     = can(cidrhost(var.cidr_block, 0))
+    error_message = "cidr_block must be an IPv4 range, like 10.10.0.0/16."
+  }
+}
+
+variable "zone_count" {
+  description = "How many availability zones to spread the public subnets across"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.zone_count >= 2 && var.zone_count <= 3
+    error_message = "zone_count must be 2 or 3."
+  }
+}
+
+variable "tags" {
+  description = "Extra tags to put on every resource in the module"
+  type        = map(string)
+  default     = {}
+}
+```
+
+```hcl title="modules/network/main.tf"
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+locals {
+  zones = slice(data.aws_availability_zones.available.names, 0, var.zone_count)
+}
+
+resource "aws_vpc" "this" {
+  cidr_block           = var.cidr_block
+  enable_dns_hostnames = true
+
+  tags = merge(var.tags, { Name = var.name })
+}
+
+resource "aws_internet_gateway" "this" {
+  vpc_id = aws_vpc.this.id
+
+  tags = merge(var.tags, { Name = "${var.name}-igw" })
+}
+
+resource "aws_subnet" "public" {
+  for_each = { for index, zone in local.zones : zone => index }
+
+  vpc_id                  = aws_vpc.this.id
+  availability_zone       = each.key
+  cidr_block              = cidrsubnet(var.cidr_block, 8, each.value)
+  map_public_ip_on_launch = true
+
+  tags = merge(var.tags, { Name = "${var.name}-public-${each.key}" })
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.this.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.this.id
+  }
+
+  tags = merge(var.tags, { Name = "${var.name}-public" })
+}
+
+resource "aws_route_table_association" "public" {
+  for_each = aws_subnet.public
+
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.public.id
+}
+```
+
+```hcl title="modules/network/outputs.tf"
+output "vpc_id" {
+  description = "The VPC's ID, for security groups and load balancers"
+  value       = aws_vpc.this.id
+}
+
+output "public_subnet_ids" {
+  description = "One public subnet ID per zone"
+  value       = [for subnet in aws_subnet.public : subnet.id]
+}
+
+output "zones" {
+  description = "The availability zones the subnets are in"
+  value       = local.zones
+}
+```
+
+</Step>
+
+<Step title="Write dev's four files">
+
+In `envs/dev/`, create the four files shown in [the idea](#idea) above, exactly as they are there: `main.tf`, `variables.tf`, `backend.tf` and `terraform.tfvars`. In `backend.tf`, put your own account ID in the bucket name in place of `111122223333`.
+
+</Step>
+
+<Step title="Build dev">
+
+```sh
+cd envs/dev
+```
+
+| Part | What it means |
+|---|---|
+| `cd envs/dev` | move into dev's folder. Everything you run here is about dev |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to dev's state in S3, find the module, and download the provider |
+
+```output
+Initializing the backend...
+
+Successfully configured the backend "s3"! Terraform will automatically
+use this backend unless the backend configuration changes.
+Initializing modules...
+- network in ../../modules/network
+
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching "~> 6.0"...
+- Installing hashicorp/aws v6.66.0...
+- Installed hashicorp/aws v6.66.0 (signed by HashiCorp)
+
+Terraform has been successfully initialized!
+```
+
+Your provider version may be newer.
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan dev's network using the values in `terraform.tfvars`, and build it once you type `yes` |
+
+```output title="The end of the plan"
+Plan: 7 to add, 0 to change, 0 to destroy.
+```
+
+Type `yes`.
+
+```output
+Apply complete! Resources: 7 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+vpc_id = "vpc-0123456789abcdef0"
+zones = tolist([
+  "us-east-1a",
+  "us-east-1b",
+])
+```
+
+Your VPC ID will be different.
+
+</Step>
+
+<Step title="Make stg from the same code">
+
+Copy dev's two shared files into stg's folder:
+
+```sh
+cp main.tf variables.tf ../stg/
+```
+
+| Part | What it means |
+|---|---|
+| `cp` | copy files |
+| `main.tf variables.tf` | the two files that must be identical in every environment |
+| `../stg/` | into stg's folder: `..` is the folder above this one |
+
+**Don't copy `backend.tf` or `terraform.tfvars`.** Create stg's own two files in `envs/stg/`, exactly as shown in [the idea](#idea): `backend.tf` with `key = "stg/network/terraform.tfstate"`, and `terraform.tfvars` with stg's values. Again, use your own account ID in the bucket name.
+
+Then build it:
+
+```sh
+cd ../stg
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../stg` | move to stg's folder |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to **stg's** state, which doesn't exist yet |
+
+```output
+Terraform has been successfully initialized!
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan and build stg's network |
+
+**Read the plan before you type `yes`.** It should only add. If it says anything will be destroyed, stop: check the `key` in `backend.tf`.
+
+```output
+Plan: 9 to add, 0 to change, 0 to destroy.
+```
+
+Type `yes`.
+
+```output
+Apply complete! Resources: 9 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+vpc_id = "vpc-1234567890abcdef0"
+zones = tolist([
+  "us-east-1a",
+  "us-east-1b",
+  "us-east-1c",
+])
+```
+
+Nine resources this time, not seven: the third zone adds a subnet and a route table link.
+
+</Step>
+
+<Step title="Prove only the values differ">
+
+Compare the two `main.tf` files:
+
+```sh
+diff ../dev/main.tf main.tf
+```
+
+| Part | What it means |
+|---|---|
+| `diff` | compare two files line by line, and print only what differs |
+| `../dev/main.tf` | dev's copy |
+| `main.tf` | stg's copy, in the folder you're in |
+
+<See>
+
+Nothing at all. `diff` prints nothing when the files are identical.
+
+</See>
+
+Now compare the values:
+
+```sh
+diff ../dev/terraform.tfvars terraform.tfvars
+```
+
+| Part | What it means |
+|---|---|
+| `diff` | compare the two files |
+| `../dev/terraform.tfvars` `terraform.tfvars` | dev's values, then stg's |
+
+```output
+1c1
+< environment = "dev"
+---
+> environment = "stg"
+3,4c3,4
+< vpc_cidr    = "10.10.0.0/16"
+< zone_count  = 2
+---
+> vpc_cidr    = "10.20.0.0/16"
+> zone_count  = 3
+```
+
+Lines starting `<` are dev's, lines starting `>` are stg's. `1c1` means "line 1 changed". That's the whole difference between the two environments, plus the one `key` line.
+
+</Step>
+
+<Step title="See the two state files">
+
+<ConsolePath path="S3 > General purpose buckets > your state bucket" />
+
+<See>
+
+Two folders, `dev/` and `stg/`. Open each, then `network/`, and there's a `terraform.tfstate` in each: two separate memories.
+
+</See>
+
+<ConsolePath path="VPC > Your VPCs" />
+
+<See>
+
+`quickcart-dev` with range `10.10.0.0/16`, and `quickcart-stg` with `10.20.0.0/16`, next to the account's default VPC.
+
+</See>
+
+</Step>
+
+<Step title="Build dev in a second region">
+
+Copy the shared files into the Europe folder:
+
+```sh
+cp main.tf variables.tf ../dev-eu/
+```
+
+| Part | What it means |
+|---|---|
+| `cp main.tf variables.tf` | copy the two identical files |
+| `../dev-eu/` | into the Europe folder |
+
+In `envs/dev-eu/`, create `terraform.tfvars` exactly as shown in [the idea](#idea), with `region = "eu-west-1"`, and this `backend.tf`, with your own account ID:
+
+```hcl title="envs/dev-eu/backend.tf" ph="111122223333"
+terraform {
+  backend "s3" {
+    bucket       = "quickcart-tfstate-111122223333"
+    key          = "dev-eu/network/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+```
+
+| Setting | Why |
+|---|---|
+| `key = "dev-eu/network/terraform.tfstate"` | Europe's dev gets its own state |
+| `region = "us-east-1"` | The **bucket** is still in us-east-1. Only the resources go to Europe |
+
+```sh
+cd ../dev-eu
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../dev-eu` | move to the Europe folder |
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | connect to the Europe state and set up the folder |
+
+```output
+Terraform has been successfully initialized!
+```
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan and build the same network in eu-west-1 |
+
+Check the plan only adds, then type `yes`.
+
+```output
+Apply complete! Resources: 7 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+vpc_id = "vpc-0fedcba9876543210"
+zones = tolist([
+  "eu-west-1a",
+  "eu-west-1b",
+])
+```
+
+**Nobody typed `eu-west-1a`.** The module asked AWS which zones this region has.
+
+<ConsolePath path="VPC > Your VPCs" />
+
+Switch the region at the top right of the console to **Europe (Ireland) eu-west-1**.
+
+<See>
+
+`quickcart-dev`, with range `10.30.0.0/16`, and its two subnets in `eu-west-1a` and `eu-west-1b`.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Destroy each environment from its own folder. You're in `envs/dev-eu` now:
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove everything this folder's state knows about: Europe's network only. Type `yes` |
+
+```output
+Destroy complete! Resources: 7 destroyed.
+```
+
+```sh
+cd ../stg
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../stg` | move to stg's folder |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove stg's network. Type `yes` |
+
+```output
+Destroy complete! Resources: 9 destroyed.
+```
+
+```sh
+cd ../dev
+```
+
+| Part | What it means |
+|---|---|
+| `cd ../dev` | move to dev's folder |
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | remove dev's network. Type `yes` |
+
+```output
+Destroy complete! Resources: 7 destroyed.
+```
+
+Each destroy only touched its own environment. That's the separate state keys at work.
+
+The three state files stay in the bucket, now holding empty states. They cost a tiny fraction of a cent. To remove them, open the bucket in the S3 console, tick the `dev-eu/` and `stg/` folders and choose **Delete**, then open `dev/` and delete its `network/` folder the same way. **Keep the bucket** if you're carrying on with the course.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Thing | What to remember |
+|---|---|
+| One folder per environment | `envs/dev`, `envs/stg`: you can see where you are |
+| `main.tf`, `variables.tf` | Identical in every folder. `diff` should print nothing |
+| `backend.tf` → `key` | Different per environment. Never copy it unchanged |
+| `backend.tf` → `region` | Where the state bucket is, not where you build |
+| `terraform.tfvars` | Read automatically. Holds everything that differs |
+| No defaults on per-environment variables | So a forgotten value is an error, not dev's value in prod |
+| `terraform init -reconfigure` | Set a folder up again after changing its backend, without copying state |
+| `terraform workspace show` | Which workspace you're in. Fine for short-lived copies, risky for real environments |
+| `provider "aws" { alias = "virginia" … }` | A second configuration, for a second region |
+| `configuration_aliases = [aws.us_east_1]` | In a module: "I need a second AWS provider" |
+| `providers = { aws.us_east_1 = aws.virginia }` | In the module block: which one to use |
+| `data "aws_availability_zones"`, `data "aws_ami"` | Never type in zone names or image IDs |
+
+</Cheat>
+
+</Part>

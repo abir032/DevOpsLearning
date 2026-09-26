@@ -1,0 +1,744 @@
+---
+time: 40 minutes
+level: Intermediate
+before: [rds]
+cost: free
+quiz:
+  - q: You need to cancel the orders stuck as pending. What do you run first?
+    answer: 2
+    options:
+      - t: The UPDATE, then a SELECT to check it worked
+        why: By the time you check, the change has happened. With autocommit on, it's already permanent.
+      - t: START TRANSACTION, then the UPDATE
+        why: A transaction is right, but you still don't know how many rows the UPDATE should change. Without that number, you can't tell whether the result is right.
+      - t: A SELECT with exactly the same WHERE, to count the rows
+        why: The count is what you compare the UPDATE against. If the SELECT says 3 and the UPDATE says 8, you know to roll back.
+      - t: A backup of the whole database
+        why: Backups matter, but restoring one takes the database back in time for everyone. Counting first and using a transaction stops the mistake before it needs a restore.
+  - q: Inside a transaction, your UPDATE reports "48112 rows affected". You expected 3. What now?
+    answer: 0
+    options:
+      - t: ROLLBACK, straight away
+        why: Nothing has been committed, so ROLLBACK undoes all of it. Nobody else ever saw the change. Then work out why the WHERE matched so much.
+      - t: COMMIT, then fix the extra rows
+        why: Committing makes the damage permanent and visible to every customer. Fixing 48,109 rows by hand afterwards is far harder than not committing.
+      - t: Close the terminal
+        why: Disconnecting does roll back an open transaction, but it's an accident rather than a decision. Say ROLLBACK, so you know it happened.
+      - t: Run the UPDATE again with a WHERE
+        why: The first UPDATE is still there inside your transaction. Adding a second doesn't undo the first.
+  - q: Which of these can ROLLBACK undo?
+    answer: 1
+    options:
+      - t: A TRUNCATE TABLE run after START TRANSACTION
+        why: TRUNCATE is a DDL statement. MySQL commits before and after it, so it can't be rolled back.
+      - t: A DELETE run after START TRANSACTION
+        why: DELETE, UPDATE and INSERT are data changes, and a transaction can undo them.
+      - t: An UPDATE run with autocommit on and no START TRANSACTION
+        why: With autocommit on, that UPDATE was committed the moment it finished. There is no transaction left to roll back.
+      - t: An ALTER TABLE run after START TRANSACTION
+        why: ALTER TABLE is DDL too. It commits implicitly, and it also commits anything you changed before it in the transaction.
+  - q: You've run an UPDATE inside a transaction, but not committed. What does the QuickCart app see?
+    answer: 3
+    options:
+      - t: The new values, straight away
+        why: Not with MySQL's default isolation. Other sessions keep reading the last committed data.
+      - t: An error, because the table is locked
+        why: Reads carry on as normal. Only another write to the same rows has to wait for you.
+      - t: Nothing at all, until you commit
+        why: The app still reads the table normally. It just sees the old values.
+      - t: The old values, until you commit
+        why: Your change is visible only in your own session until COMMIT. That's what lets you check it safely first.
+  - q: The database is in a private subnet with no public address. How do you run SQL against it from your laptop?
+    answer: 1
+    options:
+      - t: Turn on Public access for a few minutes
+        why: It works, but it exposes the database to the internet while it's on, and someone will forget to switch it off.
+      - t: Forward a local port through Session Manager to an instance inside the VPC
+        why: The instance can reach the database. Session Manager carries your connection to it with no open inbound port and no SSH key, and every session is logged.
+      - t: Add your home IP address to the database's security group
+        why: That still does nothing. The database has no public address and no route from the internet, so there's no way in to allow.
+      - t: Copy the database to your laptop
+        why: That puts real customer data on a laptop. Never the answer for running a fix.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a Friday afternoon">
+
+A payment provider had a bad hour. Three QuickCart orders were left stuck as `pending`: the customers were never charged and the kitchens never cooked. Support asked Noor to cancel them.
+
+Noor wrote the statement in her SQL editor over two lines, with the `WHERE` on the second. Then she selected only the first line and ran it:
+
+```sql
+UPDATE orders SET status = 'cancelled'
+```
+
+The editor said `48112 rows affected`. Every order QuickCart had ever taken was now cancelled, and the app was showing customers exactly that. Autocommit was on, so there was nothing to undo. The team restored the last backup, which was hours old, and lost every order placed since.
+
+</Story>
+
+<Case title="A widely reported case: one command, 2017">
+
+In January 2017, during a late-night incident, an engineer at a well-known code-hosting company ran a command to delete a database directory on what they believed was a replica. It was the primary. Most of the production database was gone within seconds.
+
+The team then found that the backups they relied on had not been working. They recovered from a copy that happened to have been taken about six hours earlier, and lost roughly six hours of data. They published the whole story openly, and it's still one of the most read write-ups about how one command against production goes wrong.
+
+</Case>
+
+Neither mistake was about knowing SQL. Both were about running a change against production with **no way to check it, and no way back**. This lesson is the routine that gives you both.
+
+</Part>
+
+<Part id="idea">
+
+A **transaction** is a group of changes that the database treats as one. Either all of them happen, or none of them do. While it's open, you can look at what you've changed and then decide.
+
+| Statement | What it does |
+|---|---|
+| `START TRANSACTION` | Opens a transaction. `BEGIN` does the same in the mysql client |
+| `COMMIT` | Makes every change in the transaction permanent and visible to everyone |
+| `ROLLBACK` | Throws away every change in the transaction, as if it never ran |
+
+<Key>Never change data you haven't counted: SELECT with the same WHERE first, change it inside a transaction, and only COMMIT when the numbers match.</Key>
+
+### Autocommit: the default that catches people
+
+MySQL starts every connection with **autocommit** on. It means *every statement you run outside a transaction is committed the moment it finishes*. An `UPDATE` typed on its own is permanent before you've read its output.
+
+`START TRANSACTION` switches that off until the next `COMMIT` or `ROLLBACK`. That's why the routine below always starts with it.
+
+| You run | With autocommit on (the default) |
+|---|---|
+| `UPDATE orders SET …` on its own | Permanent at once. `ROLLBACK` afterwards does nothing |
+| `START TRANSACTION;` then `UPDATE orders SET …` | Held in your session. `ROLLBACK` undoes it; `COMMIT` keeps it |
+
+### Nobody else sees it until you commit
+
+While your transaction is open, other connections, including QuickCart's app, keep reading the last committed data. MySQL's default setting for this, called `REPEATABLE READ`, guarantees it. So you can make the change, look at it, and back out, and no customer ever sees the middle.
+
+The catch is that the rows you've changed are **locked** until you finish. Anything else that tries to write to those rows waits. So open the transaction, check, and finish it within a minute or two. Never leave one open while you go for coffee.
+
+<Mistake title="leaving a transaction open">
+
+The app tries to update an order you changed but haven't committed. After 50 seconds, its query fails:
+
+```output title="The app's log shows"
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+```
+
+**Why:** your open transaction holds a lock on that row. Other writers wait for it, up to `innodb_lock_wait_timeout`, which is 50 seconds by default.
+
+**The fix:** finish the transaction with `COMMIT` or `ROLLBACK`. Keep transactions short: prepare everything before you type `START TRANSACTION`.
+
+</Mistake>
+
+### Some statements can't be rolled back
+
+Transactions cover changes to **data**: `INSERT`, `UPDATE` and `DELETE`. Changes to the **structure** of the database, called DDL, are different. MySQL commits before and after each one, even in the middle of your transaction.
+
+| Statement | Inside a transaction |
+|---|---|
+| `INSERT`, `UPDATE`, `DELETE` | Can be rolled back |
+| `CREATE TABLE`, `DROP TABLE` | Commits at once, and commits your earlier changes too |
+| `TRUNCATE TABLE` | Commits at once. Every row is gone for good |
+| `ALTER TABLE`, `RENAME TABLE` | Commits at once |
+
+That second point surprises people. If you run an `UPDATE`, then a `CREATE TABLE`, then `ROLLBACK`, the `UPDATE` stays. The `CREATE TABLE` committed it. You'll see this happen in the lab.
+
+### The routine, every time
+
+| # | Step | Why |
+|---|---|---|
+| 1 | **Save the rows you're about to change**, and write the undo script | If the change turns out wrong after you commit, you can put the old values back. Do it before the transaction, because saving them is itself DDL |
+| 2 | `SELECT` with **exactly the same `WHERE`** | Gives you the number of rows the change should touch |
+| 3 | `START TRANSACTION` | From here on, nothing is permanent |
+| 4 | Run the `UPDATE` or `DELETE` | Read `Rows matched`. It must equal the count from step 2 |
+| 5 | `SELECT` again to look at the result | Check the change is what you meant, not just the right size |
+| 6 | `COMMIT` if everything matches. Otherwise `ROLLBACK` | The only step that makes it real |
+
+The undo script matters because a transaction only protects you until you commit. A mistake you notice an hour later, such as "those orders were paid after all", needs its own way back. Writing it **before** the change means you're not inventing it under pressure.
+
+<Note title="The mysql client can refuse the worst mistake">
+
+Start the client with `--safe-updates` and it refuses any `UPDATE` or `DELETE` whose `WHERE` doesn't use a key column, and one with no `WHERE` at all. The error begins `ERROR 1175 (HY000): You are using safe update mode`. It's a useful seatbelt for production sessions, as long as you understand it also refuses a `WHERE` on a column with no index, such as `status` in this lesson.
+
+</Note>
+
+### Reaching a database in a private subnet
+
+QuickCart's database lives in a private subnet with no public address, as the [RDS lesson](/lessons/rds/) set up. Nothing on the internet can reach it, and that includes your laptop. You get there **through something inside the VPC** that can.
+
+The modern way is **Session Manager port forwarding**. You pick an EC2 instance in the VPC that is allowed to reach the database, such as one of the app servers. Session Manager opens a tunnel from a port on your laptop, through that instance, to the database. Your laptop's SQL client connects to `127.0.0.1` and ends up talking to the database.
+
+| Piece | Why it's needed |
+|---|---|
+| An instance in the VPC with the SSM agent and the `AmazonSSMManagedInstanceCore` role policy | Session Manager needs something inside the VPC to carry the connection. [Servers on EC2](/lessons/ec2/) sets this up |
+| The database's security group allows port `3306` from that instance's security group | The tunnel's last hop is from the instance to the database. [Security groups](/lessons/security-groups/) explains the chain |
+| The AWS CLI and the Session Manager plugin on your laptop | The console can open a shell on an instance, but it has **no way to forward a port**. This is one place where you have to use the CLI |
+
+There's no inbound port open anywhere, no SSH key to lose, and every session is recorded against your AWS login. The older way was a **bastion**: a server in a public subnet with SSH open to the world, used as a stepping stone. Session Manager replaces it.
+
+The command to open the tunnel is below. It uses three values. `INSTANCE_ID` is the instance's ID from **EC2 → Instances**, and `DB_ENDPOINT` is the database's **Endpoint** from **RDS → Databases → your database → Connectivity & security**.
+
+```sh ph="INSTANCE_ID,DB_ENDPOINT"
+aws ssm start-session --target INSTANCE_ID --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters '{"host":["DB_ENDPOINT"],"portNumber":["3306"],"localPortNumber":["3306"]}'
+```
+
+| Part | What it means |
+|---|---|
+| `aws ssm start-session` | open a Session Manager session |
+| `--target INSTANCE_ID` | the instance inside the VPC that carries the connection |
+| `--document-name AWS-StartPortForwardingSessionToRemoteHost` | the kind of session: forward a port to *another* host, not to the instance itself |
+| `--parameters '…'` | the settings for that kind of session, written as JSON inside single quotes, so the shell passes it through untouched |
+| `"host":["DB_ENDPOINT"]` | where the instance should forward to: the database |
+| `"portNumber":["3306"]` | the port on the database. 3306 is MySQL's |
+| `"localPortNumber":["3306"]` | the port to open on your laptop. Use another, like `13306`, if you already run MySQL locally |
+
+```output
+Starting session with SessionId: maya-0a1b2c3d4e5f67890
+Port 3306 opened for sessionId maya-0a1b2c3d4e5f67890.
+Waiting for connections...
+```
+
+Your session ID will differ. Leave this terminal open: the tunnel lasts as long as the command runs. In a **second terminal**, connect through it:
+
+```sh
+mysql -h 127.0.0.1 -P 3306 -u admin -p quickcart
+```
+
+| Part | What it means |
+|---|---|
+| `mysql` | the MySQL command-line client |
+| `-h 127.0.0.1` | connect to your own laptop, where the tunnel is listening |
+| `-P 3306` | on this port, the `localPortNumber` from the tunnel. Capital `P` |
+| `-u admin` | as this database user, the master username you chose for RDS |
+| `-p` | ask for the password. Get it from Secrets Manager; [Secrets](/lessons/secrets/) shows how |
+| `quickcart` | start in this database |
+
+<Mistake title="using localhost instead of 127.0.0.1">
+
+```output title="The client stops with"
+ERROR 2002 (HY000): Can't connect to local MySQL server through socket '/tmp/mysql.sock' (2)
+```
+
+**Why:** to the mysql client, `localhost` means "a MySQL server on this machine, through a local socket file". It never uses the network, so it never reaches the tunnel.
+
+**The fix:** use `-h 127.0.0.1`. That's the same machine, reached over the network, where the tunnel is listening.
+
+</Mistake>
+
+<Mistake title="the tunnel opens, but the connection is dropped">
+
+```output title="The client stops with a message like"
+ERROR 2013 (HY000): Lost connection to MySQL server at 'reading initial communication packet', system error: 0
+```
+
+**Why:** the first half of the tunnel works, laptop to instance. The second half, instance to database, is blocked. Almost always, the database's security group doesn't allow port 3306 from the instance's security group.
+
+**The fix:** add that inbound rule to the database's security group. The same missing rule shows up in QuickCart's app as a generic "database unavailable" error, which is why the app's logs need to say *which* error it was. [Logs and metrics](/lessons/logs-and-metrics/) covers that.
+
+</Mistake>
+
+</Part>
+
+<Part id="see">
+
+Below are QuickCart's orders. The left side is your session; the right is what everyone else sees, including the app. Three orders are `pending` and need cancelling.
+
+First, run the **UPDATE with no WHERE** without starting a transaction, and try to roll it back. Then choose **Start again**, open a transaction, and do the same thing.
+
+<SqlSandbox />
+
+**What to notice:** the two mistakes were the same statement. Without a transaction, the right-hand side changed instantly and nothing could bring it back. Inside one, only your side changed, and `ROLLBACK` made it as if it had never happened. The row count, 8 where you expected 3, was the warning both times.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">the lab runs MySQL in Docker on your own laptop. If you use an RDS database instead, that costs money while it runs.</Cost>
+
+<Note title="Using RDS instead of Docker">
+
+You can run every step against the RDS database from [Managed databases: RDS](/lessons/rds/), through the Session Manager tunnel shown in [the idea](#idea). That database costs money for every hour it exists, so delete it with that lesson's clean-up when you finish. The Docker path teaches exactly the same thing for free.
+
+</Note>
+
+You'll set up a small orders table, save the rows you're about to change, practise the no-`WHERE` mistake safely, watch a second session not see it, make the real change, and then undo it with your undo script. About 30 minutes.
+
+You need Docker running on your laptop. [Set up your Mac](/lessons/mac-setup/) covers installing it.
+
+<Steps>
+
+<Step title="Start MySQL in a container">
+
+```sh
+docker run --name quickcart-mysql -e MYSQL_ROOT_PASSWORD=practice-only -p 3306:3306 -d mysql:8.4
+```
+
+| Part | What it means |
+|---|---|
+| `docker run` | start a new container from an image |
+| `--name quickcart-mysql` | call the container this, so later commands can refer to it |
+| `-e MYSQL_ROOT_PASSWORD=practice-only` | set an environment variable that the MySQL image reads on first start, to set the `root` password. This password is for local practice only. Never put a real one on a command line |
+| `-p 3306:3306` | make port 3306 inside the container reachable on port 3306 of your laptop |
+| `-d` | run it in the background |
+| `mysql:8.4` | the official MySQL image, version 8.4 |
+
+<See>
+
+The first time, Docker downloads the image, which takes a minute. Then it prints one long line of letters and numbers: the new container's ID.
+
+</See>
+
+MySQL takes about 20 seconds to get ready the first time. Check it's up:
+
+```sh
+docker logs quickcart-mysql
+```
+
+| Part | What it means |
+|---|---|
+| `docker logs` | print what a container has written to its output |
+| `quickcart-mysql` | the container's name |
+
+<See>
+
+Near the end, a line containing `ready for connections` and `port: 3306`. If it isn't there yet, wait a few seconds and run the command again.
+
+</See>
+
+</Step>
+
+<Step title="Open two sessions">
+
+Open **two terminal windows**. In each one, run:
+
+```sh
+docker exec -it quickcart-mysql mysql -u root -p
+```
+
+| Part | What it means |
+|---|---|
+| `docker exec` | run a command inside a container that's already running |
+| `-it` | connect your keyboard and screen to it, so you can type |
+| `quickcart-mysql` | which container |
+| `mysql -u root -p` | the MySQL client, as the `root` user, asking for the password |
+
+Type `practice-only` when it asks for the password. Nothing shows as you type.
+
+```output
+Enter password:
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+```
+
+A few more lines follow, then the `mysql>` prompt. Call them **window 1** and **window 2**. Window 2 plays QuickCart's app: it only ever reads.
+
+</Step>
+
+<Step title="Create the orders table">
+
+In **window 1**, paste this. Each statement ends with a semicolon, and the client runs them one after another:
+
+```sql
+CREATE DATABASE quickcart;
+USE quickcart;
+CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  customer_id INT NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  total DECIMAL(8, 2) NOT NULL
+);
+INSERT INTO orders (id, customer_id, status, total) VALUES
+  (1001, 41, 'pending', 18.50),
+  (1002, 17, 'paid', 22.00),
+  (1003, 52, 'pending', 9.75),
+  (1004, 8, 'delivered', 31.20),
+  (1005, 23, 'paid', 14.00),
+  (1006, 64, 'pending', 27.40),
+  (1007, 30, 'delivered', 12.60),
+  (1008, 12, 'paid', 19.90);
+```
+
+| Part | What it means |
+|---|---|
+| `CREATE DATABASE quickcart` | make an empty database |
+| `USE quickcart` | run everything after this inside it |
+| `CREATE TABLE orders` | make a table with four columns |
+| `id INT PRIMARY KEY` | a whole number that's unique for every order |
+| `status VARCHAR(20)` | text up to 20 characters: `pending`, `paid` and so on |
+| `DECIMAL(8, 2)` | a number with exactly two decimal places. Money is never stored as a floating-point number |
+| `INSERT INTO … VALUES` | add eight rows |
+
+The last line of output should be:
+
+```output
+Query OK, 8 rows affected (0.01 sec)
+Records: 8  Duplicates: 0  Warnings: 0
+```
+
+Timings like `(0.01 sec)` will differ on your machine throughout this lab.
+
+In **window 2**, choose the same database:
+
+```sql
+USE quickcart;
+```
+
+```output
+Database changed
+```
+
+</Step>
+
+<Step title="Save the rows, and write the undo script first">
+
+The job is to cancel the three pending orders. Before anything else, in **window 1**, keep a copy of exactly the rows you're about to change, with their current values:
+
+```sql
+CREATE TABLE orders_before_fix AS
+SELECT id, status FROM orders WHERE status = 'pending';
+```
+
+| Part | What it means |
+|---|---|
+| `CREATE TABLE orders_before_fix AS` | make a new table from the result of a query |
+| `SELECT id, status FROM orders` | the ID and the current status of each row |
+| `WHERE status = 'pending'` | the **same** condition the real change will use |
+
+```output
+Query OK, 3 rows affected (0.02 sec)
+Records: 3  Duplicates: 0  Warnings: 0
+```
+
+This comes **before** the transaction on purpose: `CREATE TABLE` is DDL, and it would commit anything already in a transaction.
+
+Now write the undo script, and **don't run it yet**. Keep it in a text file next to your notes:
+
+```sql
+UPDATE orders
+JOIN orders_before_fix ON orders_before_fix.id = orders.id
+SET orders.status = orders_before_fix.status;
+```
+
+| Part | What it means |
+|---|---|
+| `UPDATE orders` | change rows in the orders table |
+| `JOIN orders_before_fix ON … id = orders.id` | only the rows whose ID is in the saved copy |
+| `SET orders.status = orders_before_fix.status` | put each one's saved status back |
+
+</Step>
+
+<Step title="Count the rows with the same WHERE">
+
+```sql
+SELECT id, status FROM orders WHERE status = 'pending';
+```
+
+```output
++------+---------+
+| id   | status  |
++------+---------+
+| 1001 | pending |
+| 1003 | pending |
+| 1006 | pending |
++------+---------+
+3 rows in set (0.00 sec)
+```
+
+**Three.** That's the number the `UPDATE` must report. Anything else means stop.
+
+</Step>
+
+<Step title="Make the mistake, safely">
+
+Now do what Noor did, but inside a transaction. In **window 1**:
+
+```sql
+START TRANSACTION;
+```
+
+```output
+Query OK, 0 rows affected (0.00 sec)
+```
+
+Then the `UPDATE` with its `WHERE` missing:
+
+```sql
+UPDATE orders SET status = 'cancelled';
+```
+
+```output
+Query OK, 8 rows affected (0.00 sec)
+Rows matched: 8  Changed: 8  Warnings: 0
+```
+
+**8, not 3.** That's the moment to stop. First, look at what window 1 sees:
+
+```sql
+SELECT status, COUNT(*) FROM orders GROUP BY status;
+```
+
+| Part | What it means |
+|---|---|
+| `SELECT status, COUNT(*)` | each status, and how many rows have it |
+| `GROUP BY status` | one line per status, instead of one per row |
+
+```output
++-----------+----------+
+| status    | COUNT(*) |
++-----------+----------+
+| cancelled |        8 |
++-----------+----------+
+1 row in set (0.00 sec)
+```
+
+</Step>
+
+<Step title="See that nobody else can see it">
+
+In **window 2**, run the same query:
+
+```sql
+SELECT status, COUNT(*) FROM orders GROUP BY status;
+```
+
+```output
++-----------+----------+
+| status    | COUNT(*) |
++-----------+----------+
+| pending   |        3 |
+| paid      |        3 |
+| delivered |        2 |
++-----------+----------+
+3 rows in set (0.00 sec)
+```
+
+The rows may come out in a different order. **Window 2 still sees the real data.** If this were production, customers would have noticed nothing.
+
+Back in **window 1**, undo it:
+
+```sql
+ROLLBACK;
+```
+
+```output
+Query OK, 0 rows affected (0.00 sec)
+```
+
+Run the count again in window 1. It now matches window 2: 3 pending, 3 paid, 2 delivered.
+
+</Step>
+
+<Step title="Make the real change">
+
+In **window 1**, the whole routine, one statement at a time:
+
+```sql
+START TRANSACTION;
+```
+
+```sql
+UPDATE orders SET status = 'cancelled' WHERE status = 'pending';
+```
+
+```output
+Query OK, 3 rows affected (0.00 sec)
+Rows matched: 3  Changed: 3  Warnings: 0
+```
+
+`Rows matched: 3` equals the count from your `SELECT`. Look at the result before committing:
+
+```sql
+SELECT id, status FROM orders WHERE id IN (1001, 1003, 1006);
+```
+
+```output
++------+-----------+
+| id   | status    |
++------+-----------+
+| 1001 | cancelled |
+| 1003 | cancelled |
+| 1006 | cancelled |
++------+-----------+
+3 rows in set (0.00 sec)
+```
+
+Both checks pass, so commit:
+
+```sql
+COMMIT;
+```
+
+```output
+Query OK, 0 rows affected (0.00 sec)
+```
+
+Run the count in **window 2** again. Now it shows 3 cancelled, 3 paid and 2 delivered. Only `COMMIT` made the change visible.
+
+</Step>
+
+<Step title="Run the undo script">
+
+Support calls back: the payment provider has recovered, and those three customers *were* charged after all. The orders need to go back to how they were. Because you wrote the undo script first, this takes a minute. In **window 1**:
+
+```sql
+START TRANSACTION;
+```
+
+```sql
+UPDATE orders
+JOIN orders_before_fix ON orders_before_fix.id = orders.id
+SET orders.status = orders_before_fix.status;
+```
+
+```output
+Query OK, 3 rows affected (0.00 sec)
+Rows matched: 3  Changed: 3  Warnings: 0
+```
+
+Three again, the size of the saved copy. Check, then commit:
+
+```sql
+SELECT id, status FROM orders WHERE id IN (1001, 1003, 1006);
+```
+
+```output
++------+---------+
+| id   | status  |
++------+---------+
+| 1001 | pending |
+| 1003 | pending |
+| 1006 | pending |
++------+---------+
+3 rows in set (0.00 sec)
+```
+
+```sql
+COMMIT;
+```
+
+The undo script runs inside a transaction too. It's a change to production like any other.
+
+</Step>
+
+<Step title="See DDL commit behind your back">
+
+This step shows the rule people learn the hard way. In **window 1**:
+
+```sql
+START TRANSACTION;
+```
+
+```sql
+UPDATE orders SET total = 0 WHERE id = 1002;
+```
+
+```output
+Query OK, 1 row affected (0.00 sec)
+Rows matched: 1  Changed: 1  Warnings: 0
+```
+
+Now a `CREATE TABLE`, then roll back:
+
+```sql
+CREATE TABLE notes (id INT);
+```
+
+```sql
+ROLLBACK;
+```
+
+Check the order you changed:
+
+```sql
+SELECT id, total FROM orders WHERE id = 1002;
+```
+
+```output
++------+-------+
+| id   | total |
++------+-------+
+| 1002 |  0.00 |
++------+-------+
+1 row in set (0.00 sec)
+```
+
+**The rollback didn't undo it.** The `CREATE TABLE` committed the `UPDATE` before it ran, and `ROLLBACK` had nothing left to undo. Put the right value back:
+
+```sql
+UPDATE orders SET total = 22.00 WHERE id = 1002;
+```
+
+```output
+Query OK, 1 row affected (0.00 sec)
+Rows matched: 1  Changed: 1  Warnings: 0
+```
+
+There was no `START TRANSACTION` before that one, so autocommit saved it straight away.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Type `exit` in both windows. Then remove the container and everything in it:
+
+```sh
+docker rm -f quickcart-mysql
+```
+
+| Part | What it means |
+|---|---|
+| `docker rm` | delete a container |
+| `-f` | stop it first if it's running |
+| `quickcart-mysql` | which container |
+
+```output
+quickcart-mysql
+```
+
+The database lived inside the container, so it's gone too. If you also want the downloaded image back off your disk:
+
+```sh
+docker image rm mysql:8.4
+```
+
+| Part | What it means |
+|---|---|
+| `docker image rm` | delete a downloaded image |
+| `mysql:8.4` | which one |
+
+If you used **RDS** instead: in window 1, run `DROP TABLE orders_before_fix;` and `DROP TABLE notes;`, stop the tunnel with **Ctrl+C**, and delete the database by following the clean-up in [Managed databases: RDS](/lessons/rds/). It costs money until you do.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Step or statement | What it's for |
+|---|---|
+| `CREATE TABLE x_before_fix AS SELECT id, col FROM t WHERE …` | Save the rows you'll change. Before the transaction |
+| Undo script | Written before the change: `UPDATE t JOIN x_before_fix ON … SET …` |
+| `SELECT … WHERE` (same WHERE) | Count the rows first |
+| `START TRANSACTION` or `BEGIN` | Nothing after this is permanent until you commit |
+| `Rows matched: N` | Must equal your count. If not, `ROLLBACK` |
+| `COMMIT` | Makes it permanent and visible to everyone |
+| `ROLLBACK` | Throws the whole transaction away |
+| Autocommit | On by default. A statement outside a transaction is permanent at once |
+| DDL: `CREATE`, `DROP`, `TRUNCATE`, `ALTER` | Commits at once, and commits your earlier changes. Can't be rolled back |
+| `ERROR 1205 … Lock wait timeout` | Someone left a transaction open. Keep yours short |
+| Private database | `aws ssm start-session` with `AWS-StartPortForwardingSessionToRemoteHost`, then `mysql -h 127.0.0.1` |
+
+</Cheat>
+
+</Part>

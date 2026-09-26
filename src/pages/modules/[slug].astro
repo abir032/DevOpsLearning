@@ -1,0 +1,60 @@
+---
+import Base from "../../layouts/Base.astro";
+import { MODULES, PROJECTS, href, lessonHref, projectHref } from "../../data/curriculum";
+import { readySlugs } from "../../lib/lessons";
+
+export function getStaticPaths() {
+  return MODULES.map((m) => ({ params: { slug: m.slug } }));
+}
+const { slug } = Astro.params;
+const m = MODULES.find((x) => x.slug === slug)!;
+const i = MODULES.indexOf(m);
+const prev = MODULES[i - 1];
+const next = MODULES[i + 1];
+const ready = await readySlugs();
+const projects = PROJECTS.filter((p) => p.uses.includes(m.slug));
+---
+<Base title={`${m.id} – ${m.title}`} description={m.blurb} current={{ module: m.slug }} track={m.track}>
+  <div class="page">
+    <div class="read" data-pagefind-body data-pagefind-meta={`track:${m.track}`}>
+      <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore>
+        <a href={href("/")}>The route map</a><span class="sep" aria-hidden="true">/</span><span aria-current="page">{m.title}</span>
+      </nav>
+      <header class="mod-hero">
+        <span class="num">Module {m.id}</span>
+        <h1>{m.title}</h1>
+        <p>{m.blurb}</p>
+        <p class="qc"><b>QuickCart:</b> {m.qc}</p>
+      </header>
+
+      <h2 class="sr">Lessons in this module</h2>
+      <ol class="lesson-list">
+        {m.lessons.map((l) => {
+          const r = ready.has(l.slug);
+          return (
+            <li class:list={[{ soon: !r }]} data-stop={l.slug}>
+              <span class="ld" aria-hidden="true"><span></span></span>
+              <div><a href={lessonHref(l.slug)}>{l.title}</a><span class="ls">{l.sum}</span></div>
+              <span>
+                {r ? <span class="tag ready">Ready</span> : <span class="tag soon">Being written</span>}
+                <span class="tag done">Done</span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {projects.length > 0 && (
+        <p class="section-sub" style="margin-top:28px">
+          Put this module to work in {projects.map((p, n) => <>{n > 0 && " and "}<a href={projectHref(p.slug)}>Project {p.n}: {p.title}</a></>)}.
+        </p>
+      )}
+
+      <nav class="pager" aria-label="Previous and next module" data-pagefind-ignore>
+        {prev ? <a href={href(`/modules/${prev.slug}/`)}><small>Previous module</small><b>{`${prev.id} – ${prev.title}`}</b></a> : <span></span>}
+        <a class="next" href={lessonHref(m.lessons[0].slug)}><small>Start with</small><b>{m.lessons[0].title}</b></a>
+      </nav>
+      {next && <p style="margin-top:14px;text-align:right"><a href={href(`/modules/${next.slug}/`)}>Next module: {`${next.id} – ${next.title}`}</a></p>}
+    </div>
+  </div>
+</Base>

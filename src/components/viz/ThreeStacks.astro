@@ -1,0 +1,127 @@
+---
+/*
+ * Project 4: one set of code, three stacks.
+ * Teaches: dev, prod and the second region run the same code. Only the
+ * values and the state key differ, and those differences decide what gets built.
+ */
+type Env = { id: string; label: string; key: string; values: [string, string][]; builds: [string, string][]; say: string };
+const ENVS: Env[] = [
+  {
+    id: "dev", label: "dev, us-east-1", key: "dev/terraform.tfstate",
+    values: [["region", "us-east-1"], ["vpc_cidr", "10.20.0.0/16"], ["single_nat_gateway", "true"], ["desired_count", "2"], ["db_multi_az", "false"], ["deletion_protection", "false"], ["enable_eks", "true"]],
+    builds: [["NAT gateways", "1, shared by both zones"], ["Order service", "2 tasks on ECS, 2 pods on EKS"], ["Database", "one copy, no standby"], ["Destroy", "allowed"]],
+    say: "<b>dev</b> is built to be thrown away: one NAT gateway, no database standby, no deletion protection. EKS is on here so you can prove both runtimes rebuild from code.",
+  },
+  {
+    id: "prod", label: "prod, us-east-1", key: "prod/terraform.tfstate",
+    values: [["region", "us-east-1"], ["vpc_cidr", "10.30.0.0/16"], ["single_nat_gateway", "false"], ["desired_count", "3"], ["db_multi_az", "true"], ["deletion_protection", "true"], ["enable_eks", "false"]],
+    builds: [["NAT gateways", "2, one per zone"], ["Order service", "3 tasks on ECS"], ["Database", "a standby in the second zone"], ["Destroy", "refused until you turn protection off"]],
+    say: "<b>prod</b> runs the same code with safer values: a NAT gateway per zone, a standby database and deletion protection. Nothing in the code says <code>if prod</code>.",
+  },
+  {
+    id: "usw2", label: "dev, us-west-2", key: "dev-usw2/terraform.tfstate",
+    values: [["region", "us-west-2"], ["vpc_cidr", "10.40.0.0/16"], ["single_nat_gateway", "true"], ["desired_count", "2"], ["db_multi_az", "false"], ["deletion_protection", "false"], ["enable_eks", "false"]],
+    builds: [["NAT gateways", "1, in whichever zones us-west-2 offers"], ["Order service", "2 tasks, from the replicated image"], ["Database", "one copy, no standby"], ["Destroy", "allowed"]],
+    say: "<b>The second region</b> changes the region and the address range. Zone names are looked up, the certificate is made again, and the image arrives by ECR replication.",
+  },
+];
+const base = ENVS[0];
+---
+<div class="viz" data-track="code" data-viz="three-stacks">
+  <div class="viz-controls">
+    <span class="lbl" id="ts-lbl">Environment</span>
+    <div class="seg" role="group" aria-labelledby="ts-lbl">
+      {ENVS.map((e, i) => <button type="button" data-env={e.id} aria-pressed={String(i === 0)}>{e.label}</button>)}
+    </div>
+  </div>
+  <div class="ts-grid">
+    <section class="ts-col" aria-labelledby="ts-h-code">
+      <h3 id="ts-h-code">The code</h3>
+      <small>identical for all three</small>
+      <ul class="ts-files">
+        <li><code>modules/</code>: 8 modules</li>
+        <li><code>stack/</code>: wires them together</li>
+        <li><code>envs/<span data-f="dir">dev</span>/main.tf</code>: a copy of the same file</li>
+      </ul>
+      <p class="ts-same">Same code</p>
+    </section>
+    <section class="ts-col" aria-labelledby="ts-h-vals">
+      <h3 id="ts-h-vals">The values</h3>
+      <small><code>envs/<span data-f="dir2">dev</span>/terraform.tfvars</code></small>
+      <dl class="ts-vals">
+        {base.values.map(([k, v]) => <div data-k={k}><dt>{k}</dt><dd>{v}</dd></div>)}
+      </dl>
+      <p class="ts-key">State: <code data-f="key">{base.key}</code></p>
+    </section>
+    <section class="ts-col" aria-labelledby="ts-h-built">
+      <h3 id="ts-h-built">What gets built</h3>
+      <small>decided by the values</small>
+      <dl class="ts-vals ts-built">
+        {base.builds.map(([k, v]) => <div data-b={k}><dt>{k}</dt><dd>{v}</dd></div>)}
+      </dl>
+    </section>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">dev, us-east-1</span><Fragment set:html={base.say} /></div>
+  <script is:inline type="application/json" data-envs set:html={JSON.stringify(ENVS)} />
+</div>
+
+<style is:global>
+  [data-viz="three-stacks"] .ts-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px 16px; }
+  [data-viz="three-stacks"] .ts-col { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+  [data-viz="three-stacks"] .ts-col h3 { margin: 0 0 2px; font-size: 15px; font-weight: 800; }
+  [data-viz="three-stacks"] .ts-col small { display: block; color: var(--ink-3); font-size: 12.5px; margin-bottom: 10px; overflow-wrap: anywhere; }
+  [data-viz="three-stacks"] .ts-files { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  [data-viz="three-stacks"] .ts-files li { padding: 6px 9px; border: 1px solid var(--rule); border-radius: 7px; background: var(--surface); margin-bottom: 6px; overflow-wrap: anywhere; }
+  [data-viz="three-stacks"] .ts-same { margin: 8px 0 0; font-size: 13px; font-weight: 800; color: var(--ok); }
+  [data-viz="three-stacks"] .ts-vals { margin: 0; font-size: 13px; }
+  [data-viz="three-stacks"] .ts-vals div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; padding: 5px 8px; border-radius: 6px; border: 1px solid transparent; transition: background .2s, border-color .2s; }
+  [data-viz="three-stacks"] .ts-vals dt { font-family: var(--mono); font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+  [data-viz="three-stacks"] .ts-vals dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+  [data-viz="three-stacks"] .ts-built dt { font-family: var(--font); font-size: 13px; }
+  [data-viz="three-stacks"] .ts-vals div.chg { background: var(--warn-bg); border-color: var(--warn); }
+  [data-viz="three-stacks"] .ts-key { margin: 10px 0 0; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  @media (max-width: 720px) {
+    [data-viz="three-stacks"] .ts-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Env = { id: string; label: string; key: string; values: [string, string][]; builds: [string, string][]; say: string };
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="three-stacks"]').forEach((root) => {
+    if (!once(root)) return;
+    const envs: Env[] = JSON.parse(root.querySelector("[data-envs]")!.textContent || "[]");
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const btns = [...root.querySelectorAll<HTMLButtonElement>("[data-env]")];
+    const dev = envs[0];
+
+    function show(id: string) {
+      const e = envs.find((x) => x.id === id)!;
+      press(btns, (b) => b.dataset.env === id);
+      const dir = e.id === "usw2" ? "dev-usw2" : e.id;
+      root.querySelector('[data-f="dir"]')!.textContent = dir;
+      root.querySelector('[data-f="dir2"]')!.textContent = dir;
+      root.querySelector('[data-f="key"]')!.textContent = e.key;
+      e.values.forEach(([k, v], i) => {
+        const row = root.querySelector<HTMLElement>(`[data-k="${k}"]`)!;
+        row.querySelector("dd")!.textContent = v;
+        row.classList.toggle("chg", e.id !== "dev" && v !== dev.values[i][1]);
+      });
+      e.builds.forEach(([k, v], i) => {
+        const row = root.querySelector<HTMLElement>(`[data-b="${k}"]`)!;
+        row.querySelector("dd")!.textContent = v;
+        row.classList.toggle("chg", e.id !== "dev" && v !== dev.builds[i][1]);
+      });
+      const n = e.values.filter(([, v], i) => v !== dev.values[i][1]).length;
+      tell(say, e.label, e.say + (e.id === "dev" ? "" : ` <b>${n} values</b> differ from dev, highlighted. The code column didn't change.`));
+    }
+
+    root.addEventListener("click", (ev) => {
+      const b = (ev.target as HTMLElement).closest<HTMLButtonElement>("[data-env]");
+      if (b) show(b.dataset.env!);
+    });
+  }));
+</script>

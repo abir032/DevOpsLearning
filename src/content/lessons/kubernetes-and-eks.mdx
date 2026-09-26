@@ -1,0 +1,1002 @@
+---
+time: 2 hours
+level: Advanced
+before: [ecs-fargate, zero-downtime-releases]
+cost: paid
+quiz:
+  - q: You delete one of the two pods in a Deployment with replicas set to 2. What happens?
+    answer: 2
+    options:
+      - t: The Deployment now has 1 pod until you create another
+        why: You never told Kubernetes to run one. The file still says 2, so it acts to make that true.
+      - t: Kubernetes asks you whether to replace it
+        why: It never asks. Replacing missing pods is its whole job.
+      - t: A controller notices only 1 pod exists, compares that with the 2 you asked for, and creates a new pod
+        why: That's the reconcile loop. Observe, compare, act. The new pod gets a new name, and within seconds you're back to 2.
+      - t: The Deployment is deleted too
+        why: Deleting a pod doesn't touch the Deployment that owns it.
+  - q: A pod's readiness probe starts failing. What does Kubernetes do?
+    answer: 0
+    options:
+      - t: Stops sending it traffic through the Service, but leaves it running
+        why: Readiness means "can this pod take traffic now?". A pod that isn't ready is taken out of the Service's endpoints until the probe passes again.
+      - t: Restarts the container straight away
+        why: That's what a failing liveness probe does. Readiness only controls traffic.
+      - t: Deletes the node it runs on
+        why: Probes are about one container. They never affect nodes.
+      - t: Nothing, readiness probes are only for information
+        why: They directly decide which pods receive traffic.
+  - q: What does an EKS cluster cost before any pod runs, on standard support?
+    answer: 3
+    options:
+      - t: Nothing. EKS is free, like the ECS control plane
+        why: ECS has no control plane charge. EKS does.
+      - t: About $0.10 a month
+        why: It's per hour, not per month.
+      - t: Only the price of the nodes
+        why: The nodes cost extra, on top of a fixed charge for the control plane.
+      - t: About $0.10 an hour for the control plane, roughly $73 a month, plus the nodes
+        why: That's the standard-support price in us-east-1 at the time of writing. A version on extended support costs about six times as much. Prices change, so check.
+  - q: Why does QuickCart delete its Kubernetes app with kubectl delete before deleting the cluster?
+    answer: 1
+    options:
+      - t: eksctl refuses to delete a cluster with pods in it
+        why: It doesn't refuse. That's exactly what makes the mistake easy.
+      - t: The load balancer was created by the controller, not by eksctl, so deleting the cluster first can leave it behind, still billing
+        why: The AWS Load Balancer Controller built the ALB when it saw the Ingress. Delete the Ingress while the controller is still running, and it removes the ALB. Delete the cluster first, and nothing is left to remove it.
+      - t: Pods cost money even after the cluster is deleted
+        why: Pods only run on nodes. When the nodes go, the pods go.
+      - t: It makes the deletion faster
+        why: It's about what's left behind, not speed.
+  - q: On Kubernetes, why does the order service's pod wait 15 seconds in a preStop hook before stopping?
+    answer: 2
+    options:
+      - t: To give the new version time to download
+        why: The new pods start separately. This wait is on the old pod.
+      - t: Because gunicorn needs 15 seconds to start
+        why: preStop runs when a pod is stopping, not starting.
+      - t: Because Kubernetes removes the pod from the load balancer and tells it to stop at the same moment, and the load balancer takes a few seconds to catch up
+        why: Without the wait, the pod could be gone while the ALB is still sending it requests. The sleep keeps it serving until the ALB has stopped. On ECS, the deregistration delay does this in the right order for you.
+      - t: It's required by the AWS Load Balancer Controller
+        why: The controller works without it. The wait is there to avoid dropped requests.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the Kubernetes demo">
+
+The team can't agree about Kubernetes. Kofi says it's the standard; Priya says ECS is enough. Nobody has actually run QuickCart on it, so the argument goes in circles.
+
+So Kofi builds a small EKS cluster one afternoon, runs the order service on it, and shows the team. The demo goes well. Everyone moves on.
+
+Two months later, Ana, reading the AWS bill, finds a cluster nobody remembers, two servers nobody uses, and a load balancer pointing at nothing. The demo was still running.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Someone deletes a test EKS cluster, and the bill doesn't go down to zero. Inside the cluster, a controller had created an AWS load balancer when the app asked for one. That load balancer was never part of the cluster, so deleting the cluster didn't delete it. It keeps running, and billing, with nothing behind it, until someone notices.
+
+Forgotten test clusters, and the resources they made, are one of the most common sources of surprise cloud bills.
+
+</Case>
+
+QuickCart needs two things from this lesson: to understand what Kubernetes really is, so the argument can be settled with facts, and a way to try EKS that is **built and torn down completely** in one sitting.
+
+</Part>
+
+<Part id="idea">
+
+**Kubernetes** does the same job as ECS: it runs your containers, restarts them when they fail, keeps a set number running, and replaces them one by one when you release. It's open source and runs anywhere: on every major cloud, and on your own servers. **EKS** is AWS's managed Kubernetes.
+
+The big idea is how you talk to it. You don't tell Kubernetes what to **do**. You tell it what you **want**, in a file, and it keeps making that true.
+
+<YouKnow title="You already know this: declarative UI">
+
+In SwiftUI, Jetpack Compose or React, you don't write "add this row, then remove that one". You describe what the screen should look like for the current state, and the framework works out the changes. Kubernetes is declarative in the same way. You write `replicas: 2`; it works out whether to create a pod, delete one, or do nothing.
+
+</YouKnow>
+
+<Key>You don't tell Kubernetes what to do. You tell it what you want, and it keeps making that true.</Key>
+
+### The reconcile loop
+
+Inside Kubernetes, small programs called **controllers** each watch one kind of object. Each one runs the same loop, over and over, for ever:
+
+| Step | What happens | Example |
+|---|---|---|
+| **Observe** | Look at what's really running | 1 pod with the label `app: order-service` |
+| **Compare** | Compare it with the **desired state** you wrote | The file says 2. One is missing |
+| **Act** | Change reality to close the gap | Create one pod |
+
+That loop is where self-healing comes from. A pod crashes, a node disappears, someone deletes a pod by mistake: the numbers stop matching, and the controller acts. Nobody has to be awake.
+
+### The objects, compared with ECS
+
+| Kubernetes | What it is | Closest thing on ECS |
+|---|---|---|
+| **Pod** | One running copy of your app: one or more containers that share a network address | Task |
+| **Deployment** | Says "run N pods of this image" and handles releases | Service |
+| **ReplicaSet** | Created by a Deployment, one per version. Keeps exactly N pods of that version | — ECS does this inside the service |
+| **Service** | A fixed name and address in front of pods that come and go | The target group, roughly |
+| **Ingress** | A request for a load balancer, with routing rules | Load balancer and listener |
+| **Node** | A server that pods run on | Hidden on Fargate |
+| **Namespace** | A named folder for objects, like `default` or `kube-system` | The cluster, roughly |
+
+A **Deployment** doesn't create pods itself. It creates a **ReplicaSet** for each version of your app, and the ReplicaSet creates the pods. During a release, the Deployment grows the new ReplicaSet and shrinks the old one. That's also how `kubectl rollout undo` is instant: the old ReplicaSet is still there, just scaled to zero.
+
+### Probes: is it alive, and is it ready?
+
+Kubernetes checks each container with **probes**, small requests it makes on a schedule.
+
+| Probe | The question | If it fails |
+|---|---|---|
+| **Readiness probe** | Can this pod take traffic right now? | The pod is taken out of the Service. It keeps running, and gets traffic again when the probe passes |
+| **Liveness probe** | Is this container stuck beyond repair? | The container is restarted |
+| **Startup probe** (optional) | Has a slow app finished starting? | The other probes wait until it passes |
+
+This is a real difference from ECS. On ECS, a task failing its load balancer health check is **replaced**. On Kubernetes, a pod failing its readiness probe is only **taken out of traffic**, and a failing liveness probe restarts the container in the same pod.
+
+<Mistake title="a liveness probe that's too strict">
+
+Pods restart again and again under load, and `kubectl get pods` shows the `RESTARTS` count climbing.
+
+**Why:** a liveness probe with a very short timeout fails whenever the app is briefly busy, so Kubernetes restarts healthy containers, which makes the load worse.
+
+**The fix:** make the liveness probe lenient: a few failures in a row, a generous timeout, and an initial delay longer than start-up. Keep the strict check in the readiness probe, which only moves traffic.
+
+</Mistake>
+
+### What EKS runs, and what you run
+
+A Kubernetes cluster has two halves.
+
+| Half | What it does | On EKS, who runs it |
+|---|---|---|
+| **Control plane** | The API you talk to, the controllers, the scheduler, and the database of desired state | **AWS**, across several zones. About **$0.10 an hour** per cluster on standard support, roughly $73 a month |
+| **Data plane** | The nodes, where pods actually run | **You**, in one of the ways below |
+
+Each Kubernetes version gets about 14 months of standard support on EKS. After that it moves to extended support, which costs about six times more for the control plane, until you upgrade. So an EKS cluster isn't set up once: it needs upgrading, with its nodes and add-ons, for as long as it exists. Prices change; check the EKS pricing page.
+
+| Where pods run | What it means |
+|---|---|
+| **Managed node group** | EC2 instances that AWS launches and helps you patch and replace. You pay for the instances. This lesson uses one |
+| **Fargate** | No nodes to see: each pod gets its own small Fargate machine. Some features, like daemon sets, don't work |
+| **Auto Mode** | AWS also runs the nodes and core add-ons for you, for an extra fee on top of the instances |
+
+Every pod gets its own IP address from your subnet, and each node size has a limit. A `t3.small` holds about **11 pods**, including Kubernetes' own system pods, however much CPU is free.
+
+### Getting traffic in
+
+A **Service** gives pods a stable name inside the cluster, but nothing outside can reach it. To get an AWS load balancer, you install the **AWS Load Balancer Controller** into the cluster. It watches for **Ingress** objects and builds a real Application Load Balancer for each one.
+
+To build load balancers, the controller needs AWS permissions. You give them to **that controller alone**, not to every pod on the node, with **IAM roles for service accounts** (IRSA): a Kubernetes identity linked to an IAM role. It's the same idea as ECS's task role. EKS also has a newer way to do this, called Pod Identity; the idea is the same.
+
+### Releasing without dropped requests
+
+The settings from [Releases without downtime](/lessons/zero-downtime-releases/) have Kubernetes equivalents:
+
+| ECS | Kubernetes | QuickCart uses |
+|---|---|---|
+| Min running tasks 100% | `maxUnavailable` | 0: never go below 2 ready pods |
+| Max running tasks 200% | `maxSurge` | 1: one extra pod at a time |
+| Health check | Readiness probe | `/health` |
+| Circuit breaker with rollback | No automatic rollback. The rollout stops and waits | `kubectl rollout undo` |
+
+Kubernetes needs **two extra settings** that ECS handles for you. When a pod is removed, Kubernetes takes it out of the Service and sends it SIGTERM **at the same moment**. The load balancer takes a few seconds to catch up, and without help, requests arrive at a pod that has already gone.
+
+| Setting | What it fixes |
+|---|---|
+| **Pod readiness gate** | A new pod only counts as ready once the **load balancer** says it's healthy, not just its own probe. So old pods aren't removed too early |
+| **`preStop` sleep of 15 seconds** | The pod keeps serving for 15 seconds after it's told to stop, while the load balancer stops sending it traffic. Then SIGTERM arrives, and gunicorn finishes and exits |
+
+`terminationGracePeriodSeconds` is Kubernetes' stop timeout. It covers the `preStop` wait **and** the app's shutdown, so QuickCart sets it to 40: 15 for the sleep, 20 for gunicorn's graceful timeout, and 5 to spare.
+
+</Part>
+
+<Part id="see">
+
+Here is the order service's Deployment asking for 2 pods, on a cluster with two nodes. **Delete a pod** and watch the loop put it back. Then change the number of replicas, and stop node B.
+
+<ReconcileLoop />
+
+**What to notice:** you never told Kubernetes to create anything. Every pod it made came from the same three steps: observe, compare, act. And the replacement always gets a **new name**. Pods are disposable: nothing should depend on one particular pod still existing.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $4 a day while it exists: the EKS control plane (about $2.40 a day), two t3.small nodes (about $1 a day together), and a load balancer (about $0.55 a day). Prices are for us-east-1 and change. Delete everything at the end.</Cost>
+
+<Note title="EKS is expensive to forget. Do this lab in one sitting">
+
+The control plane is billed **every hour the cluster exists**, even with nothing running on it: about $0.10 an hour, roughly **$73 a month**. The nodes and the load balancer are billed on top. A Kubernetes version on extended support costs about six times as much, so don't pick an old version. Set aside two hours, do every step including **Clean up**, and check the bill the next day.
+
+</Note>
+
+You'll create an EKS cluster, install the load balancer controller, run QuickCart's order service on it, watch Kubernetes replace a deleted pod, release v2 under load and roll it back, and then delete everything.
+
+You need the `quickcart-orders` repository in ECR with the `v1` and `v2` images from [Releases without downtime](/lessons/zero-downtime-releases/), your `load.py`, and a working AWS login in your terminal as an IAM user or role, **not root**. [Set up your Mac](/lessons/mac-setup/) covers the login.
+
+### Why eksctl, not the console
+
+You can create an EKS cluster in the console, but it takes two IAM roles you create first, a cluster form, a wait, a separate node group form, and then the terminal anyway, because `kubectl` and Helm only run there. **eksctl** is AWS's recommended command-line tool for EKS. One command builds the control plane, a managed node group, their IAM roles and the networking, and connects `kubectl` to the new cluster. It uses CloudFormation underneath, so one more command deletes all of it again. This lab uses eksctl, and still uses the console wherever it has an equivalent.
+
+<Steps>
+
+<Step title="Install the tools">
+
+```sh
+brew install eksctl kubectl helm
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | install programs on your Mac with Homebrew |
+| `eksctl` | creates and deletes EKS clusters |
+| `kubectl` | talks to any Kubernetes cluster: creates, lists and deletes objects |
+| `helm` | installs packaged add-ons, called charts, into a cluster |
+
+Check that each one works:
+
+```sh
+kubectl version --client
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl version` | print the version |
+| `--client` | only this program's version. There's no cluster to ask yet |
+
+<See>
+
+A line starting `Client Version: v1.`, followed by a version number. `eksctl version` and `helm version` print their versions too. Yours will be newer than anything written here.
+
+</See>
+
+</Step>
+
+<Step title="Check who you're logged in as">
+
+The identity that creates the cluster is the one that can use it straight away. Make sure it's the one you'll keep using:
+
+```sh
+aws sts get-caller-identity
+```
+
+| Part | What it means |
+|---|---|
+| `aws sts get-caller-identity` | ask AWS who this terminal is logged in as |
+
+```output
+{
+    "UserId": "AIDAEXAMPLEUSERID",
+    "Account": "111122223333",
+    "Arn": "arn:aws:iam::111122223333:user/quickcart-admin"
+}
+```
+
+Your IDs and name will differ. The `Arn` must **not** end in `:root`.
+
+</Step>
+
+<Step title="Find and tag two subnets">
+
+<ConsolePath path="VPC > Subnets" />
+
+Find the default VPC's subnets in **us-east-1a** and **us-east-1b**: their **VPC** column shows the default VPC. Copy both **Subnet IDs**, and the **VPC ID**. They look like `subnet-` and `vpc-` followed by letters and numbers.
+
+Then tag each of the two subnets, so the load balancer controller knows it may put an internet-facing load balancer there:
+
+<ConsolePath path="VPC > Subnets > your us-east-1a subnet > Tags > Manage tags > Add new tag" />
+
+| Field | Enter |
+|---|---|
+| Key | `kubernetes.io/role/elb` |
+| Value | `1` |
+
+Choose **Save**, then do the same for the us-east-1b subnet.
+
+</Step>
+
+<Step title="Create the cluster">
+
+Put your two subnet IDs in place of `SUBNET_A` and `SUBNET_B`, with a comma and no space between them. The `\` at the end of a line means the command carries on to the next line.
+
+```sh ph="SUBNET_A,SUBNET_B"
+eksctl create cluster \
+  --name quickcart-eks \
+  --region us-east-1 \
+  --vpc-public-subnets SUBNET_A,SUBNET_B \
+  --nodegroup-name quickcart-nodes \
+  --node-type t3.small \
+  --nodes 2 \
+  --managed
+```
+
+| Part | What it means |
+|---|---|
+| `eksctl create cluster` | build a new EKS cluster, with everything it needs |
+| `--name quickcart-eks` | the cluster's name |
+| `--region us-east-1` | the region to build it in |
+| `--vpc-public-subnets SUBNET_A,SUBNET_B` | use these two existing subnets in your default VPC, instead of building a new VPC |
+| `--nodegroup-name quickcart-nodes` | the name of the group of servers |
+| `--node-type t3.small` | the size of each server: 2 vCPUs, 2 GB of memory, about 11 pods |
+| `--nodes 2` | two servers, so there's one in each zone |
+| `--managed` | a managed node group: AWS launches, and helps you update, the servers |
+
+There's no `--version`, on purpose: eksctl picks a current version on standard support.
+
+<See>
+
+Many lines over about 15 to 20 minutes, as eksctl builds the control plane and then the nodes. It ends with a line like `EKS cluster "quickcart-eks" in "us-east-1" region is ready`. It has also saved the cluster's details for `kubectl`, so the next command just works.
+
+</See>
+
+Check the nodes:
+
+```sh
+kubectl get nodes
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get nodes` | list the servers in the cluster |
+
+```output
+NAME                            STATUS   ROLES    AGE   VERSION
+ip-172-31-17-201.ec2.internal   Ready    <none>   3m    v1.33.4-eks-a1b2c3d
+ip-172-31-90-12.ec2.internal    Ready    <none>   3m    v1.33.4-eks-a1b2c3d
+```
+
+Your names, ages and versions will differ. Both must say **Ready**. In **EC2 → Instances** there are now two new instances: they're yours, and on your bill.
+
+<Mistake title="kubectl says you must be logged in">
+
+```output
+error: You must be logged in to the server (Unauthorized)
+```
+
+**Why:** access to the Kubernetes API inside the cluster is separate from access to AWS. Only the identity that created the cluster is given access automatically. If this terminal uses a different profile or role, Kubernetes doesn't know it.
+
+**The fix:** switch back to the identity that created the cluster. Or, as that identity, give yours access in **EKS → Clusters → quickcart-eks → Access → Create access entry**, with the policy `AmazonEKSClusterAdminPolicy` and the scope **Cluster**.
+
+</Mistake>
+
+</Step>
+
+<Step title="Let one pod have its own IAM role">
+
+The load balancer controller needs AWS permissions. This command switches on the feature that lets a single Kubernetes identity use an IAM role:
+
+```sh
+eksctl utils associate-iam-oidc-provider --cluster quickcart-eks --region us-east-1 --approve
+```
+
+| Part | What it means |
+|---|---|
+| `eksctl utils associate-iam-oidc-provider` | register the cluster with IAM as an identity provider, so IAM can trust identities from inside it |
+| `--cluster quickcart-eks` | which cluster |
+| `--region us-east-1` | where the cluster is |
+| `--approve` | actually do it. Without this, eksctl only shows what it would do |
+
+<See>
+
+A line saying the IAM OIDC provider was created for the cluster. In **IAM → Identity providers**, a new provider whose address mentions `oidc.eks.us-east-1`.
+
+</See>
+
+</Step>
+
+<Step title="Create the controller's IAM policy">
+
+The controller's permissions are published as a JSON file called `iam_policy.json`, linked from the **AWS Load Balancer Controller installation guide** in the Amazon EKS documentation. It's long, and AWS updates it with each controller release, so always take the current file from the guide rather than an old copy. Download it, and open it in a text editor.
+
+<ConsolePath path="IAM > Policies > Create policy > JSON" />
+
+Delete everything in the editor, then paste in the whole contents of `iam_policy.json`. Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Policy name | `QuickCartLBControllerPolicy` |
+
+Choose **Create policy**.
+
+<See>
+
+The policy in the list. Open it and copy its ARN: `arn:aws:iam::111122223333:policy/QuickCartLBControllerPolicy`, with your account ID.
+
+</See>
+
+</Step>
+
+<Step title="Give the controller that policy">
+
+This step and the next have **no console equivalent**. Linking an IAM role to an identity inside Kubernetes takes a role with a special trust policy plus a Kubernetes object; eksctl does both in one command. Put your account ID in the ARN:
+
+```sh ph="111122223333"
+eksctl create iamserviceaccount \
+  --cluster quickcart-eks \
+  --region us-east-1 \
+  --namespace kube-system \
+  --name aws-load-balancer-controller \
+  --role-name QuickCartLBControllerRole \
+  --attach-policy-arn arn:aws:iam::111122223333:policy/QuickCartLBControllerPolicy \
+  --approve
+```
+
+| Part | What it means |
+|---|---|
+| `eksctl create iamserviceaccount` | create a Kubernetes service account (an identity for pods) and an IAM role linked to it |
+| `--namespace kube-system` | put it with Kubernetes' own system programs |
+| `--name aws-load-balancer-controller` | the service account's name. The controller will run as this identity |
+| `--role-name QuickCartLBControllerRole` | the IAM role's name, so you can find it later |
+| `--attach-policy-arn` | give the role the policy you just created |
+| `--approve` | actually do it |
+
+<See>
+
+About a minute of output, including a CloudFormation stack being created, and a line saying the service account was created.
+
+</See>
+
+</Step>
+
+<Step title="Install the controller with Helm">
+
+First tell Helm where AWS publishes its EKS charts. The repository address is in the same installation guide, in its Helm section; put it in place of `CHART_REPO_URL`:
+
+```sh ph="CHART_REPO_URL"
+helm repo add eks CHART_REPO_URL
+```
+
+| Part | What it means |
+|---|---|
+| `helm repo add` | remember a chart repository, so you can install from it |
+| `eks` | the short name you'll use for it |
+| `CHART_REPO_URL` | replace this with the eks-charts repository address from the installation guide |
+
+```output
+"eks" has been added to your repositories
+```
+
+Now install the controller. Put your VPC ID in place of `VPC_ID`:
+
+```sh ph="VPC_ID"
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  --namespace kube-system \
+  --set clusterName=quickcart-eks \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set region=us-east-1 \
+  --set vpcId=VPC_ID
+```
+
+| Part | What it means |
+|---|---|
+| `helm install aws-load-balancer-controller` | install a chart, and call this installation `aws-load-balancer-controller` |
+| `eks/aws-load-balancer-controller` | the chart: from the `eks` repository, the one called `aws-load-balancer-controller` |
+| `--namespace kube-system` | install it next to the service account you made |
+| `--set clusterName=quickcart-eks` | tell it which cluster it's in, so it can name and tag what it builds |
+| `--set serviceAccount.create=false` | don't make a new identity |
+| `--set serviceAccount.name=aws-load-balancer-controller` | use the one eksctl made, with the IAM role |
+| `--set region=us-east-1` and `--set vpcId=VPC_ID` | tell it where it is. Without these, it tries to look them up from the node, which can fail |
+
+<See>
+
+A few lines ending in `STATUS: deployed`, and a note that the controller is installed.
+
+</See>
+
+Check it's running:
+
+```sh
+kubectl get deployment --namespace kube-system aws-load-balancer-controller
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get deployment` | show a Deployment and how many of its pods are ready |
+| `--namespace kube-system` | look in the `kube-system` namespace, not `default` |
+| `aws-load-balancer-controller` | which Deployment |
+
+```output
+NAME                           READY   UP-TO-DATE   AVAILABLE   AGE
+aws-load-balancer-controller   2/2     2            2           70s
+```
+
+If it shows `0/2`, wait a minute and run it again. Count what you just did to connect a load balancer: an identity provider, a policy, a service account, a chart. On ECS it was one section of the service form. That difference belongs in [the ECS or EKS decision](/lessons/ecs-or-eks/).
+
+</Step>
+
+<Step title="Turn on readiness gates">
+
+```sh
+kubectl label namespace default elbv2.k8s.aws/pod-readiness-gate-inject=enabled
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl label` | add a label to an object |
+| `namespace default` | the object: the `default` namespace, where your app will run |
+| `elbv2.k8s.aws/pod-readiness-gate-inject=enabled` | the label the controller looks for. Pods created in this namespace from now on get a readiness gate |
+
+```output
+namespace/default labeled
+```
+
+From now on, a new pod here only counts as ready once the **load balancer** reports it healthy. Label the namespace **before** creating the pods: pods that already exist don't get the gate.
+
+</Step>
+
+<Step title="Describe the app">
+
+In your `order-service` folder, create `order-service.yaml`. It describes three objects, separated by `---` lines. Put your account ID in the image address.
+
+```yaml title="order-service.yaml" ph="111122223333"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  labels:
+    app: order-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: app
+          image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+spec:
+  selector:
+    app: order-service
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: order-service
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: order-service
+                port:
+                  number: 80
+```
+
+#### The Deployment
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `apiVersion: apps/v1`, `kind: Deployment` | Which kind of object this is | Required | Never |
+| `metadata.name` | The Deployment's name, used by `kubectl` commands | Required | Never, once created |
+| `replicas: 2` | The desired state: 2 pods | 1 pod | To scale by hand, or let an autoscaler set it |
+| `selector.matchLabels` | Which pods belong to this Deployment: those labelled `app: order-service` | Required | Never. It can't be changed after creation |
+| `strategy.rollingUpdate.maxUnavailable: 0` | During a release, never have fewer than 2 ready pods | 25% of the replicas may be missing | Higher, to release faster when spare capacity doesn't matter |
+| `strategy.rollingUpdate.maxSurge: 1` | During a release, run at most 1 extra pod | 25% extra, rounded up | Higher, to release faster when you have spare node capacity |
+| `template.metadata.labels` | Labels on every pod. Must match the selector | The Deployment is rejected | Add labels for version or team |
+| `terminationGracePeriodSeconds: 40` | Kubernetes' stop timeout: 15 s preStop + 20 s gunicorn + 5 spare | 30 seconds: gunicorn could be killed mid-request | If your requests or shutdown take longer |
+| `securityContext.runAsNonRoot: true` | Refuse to start the container as root | Nothing stops a root container | Never |
+| `securityContext.runAsUser: 1001` | Run as user 1001, the `appuser` from the Dockerfile | Uses the image's `USER` | Only if the image's user changes |
+| `containers[].name: app` | The container's name, used by `kubectl set image` | Required | Never |
+| `image` | The image to run, from ECR, by tag | Required | Every release |
+| `ports.containerPort: 8080` | The port the app listens on. Mostly documentation, like `EXPOSE` | The app still works; tools that read it can't | If the app's port changes |
+| `readinessProbe` | Ask `/health` every 5 s; 2 failures in a row takes the pod out of traffic | The pod gets traffic as soon as it starts, before the app is ready | Tighter for fast apps, looser for slow ones |
+| `livenessProbe` | Ask `/health` every 10 s after 15 s; 3 failures in a row restart the container | A stuck app is never restarted | Keep it lenient. See the mistake in [the idea](#idea) |
+| `resources.requests` | What the scheduler reserves on a node: a tenth of a CPU and 128 MB | The pod may land on a node with no room, and be squeezed | Measure real use, then set it a little above |
+| `resources.limits.memory: 256Mi` | The most memory the container may use. Above it, it's killed, shown as `OOMKilled` | It can use all of a node's memory, and starve its neighbours | When the app really needs more |
+| `allowPrivilegeEscalation: false` | The process can never gain more privileges than it starts with | Allowed | Never |
+| `lifecycle.preStop` `sleep 15` | Keep serving for 15 s after being told to stop, while the load balancer catches up | Requests arrive at a pod that has already gone | Match it to how long your load balancer takes to deregister |
+
+#### The Service and the Ingress
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| Service `selector: app: order-service` | Send traffic to pods with this label, as long as they're ready | The Service has no pods behind it | Never, while the labels stay the same |
+| Service `port: 80`, `targetPort: 8080` | Inside the cluster, `order-service:80` reaches the pods on 8080 | Required | If the app's port changes |
+| `ingressClassName: alb` | Hand this Ingress to the AWS Load Balancer Controller | No controller claims it, and no load balancer is built | Never, on EKS with this controller |
+| `alb.ingress.kubernetes.io/scheme: internet-facing` | A public load balancer | `internal`: reachable only inside the VPC | For services only other services call |
+| `alb.ingress.kubernetes.io/target-type: ip` | Register pod IPs directly, like Fargate tasks | `instance`: traffic goes via a port on each node, an extra hop | Rarely |
+| `alb.ingress.kubernetes.io/healthcheck-path: /health` | The ALB's health check path | `/`, which works here, but isn't a real readiness check | If the health path changes |
+| `target-group-attributes: deregistration_delay.timeout_seconds=30` | The drain, as on ECS | 300 seconds: slow releases | Longer than your slowest request |
+| `rules` with `path: /` and `pathType: Prefix` | Send every path to the `order-service` Service on port 80 | Required | To route different paths to different Services |
+
+This Ingress listens on HTTP port 80 only. For HTTPS you'd add a certificate from Certificate Manager with the `alb.ingress.kubernetes.io/certificate-arn` annotation and a listener on 443, as in [Domain names and HTTPS](/lessons/dns-and-https/).
+
+<Mistake title="the pod refuses to start as a non-root user">
+
+If the image's Dockerfile says `USER appuser` rather than a number, the pod never starts, and `kubectl describe pod` shows:
+
+```output
+Error: container has runAsNonRoot and image has non-numeric user (appuser), cannot verify user is non-root
+```
+
+**Why:** Kubernetes can only check a user **number** is not 0. A name could mean anything.
+
+**The fix:** use a numeric `USER 1001` in the Dockerfile, as QuickCart's does, or set `runAsUser` in the manifest.
+
+</Mistake>
+
+</Step>
+
+<Step title="Start it">
+
+```sh
+kubectl apply -f order-service.yaml
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl apply` | make the cluster match a file: create what's new, update what changed |
+| `-f order-service.yaml` | the file to use |
+
+```output
+deployment.apps/order-service created
+service/order-service created
+ingress.networking.k8s.io/order-service created
+```
+
+```sh
+kubectl get pods
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get pods` | list the pods in the `default` namespace |
+
+```output
+NAME                             READY   STATUS    RESTARTS   AGE
+order-service-7d4b9c8f6-x2kqp    1/1     Running   0          40s
+order-service-7d4b9c8f6-m8zrt    1/1     Running   0          40s
+```
+
+The part in the middle of each name comes from the ReplicaSet; the end is random. Yours differ.
+
+Now wait for the load balancer:
+
+```sh
+kubectl get ingress
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get ingress` | list Ingresses, with the address of the load balancer built for each |
+
+```output
+NAME            CLASS   HOSTS   ADDRESS                                                                  PORTS   AGE
+order-service   alb     *       k8s-default-orderser-1a2b3c4d5e-1234567890.us-east-1.elb.amazonaws.com   80      3m
+```
+
+The `ADDRESS` appears after two or three minutes; until then, it's empty. In **EC2 → Load balancers**, a new load balancer starting with `k8s-default-` exists. Your YAML file made a real AWS resource.
+
+<Mistake title="the Ingress never gets an address">
+
+`kubectl get ingress` stays empty in the `ADDRESS` column for more than five minutes.
+
+**Why:** usually the controller couldn't find subnets for the load balancer, because the `kubernetes.io/role/elb` tag is missing, or the controller isn't running.
+
+**The fix:** run `kubectl describe ingress order-service` and read the **Events** at the bottom. A message about auto-discovering subnets means the tags; add them as in step 3. Then check the controller shows `2/2` as in step 8.
+
+</Mistake>
+
+</Step>
+
+<Step title="Reach it, and delete a pod">
+
+Copy the `ADDRESS` from the last command:
+
+```sh ph="INGRESS_ADDRESS"
+curl INGRESS_ADDRESS/
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch the page and print it |
+| `INGRESS_ADDRESS` | replace this with the address from `kubectl get ingress` |
+
+```output
+{"served_by":"order-service-7d4b9c8f6-x2kqp","service":"order-service","version":"v1"}
+```
+
+A pod's hostname is its name, so `served_by` tells you which pod answered. Run it a few times: it switches between the two.
+
+Now delete one of them, using a name from your `kubectl get pods`:
+
+```sh ph="POD_NAME"
+kubectl delete pod POD_NAME
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl delete pod` | delete one pod |
+| `POD_NAME` | replace this with one of your pod names |
+
+```sh
+kubectl get pods
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get pods` | list the pods again, to see what Kubernetes did |
+
+<See>
+
+Two pods again, `1/1 Running`. One has the name you didn't delete; the other is **new**, with an `AGE` of a few seconds. You changed nothing in the file. The reconcile loop saw 1 where you'd asked for 2, and acted.
+
+</See>
+
+</Step>
+
+<Step title="Release v2 under load, then roll back">
+
+**Window 1:** start the load test, with the Ingress address:
+
+```sh ph="INGRESS_ADDRESS"
+python3 load.py http://INGRESS_ADDRESS/ 240
+```
+
+| Part | What it means |
+|---|---|
+| `python3 load.py` | the load test from [Releases without downtime](/lessons/zero-downtime-releases/) |
+| `http://INGRESS_ADDRESS/` | the EKS load balancer this time |
+| `240` | four minutes |
+
+**Window 2:** change the image. Put your account ID in:
+
+```sh ph="111122223333"
+kubectl set image deployment/order-service app=111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl set image` | change the image of a container in an object |
+| `deployment/order-service` | which object |
+| `app=` | which container: the one named `app` |
+| the rest | the new image: the `v2` tag |
+
+```output
+deployment.apps/order-service image updated
+```
+
+Watch the release:
+
+```sh
+kubectl rollout status deployment/order-service
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl rollout status` | wait, printing progress, until the release finishes or fails |
+
+<See>
+
+Lines like `Waiting for deployment "order-service" rollout to finish`, one pod at a time because of `maxSurge: 1`, then `deployment "order-service" successfully rolled out`. When window 1 finishes, write down its totals. The target is `failed: 0`.
+
+</See>
+
+Now go back to v1, with one command:
+
+```sh
+kubectl rollout undo deployment/order-service
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl rollout undo` | go back to the previous version. The old ReplicaSet is scaled up again; nothing is rebuilt |
+
+```output
+deployment.apps/order-service rolled back
+```
+
+`curl INGRESS_ADDRESS/` shows `"version":"v1"` again within a minute.
+
+<Note title="Didn't do the ECS lab?">
+
+If you have no `v2` image, build and push it as in the **Build and push v2** step of [Releases without downtime](/lessons/zero-downtime-releases/).
+
+</Note>
+
+</Step>
+
+<Step title="Release a broken version">
+
+```sh ph="111122223333"
+kubectl set image deployment/order-service app=111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v9-broken
+```
+
+| Part | What it means |
+|---|---|
+| `v9-broken` | a tag that doesn't exist |
+
+```sh
+kubectl get pods
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get pods` | list the pods, old and new |
+
+<See>
+
+The two old pods still `1/1 Running`, and one new pod with the status `ErrImagePull` or `ImagePullBackOff`, `0/1`. Because `maxUnavailable` is 0, Kubernetes won't remove an old pod until a new one is ready, so the site keeps working.
+
+</See>
+
+This is where ECS and Kubernetes differ. ECS's circuit breaker would roll back by itself. Kubernetes **stops and waits**. `kubectl rollout status` would wait up to the Deployment's progress deadline, 10 minutes by default, then report `exceeded its progress deadline`, and still not roll back. You undo it:
+
+```sh
+kubectl rollout undo deployment/order-service
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl rollout undo` | go back to the previous version, the v1 ReplicaSet, which never stopped running |
+| `deployment/order-service` | which Deployment |
+
+<See>
+
+`deployment.apps/order-service rolled back`, and within a few seconds `kubectl get pods` shows only healthy pods again.
+
+</See>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+**Do this in order.** The load balancer was built by the controller, not by eksctl. Delete the app while the controller is still running, so it removes the load balancer too.
+
+**1. Delete the app:**
+
+```sh
+kubectl delete -f order-service.yaml
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl delete -f` | delete every object described in the file, including the Ingress, and so the load balancer |
+
+```output
+deployment.apps "order-service" deleted
+service "order-service" deleted
+ingress.networking.k8s.io "order-service" deleted
+```
+
+**2. Check the load balancer has gone.** Wait two minutes, then look in **EC2 → Load balancers**. There must be no load balancer starting with `k8s-default-`. If one is still there after five minutes, delete it by hand, and its target group in **EC2 → Target groups**.
+
+**3. Delete the cluster.** This removes the nodes, the node group, the control plane, the service account's IAM role and the other CloudFormation stacks eksctl made:
+
+```sh
+eksctl delete cluster --name quickcart-eks --region us-east-1 --wait
+```
+
+| Part | What it means |
+|---|---|
+| `eksctl delete cluster` | delete the cluster and everything eksctl created for it |
+| `--name quickcart-eks` | which cluster |
+| `--region us-east-1` | where it is |
+| `--wait` | don't return until it's completely gone |
+
+<See>
+
+10 to 15 minutes of output, ending in a line saying all cluster resources were deleted.
+
+</See>
+
+**4. Delete the policy.** **IAM → Policies**, search for `QuickCartLBControllerPolicy`, select it, **Delete**, and type its name to confirm.
+
+**5. Remove the subnet tags** (optional, harmless to keep): **VPC → Subnets**, each of the two subnets, **Tags → Manage tags**, remove `kubernetes.io/role/elb`.
+
+**6. The image repository**, if you've finished with containers: **Amazon ECR → Repositories**, tick `quickcart-orders`, **Delete**, type `delete`.
+
+**7. Check nothing is left:**
+
+| Where | Should show |
+|---|---|
+| **EKS → Clusters** | nothing |
+| **EC2 → Instances** | no running instances from this lab; the two nodes show **Terminated** |
+| **EC2 → Load balancers** | nothing starting with `k8s-` |
+| **CloudFormation → Stacks** | no stacks starting with `eksctl-quickcart-eks` |
+| **IAM → Identity providers** | no provider mentioning this cluster. If one is left, delete it |
+
+<See>
+
+All five checks pass. Nothing from this lab is still billing. Check the **Billing** page tomorrow to be sure.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command or idea | What it does |
+|---|---|
+| Desired state | You write what you want; controllers keep making it true |
+| Reconcile loop | Observe, compare, act. Over and over |
+| Pod / Deployment / ReplicaSet | One copy / "run N copies" / one version's set of copies |
+| Service / Ingress | A stable name inside the cluster / a load balancer from outside |
+| Readiness vs liveness probe | Take out of traffic / restart the container |
+| `kubectl apply -f FILE` | Make the cluster match a file |
+| `kubectl get pods` | List pods. `describe pod NAME` explains problems in its Events |
+| `kubectl delete pod NAME` | Delete one pod. The Deployment replaces it |
+| `kubectl set image deployment/NAME app=IMAGE` | Release a new image |
+| `kubectl rollout status` / `undo` | Watch a release / go back one version |
+| EKS control plane | About $0.10 an hour on standard support. Upgrade before extended support |
+| t3.small | About 11 pods, however much CPU is free |
+| Zero downtime on EKS | Readiness gate label, `preStop` sleep, `terminationGracePeriodSeconds` |
+| Clean up | `kubectl delete -f` first, then `eksctl delete cluster` |
+
+</Cheat>
+
+</Part>

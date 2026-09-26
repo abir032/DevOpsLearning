@@ -1,0 +1,180 @@
+---
+/*
+ * How this course works: the "forgot to clean up" bill.
+ * Teaches: things that charge by the hour keep charging until you delete them,
+ * and a budget alert tells you but doesn't stop anything.
+ * Prices are rough us-east-1 figures, rounded, and change over time.
+ */
+const RES = [
+  { id: "nat", name: "NAT gateway", day: 1.1, note: "about $0.045 an hour, plus data" },
+  { id: "alb", name: "Load balancer", day: 0.6, note: "about $0.0225 an hour, plus its IP addresses" },
+  { id: "eks", name: "EKS cluster and two small servers", day: 4.4, note: "about $0.10 an hour for the cluster, plus the servers" },
+  { id: "rds", name: "Small database", day: 0.45, note: "about $0.016 an hour, plus storage" },
+];
+---
+<div class="viz" data-track="start" data-viz="bill">
+  <div class="viz-controls">
+    <span class="lbl" id="bm-lbl">Start</span>
+    <div class="seg" role="group" aria-labelledby="bm-lbl">
+      {RES.map((r) => <button type="button" data-res={r.id} aria-pressed="false">{r.name.replace(" and two small servers", "")}</button>)}
+    </div>
+    <button class="btn line" type="button" data-act="day">Let a day pass</button>
+    <button class="btn" type="button" data-act="week">Let a week pass</button>
+    <button class="btn" type="button" data-act="clean">Clean up everything</button>
+    <button class="btn" type="button" data-act="reset">Start again</button>
+  </div>
+  <div class="bm">
+    <ul class="bm-list" aria-label="What is running">
+      {RES.map((r) => (
+        <li data-row={r.id} data-day={r.day}>
+          <span class="bm-st">Not running</span>
+          <b>{r.name}</b>
+          <span class="bm-rate">about ${r.day.toFixed(2)} a day</span>
+          <small>{r.note}</small>
+        </li>
+      ))}
+    </ul>
+    <div class="bm-bill">
+      <div class="bm-top"><span>Day <b data-n="day">0</b></span><span>Running now: <b data-n="rate">$0.00</b> a day</span></div>
+      <div class="bm-total"><span data-n="total">$0.00</span><small>on this month's bill</small></div>
+      <div class="bm-meter" role="img" aria-label="Spend against a $10 budget" data-n="meter">
+        <div class="bm-fill" data-n="fill"></div>
+        <span class="bm-mark" style="left:85%"><i>85%</i></span>
+        <span class="bm-mark" style="left:100%"><i>$10</i></span>
+      </div>
+      <div class="bm-alerts" data-n="alerts"><span class="bm-none">No budget alerts yet</span></div>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Nothing running</span>Start one or more resources, then let the days pass. The budget is <b>$10 a month</b>.</div>
+</div>
+
+<style is:global>
+  [data-viz="bill"] .bm { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; padding: 14px 16px; }
+  [data-viz="bill"] .bm-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  [data-viz="bill"] .bm-list li { border: 1px solid var(--rule); border-radius: 9px; padding: 8px 11px; background: var(--bg); display: grid; grid-template-columns: 1fr auto; gap: 0 10px; transition: border-color .2s, background .2s; }
+  [data-viz="bill"] .bm-list li b { font-size: 14.5px; grid-column: 1; }
+  [data-viz="bill"] .bm-list li small { grid-column: 1 / -1; color: var(--ink-3); font-size: 12.5px; }
+  [data-viz="bill"] .bm-st { grid-column: 1 / -1; font-size: 12px; font-weight: 800; color: var(--ink-3); }
+  [data-viz="bill"] .bm-rate { grid-column: 2; grid-row: 2; font-size: 13px; color: var(--ink-2); font-weight: 700; }
+  [data-viz="bill"] .bm-list li.on { border-color: var(--warn); background: var(--warn-bg); }
+  [data-viz="bill"] .bm-list li.on .bm-st { color: var(--warn); }
+  [data-viz="bill"] .bm-bill { border: 1px solid var(--rule); border-radius: 10px; padding: 12px 14px; background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
+  [data-viz="bill"] .bm-top { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; font-size: 13.5px; color: var(--ink-2); }
+  [data-viz="bill"] .bm-total span { display: block; font-size: 40px; font-weight: 900; letter-spacing: -.02em; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  [data-viz="bill"] .bm-total small { color: var(--ink-3); font-size: 13px; }
+  [data-viz="bill"] .bm-meter { position: relative; height: 14px; border-radius: 7px; background: var(--sunk); border: 1px solid var(--rule); margin: 4px 22px 18px 0; }
+  [data-viz="bill"] .bm-fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 7px; background: var(--ok); transition: width .5s ease, background .3s; }
+  [data-viz="bill"] .bm-fill.warn { background: var(--warn); }
+  [data-viz="bill"] .bm-fill.over { background: var(--bad); }
+  [data-viz="bill"] .bm-mark { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink-2); }
+  [data-viz="bill"] .bm-mark i { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); font-style: normal; font-size: 11.5px; font-weight: 700; color: var(--ink-2); white-space: nowrap; }
+  [data-viz="bill"] .bm-alerts { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+  [data-viz="bill"] .bm-alerts div { border: 1px solid var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 6px 9px; }
+  [data-viz="bill"] .bm-none { color: var(--ink-3); }
+  @media (prefers-reduced-motion: reduce) { [data-viz="bill"] .bm-fill, [data-viz="bill"] .bm-list li { transition: none; } }
+  @media (max-width: 700px) { [data-viz="bill"] .bm { grid-template-columns: 1fr; } }
+</style>
+
+<script>
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="bill"]').forEach((root) => {
+    if (!once(root)) return;
+    const BUDGET = 10;
+    const q = (n: string) => root.querySelector<HTMLElement>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const rows = [...root.querySelectorAll<HTMLElement>("[data-row]")];
+    const resBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-res]")];
+    const on = new Set<string>();
+    let day = 0;
+    let total = 0;
+    let alerted = 0; /* 0 none, 1 = 85% sent, 2 = 100% sent */
+    const money = (n: number) => "$" + n.toFixed(2);
+    const rate = () => rows.filter((r) => on.has(r.dataset.row!)).reduce((s, r) => s + Number(r.dataset.day), 0);
+    /* "NAT gateway" stays as it is; "Load balancer" becomes "load balancer" */
+    const lc = (t: string) => (/^[A-Z][A-Z]/.test(t) ? t : t[0].toLowerCase() + t.slice(1));
+    const nameOf = (id: string) => lc(rows.find((r) => r.dataset.row === id)!.querySelector("b")!.textContent!);
+    const names = () => rows.filter((r) => on.has(r.dataset.row!)).map((r) => nameOf(r.dataset.row!));
+
+    function render() {
+      press(resBtns, (b) => on.has(b.dataset.res!));
+      rows.forEach((r) => {
+        const live = on.has(r.dataset.row!);
+        r.classList.toggle("on", live);
+        r.querySelector(".bm-st")!.textContent = live ? "Running: charging every hour" : "Not running";
+      });
+      q("day").textContent = String(day);
+      q("rate").textContent = money(rate());
+      q("total").textContent = money(total);
+      const pct = Math.min(100, (total / BUDGET) * 100);
+      const fill = q("fill");
+      fill.style.width = pct + "%";
+      fill.className = "bm-fill" + (total >= BUDGET ? " over" : total >= BUDGET * 0.85 ? " warn" : "");
+      q("meter").setAttribute("aria-label", `Spend so far ${money(total)} of a $10 budget`);
+    }
+
+    function addAlert(text: string) {
+      const box = q("alerts");
+      box.querySelector(".bm-none")?.remove();
+      const d = document.createElement("div");
+      d.innerHTML = text;
+      box.appendChild(d);
+    }
+
+    function pass(days: number) {
+      const r = rate();
+      if (!r) {
+        day += days; render();
+        tell(say, `Day ${day}`, "Nothing is running, so nothing was charged. Time on its own costs nothing.", "good");
+        return;
+      }
+      const before = total;
+      let extra = "";
+      /* one day at a time, so an alert shows the day it was really crossed */
+      for (let d = 0; d < days; d++) {
+        total += r;
+        day++;
+        if (alerted < 1 && total >= BUDGET * 0.85) {
+          alerted = 1;
+          addAlert(`<b>Email, day ${day}:</b> your actual spend has passed 85% of your $10 budget.`);
+          extra = " A <b>budget alert</b> email arrived. It tells you. It does not stop anything.";
+        }
+        if (alerted < 2 && total >= BUDGET) {
+          alerted = 2;
+          addAlert(`<b>Email, day ${day}:</b> your actual spend has passed 100% of your $10 budget.`);
+          extra = " You are now <b>over budget</b>. The alert emails arrived, but everything is still running and still charging.";
+        }
+      }
+      render();
+      const month = r * 30;
+      tell(say, `Day ${day}: ${money(total)} so far`,
+        `${days === 1 ? "One day" : days + " days"} added <b>${money(total - before)}</b> for the ${names().join(", ")}. Left running for a whole month, that's about <b>${money(month)}</b>.${extra}`,
+        total >= BUDGET ? "bad" : "");
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.res) {
+        const id = b.dataset.res;
+        const name = nameOf(id);
+        if (on.has(id)) { on.delete(id); render(); tell(say, "Deleted", `You deleted the <b>${name}</b>. It stops charging from this hour. What it already cost stays on the bill.`, "good"); }
+        else { on.add(id); render(); tell(say, "Started", `The <b>${name}</b> is running. It charges every hour, whether anyone uses it or not. Now let some days pass.`); }
+      } else if (b.dataset.act === "day") pass(1);
+      else if (b.dataset.act === "week") pass(7);
+      else if (b.dataset.act === "clean") {
+        const had = on.size;
+        on.clear(); render();
+        tell(say, "Cleaned up", had
+          ? `Everything is deleted. The bill stops growing at <b>${money(total)}</b>. Let more days pass: the number doesn't move.`
+          : "Nothing was running, so there was nothing to clean up.", "good");
+      } else if (b.dataset.act === "reset") {
+        on.clear(); day = 0; total = 0; alerted = 0;
+        q("alerts").innerHTML = '<span class="bm-none">No budget alerts yet</span>';
+        render();
+        tell(say, "Nothing running", "Start one or more resources, then let the days pass. The budget is <b>$10 a month</b>.");
+      }
+    });
+  }));
+</script>

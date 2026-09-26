@@ -1,0 +1,268 @@
+---
+/*
+ * Jenkins: the controller and its agents.
+ * Teaches: the controller schedules and agents build. Builds that run on the
+ * controller compete with the thing every other build depends on.
+ */
+---
+<div class="viz" data-track="auto" data-viz="jenkins-sched">
+  <div class="viz-controls">
+    <span class="lbl" id="js-lbl">Executors on the controller</span>
+    <div class="seg" role="group" aria-labelledby="js-lbl">
+      <button type="button" data-ctrl="0" aria-pressed="true">0</button>
+      <button type="button" data-ctrl="2" aria-pressed="false">2</button>
+    </div>
+    <button class="btn line" type="button" data-a="queue">Queue a build</button>
+    <button class="btn" type="button" data-a="heavy">Queue a heavy build</button>
+    <button class="btn" type="button" data-a="agent">Add an agent</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the controller and agents</p>
+  <div class="viz-stage">
+    <div class="js-grid">
+      <section class="js-col" aria-label="Build queue">
+        <h3 class="js-h">Build queue</h3>
+        <p class="js-sub">waiting for a free executor</p>
+        <ol class="js-queue" data-n="queue"><li class="js-empty">Empty</li></ol>
+      </section>
+      <section class="js-col" aria-label="Controller">
+        <h3 class="js-h">Controller</h3>
+        <p class="js-sub">the brain: schedules, stores, serves the UI</p>
+        <div class="js-ctrl" data-n="ctrl">
+          <ul class="js-duties">
+            <li><span>Web UI and API</span><b data-n="ui" class="ok">responsive</b></li>
+            <li><span>Scheduler</span><b data-n="sched" class="ok">running</b></li>
+            <li><span>JENKINS_HOME</span><b>jobs, history, credentials</b></li>
+          </ul>
+          <div class="js-load"><span>CPU and memory</span><div class="js-bar"><i data-n="bar" style="width:15%"></i></div><b data-n="pct">15%</b></div>
+          <div class="js-slots" data-n="cslots"><p class="js-none">No executors. Builds never run here.</p></div>
+        </div>
+      </section>
+      <section class="js-col" aria-label="Agents">
+        <h3 class="js-h">Agents</h3>
+        <p class="js-sub">the hands: each executor runs one build</p>
+        <div class="js-agents" data-n="agents"></div>
+      </section>
+    </div>
+    <p class="js-count" data-n="count">Waiting 0 · Running 0 · Finished 0</p>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>The controller has <b>0 executors</b>, so every build goes to an agent. Choose <b>Queue a build</b> a few times.</div>
+</div>
+
+<style is:global>
+  [data-viz="jenkins-sched"] .js-grid { display: grid; grid-template-columns: 1fr 1.25fr 1.25fr; gap: 14px; min-width: 640px; padding: 6px 2px 4px; }
+  [data-viz="jenkins-sched"] .js-h { margin: 0; font-size: 15px; }
+  [data-viz="jenkins-sched"] .js-sub { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); line-height: 1.35; }
+  [data-viz="jenkins-sched"] .js-queue { list-style: none; margin: 0; padding: 8px; min-height: 150px; border: 1.5px dashed var(--rule-2); border-radius: 10px; display: flex; flex-direction: column; gap: 6px; }
+  [data-viz="jenkins-sched"] .js-empty, [data-viz="jenkins-sched"] .js-none { color: var(--ink-3); font-size: 13.5px; margin: 0; }
+  [data-viz="jenkins-sched"] .js-chip { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 700; padding: 5px 9px; border-radius: 7px; background: var(--sunk); border: 1.5px solid var(--rule-2); }
+  [data-viz="jenkins-sched"] .js-chip.heavy { border-color: var(--auto); }
+  [data-viz="jenkins-sched"] .js-chip small { font-weight: 400; color: var(--ink-2); font-size: 12.5px; }
+  [data-viz="jenkins-sched"] .js-ctrl { border: 2px solid var(--auto); border-radius: 12px; padding: 10px 12px; background: color-mix(in srgb, var(--auto) 6%, var(--surface)); }
+  [data-viz="jenkins-sched"] .js-ctrl.stalled { border-color: var(--bad); background: var(--bad-bg); }
+  [data-viz="jenkins-sched"] .js-duties { list-style: none; margin: 0 0 8px; padding: 0; font-size: 13.5px; }
+  [data-viz="jenkins-sched"] .js-duties li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--rule); }
+  [data-viz="jenkins-sched"] .js-duties b { font-weight: 700; text-align: right; }
+  [data-viz="jenkins-sched"] .js-duties b.ok { color: var(--ok); }
+  [data-viz="jenkins-sched"] .js-duties b.warn { color: var(--warn); }
+  [data-viz="jenkins-sched"] .js-duties b.bad { color: var(--bad); }
+  [data-viz="jenkins-sched"] .js-load { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px; }
+  [data-viz="jenkins-sched"] .js-bar { height: 8px; border-radius: 4px; background: var(--sunk); overflow: hidden; }
+  [data-viz="jenkins-sched"] .js-bar i { display: block; height: 100%; background: var(--ok); transition: width .3s; }
+  [data-viz="jenkins-sched"] .js-bar i.warn { background: var(--warn); }
+  [data-viz="jenkins-sched"] .js-bar i.bad { background: var(--bad); }
+  [data-viz="jenkins-sched"] .js-slots, [data-viz="jenkins-sched"] .js-agent .js-slots { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  [data-viz="jenkins-sched"] .js-none { grid-column: 1 / -1; }
+  [data-viz="jenkins-sched"] .js-slot { min-height: 50px; border: 1.5px dashed var(--rule-2); border-radius: 8px; padding: 5px 7px; font-size: 12.5px; color: var(--ink-3); background: var(--surface); }
+  [data-viz="jenkins-sched"] .js-slot.busy { border-style: solid; border-color: var(--auto); color: var(--ink); }
+  [data-viz="jenkins-sched"] .js-slot.busy.on-ctrl { border-color: var(--bad); }
+  [data-viz="jenkins-sched"] .js-slot b { display: block; font-size: 13px; }
+  [data-viz="jenkins-sched"] .js-prog { height: 5px; border-radius: 3px; background: var(--sunk); margin-top: 5px; overflow: hidden; }
+  [data-viz="jenkins-sched"] .js-prog i { display: block; height: 100%; background: var(--auto); }
+  [data-viz="jenkins-sched"] .js-agents { display: flex; flex-direction: column; gap: 8px; }
+  [data-viz="jenkins-sched"] .js-agent { border: 1.5px solid var(--rule-2); border-radius: 10px; padding: 7px 9px 9px; background: var(--bg); }
+  [data-viz="jenkins-sched"] .js-agent h4 { margin: 0 0 5px; font-size: 13.5px; }
+  [data-viz="jenkins-sched"] .js-count { margin: 10px 2px 6px; font-size: 13.5px; color: var(--ink-2); font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) { [data-viz="jenkins-sched"] .js-bar i { transition: none; } }
+</style>
+
+<script>
+  import { press, reduced, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  interface Build { id: number; heavy: boolean; left: number; total: number }
+  type Slot = Build | null;
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="jenkins-sched"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const ctrlBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-ctrl]")];
+      const agentBtn = root.querySelector<HTMLButtonElement>('[data-a="agent"]')!;
+      const MAX_AGENTS = 3;
+
+      let queue: Build[] = [];
+      let ctrl: Slot[] = [];
+      let agents: Slot[][] = [];
+      let nextId = 1;
+      let finished = 0;
+      let stalled = false;
+      let ctrlMax = 0;
+      let timer: ReturnType<typeof setInterval> | null = null;
+
+      const load = () => Math.min(100, 15 + ctrl.reduce((n, b) => n + (b ? (b.heavy ? 60 : 30) : 0), 0));
+      const running = () => ctrl.filter(Boolean).length + agents.flat().filter(Boolean).length;
+      const agentName = (i: number) => `agent-${i + 1}`;
+
+      function reset() {
+        stop();
+        queue = []; ctrl = []; ctrlMax = 0; agents = [[null, null]]; nextId = 1; finished = 0; stalled = false;
+        press(ctrlBtns, (b) => b.dataset.ctrl === "0");
+        render();
+        tell(say, "Ready", "The controller has <b>0 executors</b>, so every build goes to an agent. Choose <b>Queue a build</b> a few times.");
+      }
+
+      function slotHtml(s: Slot, onCtrl: boolean) {
+        if (!s) return '<div class="js-slot">free</div>';
+        const pct = Math.round(((s.total - s.left) / s.total) * 100);
+        return `<div class="js-slot busy${onCtrl ? " on-ctrl" : ""}"><b>#${s.id}${s.heavy ? " image build" : ""}</b>running<div class="js-prog"><i style="width:${pct}%"></i></div></div>`;
+      }
+
+      function render() {
+        const qEl = q<HTMLOListElement>("queue");
+        qEl.innerHTML = queue.length
+          ? queue.map((b) => `<li class="js-chip${b.heavy ? " heavy" : ""}">#${b.id}<small>${b.heavy ? "heavy: image build" : "build"}</small></li>`).join("")
+          : '<li class="js-empty">Empty</li>';
+        q("cslots").innerHTML = ctrl.length
+          ? ctrl.map((s) => slotHtml(s, true)).join("")
+          : '<p class="js-none">No executors. Builds never run here.</p>';
+        q("agents").innerHTML = agents.map((slots, i) =>
+          `<div class="js-agent"><h4>${agentName(i)}</h4><div class="js-slots">${slots.map((s) => slotHtml(s, false)).join("")}</div></div>`).join("");
+        const l = load();
+        const tone = l >= 100 ? "bad" : l >= 70 ? "warn" : "";
+        const bar = q<HTMLElement>("bar");
+        bar.style.width = l + "%";
+        bar.className = tone;
+        q("pct").textContent = l + "%";
+        const ui = q<HTMLElement>("ui");
+        ui.textContent = l >= 100 ? "not responding" : l >= 70 ? "slow" : "responsive";
+        ui.className = l >= 100 ? "bad" : l >= 70 ? "warn" : "ok";
+        const sched = q<HTMLElement>("sched");
+        sched.textContent = stalled ? "stalled" : "running";
+        sched.className = stalled ? "bad" : "ok";
+        q("ctrl").classList.toggle("stalled", stalled);
+        q("count").textContent = `Waiting ${queue.length} · Running ${running()} · Finished ${finished}`;
+        agentBtn.disabled = agents.length >= MAX_AGENTS;
+      }
+
+      function stop() {
+        if (timer) clearInterval(timer);
+        timer = null;
+      }
+      function start() {
+        if (!timer) timer = setInterval(tick, reduced() ? 900 : 750);
+      }
+
+      /* One unit of time: running builds progress, then free executors take
+         work from the queue, oldest first. */
+      function tick() {
+        const events: [string, string, "" | "good" | "bad"][] = [];
+        const progress = (slots: Slot[], where: string) => slots.forEach((s, i) => {
+          if (!s) return;
+          s.left--;
+          if (s.left <= 0) {
+            slots[i] = null; finished++;
+            events.push([`Build #${s.id} finished`, `Build #${s.id} finished on <b>${where}</b>, and its executor is free again.`, "good"]);
+          }
+        });
+        progress(ctrl, "the controller");
+        /* executors removed while busy go away once their build ends */
+        if (!ctrlMax) ctrl = ctrl.filter(Boolean);
+        agents.forEach((a, i) => progress(a, agentName(i)));
+
+        const l = load();
+        if (l >= 100 && !stalled) {
+          stalled = true;
+          events.push(["The controller is overloaded", "The builds on the controller are using all its CPU and memory. <b>The web UI stops responding and the scheduler stalls</b>, so free agents sit idle while the queue grows. One heavy build has slowed down everyone's builds.", "bad"]);
+        } else if (l < 100 && stalled) {
+          stalled = false;
+          events.push(["The controller recovers", "The heavy work on the controller finished. Scheduling starts again. Set the controller to <b>0</b> executors so this can't happen.", ""]);
+        }
+
+        if (!stalled) {
+          while (queue.length) {
+            const b = queue[0];
+            const ci = ctrlMax ? ctrl.indexOf(null) : -1;
+            let placed = false;
+            if (ci >= 0) {
+              ctrl[ci] = b; placed = true;
+              events.push([`Build #${b.id} runs on the controller`, `Build #${b.id} started on the <b>controller</b>. It runs as the same user as Jenkins, so it could read <code>JENKINS_HOME</code>, where every stored credential lives. And it shares CPU and memory with the scheduler and the web UI.`, "bad"]);
+            } else {
+              for (let a = 0; a < agents.length && !placed; a++) {
+                const si = agents[a].indexOf(null);
+                if (si >= 0) {
+                  agents[a][si] = b; placed = true;
+                  events.push([`Build #${b.id} starts on ${agentName(a)}`, `A free executor on <b>${agentName(a)}</b> picked up build #${b.id}. The controller only told it what to run and will store the result.`, ""]);
+                }
+              }
+            }
+            if (!placed) {
+              events.push([`Build #${b.id} is waiting`, `Build #${b.id} <b>waits in the queue</b>: every executor is busy. More agents means less waiting. The controller doesn't need more executors.`, ""]);
+              break;
+            }
+            queue.shift();
+          }
+        }
+
+        render();
+        const last = events.find((e) => e[2] === "bad") ?? events[events.length - 1];
+        if (last) tell(say, last[0], last[1], last[2]);
+        if (!queue.length && !running()) {
+          stop();
+          if (!last) tell(say, "All done", "Every build has finished and the queue is empty.", "good");
+        }
+      }
+
+      function enqueue(heavy: boolean) {
+        const total = heavy ? 7 : 4;
+        const b: Build = { id: nextId++, heavy, left: total, total };
+        queue.push(b);
+        tell(say, `Build #${b.id} queued`, heavy
+          ? `Build #${b.id} is a <b>heavy</b> one: building a container image, which takes a lot of CPU and memory.`
+          : `Build #${b.id} joins the queue. The controller looks for a free executor.`);
+        render();
+        start();
+        tick();
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.ctrl) {
+          const n = Number(b.dataset.ctrl);
+          press(ctrlBtns, (x) => x === b);
+          ctrlMax = n;
+          ctrl = n ? [ctrl[0] ?? null, ctrl[1] ?? null] : ctrl.filter(Boolean);
+          render();
+          tell(say, `Controller executors: ${n}`, n
+            ? "The controller now has <b>2 executors</b>, like a fresh install. New builds will run on it first. Try <b>Queue a heavy build</b> twice."
+            : "The controller has <b>0 executors</b>. It only schedules and stores results; every build runs on an agent.", n ? "" : "good");
+          if (queue.length) start();
+        } else if (b.dataset.a === "queue") enqueue(false);
+        else if (b.dataset.a === "heavy") enqueue(true);
+        else if (b.dataset.a === "agent") {
+          if (agents.length < MAX_AGENTS) agents.push([null, null]);
+          render();
+          tell(say, `${agentName(agents.length - 1)} connected`, `A new agent connected, with 2 more executors. Waiting builds can start now.`);
+          if (queue.length) { start(); tick(); }
+        } else if (b.dataset.a === "reset") reset();
+      });
+
+      reset();
+      stops.push(stop);
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

@@ -1,0 +1,83 @@
+---
+/*
+ * Terraform state: two engineers apply at once.
+ * Teaches: without a lock, the last write wins and a resource is forgotten.
+ */
+import { raceHtml, raceSay, raceSteps } from "../../scripts/tf-state-viz";
+const steps = raceSteps(false);
+---
+<div class="viz" data-track="code" data-viz="tf-race">
+  <div class="viz-controls">
+    <span class="lbl" id="tr-lbl">State locking</span>
+    <div class="seg" role="group" aria-labelledby="tr-lbl">
+      <button type="button" data-lock="off" aria-pressed="true">Off</button>
+      <button type="button" data-lock="on" aria-pressed="false">On</button>
+    </div>
+    <button class="btn line" type="button" data-a="play">Play</button>
+    <button class="btn" type="button" data-a="next">Next step</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <div class="race" set:html={raceHtml(steps[0], false)} />
+  <div class="viz-say" aria-live="polite" set:html={raceSay(steps[0], 0, steps.length - 1)} />
+</div>
+
+<script>
+  import { raceHtml, raceSay, raceSteps } from "../../scripts/tf-state-viz";
+  import { press, reduced } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="tf-race"]').forEach((root) => {
+    if (!once(root)) return;
+    const race = root.querySelector<HTMLElement>(".race")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const play = root.querySelector<HTMLButtonElement>('[data-a="play"]')!;
+    const nextBtn = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+    const lockBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-lock]")];
+    let locking = false;
+    let steps = raceSteps(false);
+    let i = 0;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    function render() {
+      const s = steps[i];
+      race.innerHTML = raceHtml(s, locking);
+      say.className = "viz-say" + (s.end ? " " + s.end : "");
+      say.innerHTML = raceSay(s, i, steps.length - 1);
+      const atEnd = i >= steps.length - 1;
+      nextBtn.disabled = atEnd;
+      play.disabled = atEnd;
+    }
+    function stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+      play.textContent = "Play";
+    }
+    function step() {
+      if (i < steps.length - 1) { i++; render(); }
+      if (i >= steps.length - 1) stop();
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.lock) {
+        locking = b.dataset.lock === "on";
+        press(lockBtns, (x) => x === b);
+        stop(); steps = raceSteps(locking); i = 0; render();
+      } else if (b.dataset.a === "next") { stop(); step(); }
+      else if (b.dataset.a === "reset") { stop(); i = 0; render(); }
+      else if (b.dataset.a === "play") {
+        if (timer) { stop(); return; }
+        play.textContent = "Pause";
+        step();
+        timer = setInterval(step, reduced() ? 3200 : 2400);
+      }
+    });
+    stops.push(stop);
+    });
+    /* leaving the page: stop any "Play" that is running */
+    return () => stops.forEach((s) => s());
+  });
+</script>

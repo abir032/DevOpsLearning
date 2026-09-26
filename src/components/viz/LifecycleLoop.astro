@@ -1,0 +1,181 @@
+---
+/*
+ * The DevOps lifecycle: one change travelling round the loop.
+ * Teaches: in big batches a change spends most of its life waiting, and
+ * problems are found far from where they started.
+ */
+const STAGES = [
+  ["Plan", "decide what to build"],
+  ["Code", "write it"],
+  ["Build", "package it"],
+  ["Test", "check it works"],
+  ["Release", "approve it to go"],
+  ["Deploy", "put it on servers"],
+  ["Operate", "keep it running"],
+  ["Monitor", "watch how it does"],
+];
+const CX = 390, CY = 200, RX = 290, RY = 138;
+const pos = STAGES.map((_, i) => {
+  const a = ((180 + i * 45) * Math.PI) / 180;
+  return [Math.round(CX + RX * Math.cos(a)), Math.round(CY + RY * Math.sin(a))];
+});
+---
+<div class="viz" data-track="ship" data-viz="lifecycle" data-pos={JSON.stringify(pos)}>
+  <div class="viz-controls">
+    <span class="lbl" id="lc-lbl">The team works in</span>
+    <div class="seg" role="group" aria-labelledby="lc-lbl">
+      <button type="button" data-mode="small" aria-pressed="true">Small batches</button>
+      <button type="button" data-mode="big" aria-pressed="false">Big batches</button>
+    </div>
+    <button class="btn line" type="button" data-act="go">Send a change round</button>
+    <button class="btn" type="button" data-act="reset">Reset</button>
+  </div>
+  <p class="viz-scroll" aria-hidden="true">Scroll sideways to see the whole loop</p>
+  <div class="viz-stage">
+    <svg viewBox="0 0 780 400" role="img" aria-labelledby="lc-title">
+      <title id="lc-title">The DevOps loop: plan, code, build, test, release, deploy, operate, monitor, and back to plan.</title>
+      <ellipse class="lc-ring" cx={CX} cy={CY} rx={RX} ry={RY} />
+      {STAGES.map(([name, sub], i) => (
+        <g data-stage={i}>
+          <rect class="vz-node" x={pos[i][0] - 58} y={pos[i][1] - 23} width="116" height="46" rx="9" />
+          <text class="vz-t" x={pos[i][0]} y={pos[i][1] - 3} text-anchor="middle">{name}</text>
+          <text class="vz-s" x={pos[i][0]} y={pos[i][1] + 13} text-anchor="middle">{sub}</text>
+          <g class="lc-pile" opacity="0">
+            <rect x={pos[i][0] + 34} y={pos[i][1] - 38} width="44" height="22" rx="11" />
+            <text x={pos[i][0] + 56} y={pos[i][1] - 23} text-anchor="middle"></text>
+          </g>
+        </g>
+      ))}
+      <text class="lc-big" x={CX} y={CY - 6} text-anchor="middle" data-n="clock">0 hours</text>
+      <text class="vz-s" x={CX} y={CY + 18} text-anchor="middle" data-n="sub">since the change was planned</text>
+      <text class="vz-label" x={CX} y={CY + 44} text-anchor="middle" data-n="batch">1 change in this release</text>
+      <circle data-n="dot" class="vz-dot lc-dot" r="9" cx={pos[0][0]} cy={pos[0][1] - 23} opacity="0" />
+    </svg>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Choose <b>Send a change round</b> to follow one change through the loop. Then switch to <b>Big batches</b> and send another.</div>
+</div>
+
+<style is:global>
+  [data-viz="lifecycle"] .lc-ring { fill: none; stroke: var(--rule-2); stroke-width: 2; stroke-dasharray: 4 6; }
+  [data-viz="lifecycle"] .lc-dot { fill: var(--ship); }
+  [data-viz="lifecycle"] .vz-node.lit { stroke: var(--ink); stroke-width: 2.5; fill: var(--sunk); }
+  [data-viz="lifecycle"] .vz-node.stuck { stroke: var(--bad); stroke-width: 2.5; fill: var(--bad-bg); }
+  [data-viz="lifecycle"] .lc-pile rect { fill: var(--bad); }
+  [data-viz="lifecycle"] .lc-pile text { font-family: var(--font); font-size: 12px; font-weight: 800; fill: var(--surface); }
+  [data-viz="lifecycle"] .lc-big { font-family: var(--font); font-size: 34px; font-weight: 900; fill: var(--ink); }
+</style>
+
+<script>
+  import { beat, moveDot, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Pt = [number, number];
+  interface Stop { clock: string; say: string; pile?: string; stuck?: boolean; tone?: "good" | "bad" }
+
+  /* One entry per stage, in order. */
+  const SMALL: Stop[] = [
+    { clock: "0 hours", say: "<b>Plan.</b> One small slice of a feature: show the delivery time on the order screen." },
+    { clock: "2 hours", say: "<b>Code.</b> Two hours of work, then a pull request. A teammate reviews it the same afternoon." },
+    { clock: "2 hours", say: "<b>Build.</b> Merging starts an automatic build. It takes a few minutes." },
+    { clock: "3 hours", say: "<b>Test.</b> Automated tests run on every change. If one fails, the author hears in minutes, while the code is still fresh in their head." },
+    { clock: "3 hours", say: "<b>Release.</b> The tests passing <i>is</i> the approval. Nobody waits for a meeting." },
+    { clock: "3 hours", say: "<b>Deploy.</b> The pipeline puts it on the servers a few at a time. Customers don't notice." },
+    { clock: "4 hours", say: "<b>Operate.</b> It runs. If errors went up now, there'd be exactly one suspect: this change." },
+    { clock: "4 hours", say: "<b>Monitor.</b> Dashboards show the new screen is used and nothing got worse. What the team learns goes straight into tomorrow's plan.", tone: "good" },
+  ];
+  const BIG: Stop[] = [
+    { clock: "0 days", say: "<b>Plan.</b> A month of features is planned as one big release." },
+    { clock: "21 days", pile: "40", stuck: true, say: "<b>Code.</b> Forty changes are written over three weeks. This change was finished on day 2, then <b>waited</b> for the other 39." },
+    { clock: "22 days", say: "<b>Build.</b> Everything is merged at once. Merging three weeks of work takes a day of fixing conflicts." },
+    { clock: "29 days", pile: "6 bugs", stuck: true, say: "<b>Test.</b> Testers check 40 changes by hand and find six bugs. Each fix means testing again. This change <b>waits</b> a week." },
+    { clock: "33 days", pile: "wait", stuck: true, say: "<b>Release.</b> The release window is once a month, after an approval meeting. It <b>waits</b> four more days." },
+    { clock: "33 days", say: "<b>Deploy.</b> A long evening deploy with the whole team on a call." },
+    { clock: "34 days", pile: "?", stuck: true, say: "<b>Operate.</b> Errors go up. Which of the forty changes did it? Nobody knows. Two people spend a day finding out." },
+    { clock: "35 days", say: "<b>Monitor.</b> The bug was in a change written a month ago. Its author has forgotten how it works. The fix joins <b>next month's</b> release.", tone: "bad" },
+  ];
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="lifecycle"]').forEach((root) => {
+    if (!once(root)) return;
+    const pos: Pt[] = JSON.parse(root.dataset.pos!);
+    const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const dot = q<SVGCircleElement>("dot");
+    const stages = [...root.querySelectorAll<SVGGElement>("[data-stage]")];
+    const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+    const CX = 390, CY = 200, RX = 290, RY = 138;
+    let mode: "small" | "big" = "small";
+    let run = 0;
+
+    /* points along the ellipse from stage i to stage i+1, so the dot follows the loop */
+    function arc(i: number): Pt[] {
+      const pts: Pt[] = [];
+      for (let k = 0; k <= 8; k++) {
+        const a = ((180 + (i + k / 8) * 45) * Math.PI) / 180;
+        pts.push([CX + RX * Math.cos(a), CY + RY * Math.sin(a)]);
+      }
+      return pts;
+    }
+    function clear() {
+      stages.forEach((g) => {
+        g.querySelector(".vz-node")!.classList.remove("lit", "stuck");
+        g.querySelector(".lc-pile")!.setAttribute("opacity", "0");
+      });
+      dot.setAttribute("opacity", "0");
+    }
+    function setHead(clock: string, batch: string) {
+      q("clock").textContent = clock;
+      q("batch").textContent = batch;
+    }
+    function busy(on: boolean) {
+      root.querySelectorAll<HTMLButtonElement>("[data-act=go],[data-mode]").forEach((b) => (b.disabled = on));
+    }
+
+    async function go() {
+      const me = ++run; busy(true); clear();
+      const live = () => me === run;
+      const plan = mode === "small" ? SMALL : BIG;
+      setHead(plan[0].clock, mode === "small" ? "1 change in this release" : "40 changes in this release");
+      dot.setAttribute("cx", String(pos[0][0])); dot.setAttribute("cy", String(pos[0][1]));
+      dot.setAttribute("opacity", "1");
+      for (let i = 0; i < plan.length; i++) {
+        if (i > 0) { await moveDot(dot, arc(i - 1), 420); if (!live()) return; }
+        const s = plan[i];
+        const g = stages[i];
+        g.querySelector(".vz-node")!.classList.add(s.stuck ? "stuck" : "lit");
+        if (s.pile) {
+          const pile = g.querySelector(".lc-pile")!;
+          pile.querySelector("text")!.textContent = s.pile;
+          pile.setAttribute("opacity", "1");
+        }
+        q("clock").textContent = s.clock;
+        tell(say, `${i + 1} of 8: ${mode === "small" ? "small batches" : "big batches"}`, s.say, s.tone || "");
+        await beat(s.stuck ? 2200 : 1200); if (!live()) return;
+      }
+      const end = mode === "small"
+        ? "From idea to customers in about <b>4 hours</b>. If anything had gone wrong, the cause would have been obvious and the fix would ship the same day."
+        : "From idea to customers in about <b>35 days</b>, and most of that was <b>waiting</b>, not working. The bug took a day to find because forty changes arrived together.";
+      dot.setAttribute("opacity", "0");
+      tell(say, `Round trip: ${plan[plan.length - 1].clock}`, end, mode === "small" ? "good" : "bad");
+      busy(false);
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.mode) {
+        mode = b.dataset.mode as typeof mode;
+        press(modeBtns, (x) => x === b);
+        clear();
+        setHead(mode === "small" ? "0 hours" : "0 days", mode === "small" ? "1 change in this release" : "40 changes in this release");
+        tell(say, mode === "small" ? "Small batches" : "Big batches", mode === "small"
+          ? "Each change goes round the loop on its own. Choose <b>Send a change round</b>."
+          : "Forty changes go round together, once a month. Choose <b>Send a change round</b> and follow one of them.");
+      } else if (b.dataset.act === "go") go();
+      else if (b.dataset.act === "reset") {
+        run++; busy(false); clear();
+        setHead(mode === "small" ? "0 hours" : "0 days", mode === "small" ? "1 change in this release" : "40 changes in this release");
+        tell(say, "Ready", "Choose <b>Send a change round</b> to follow one change through the loop.");
+      }
+    });
+  }));
+</script>

@@ -1,0 +1,83 @@
+---
+/*
+ * ECR: what does the tag v1 point to over time?
+ * Teaches: with mutable tags, v1 can quietly mean a different build, so a
+ * rollback can bring back the wrong code. Immutable tags refuse the overwrite.
+ */
+import { tagHtml, tagSteps } from "../../scripts/ecr-tags-viz";
+const steps = tagSteps("mutable");
+---
+<div class="viz" data-track="box" data-viz="ecr-tags">
+  <div class="viz-controls">
+    <span class="lbl" id="et-lbl">Repository tags</span>
+    <div class="seg" role="group" aria-labelledby="et-lbl">
+      <button type="button" data-mode="mutable" aria-pressed="true">Mutable</button>
+      <button type="button" data-mode="immutable" aria-pressed="false">Immutable</button>
+    </div>
+    <button class="btn line" type="button" data-a="next">Next step</button>
+    <button class="btn" type="button" data-a="reset">Start again</button>
+  </div>
+  <div class="et-stage" set:html={tagHtml(steps[0], "mutable")} />
+  <div class="viz-say" aria-live="polite"><span class="step-l">{steps[0].label}</span><Fragment set:html={steps[0].say} /></div>
+</div>
+
+<script>
+  import { tagHtml, tagSteps, type Mode } from "../../scripts/ecr-tags-viz";
+  import { press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  onPage(() => document.querySelectorAll<HTMLElement>('[data-viz="ecr-tags"]').forEach((root) => {
+    if (!once(root)) return;
+    const stage = root.querySelector<HTMLElement>(".et-stage")!;
+    const say = root.querySelector<HTMLElement>(".viz-say")!;
+    const next = root.querySelector<HTMLButtonElement>('[data-a="next"]')!;
+    const modeBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-mode]")];
+    let mode: Mode = "mutable";
+    let i = 0;
+
+    function render() {
+      const steps = tagSteps(mode);
+      const s = steps[i];
+      stage.innerHTML = tagHtml(s, mode);
+      tell(say, s.label, s.say, s.tone || "");
+      next.disabled = i >= steps.length - 1;
+    }
+
+    root.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+      if (!b || b.disabled) return;
+      if (b.dataset.mode) {
+        mode = b.dataset.mode as Mode;
+        press(modeBtns, (x) => x === b);
+        i = 0; render();
+      } else if (b.dataset.a === "next") { i++; render(); }
+      else if (b.dataset.a === "reset") { i = 0; render(); }
+    });
+  }));
+</script>
+
+<style is:global>
+  [data-viz="ecr-tags"] .et-stage { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px; padding: 14px 16px; }
+  [data-viz="ecr-tags"] .et-col { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-height: 170px; }
+  [data-viz="ecr-tags"] .et-h { margin: 0 0 10px; font-weight: 800; font-size: 15px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  [data-viz="ecr-tags"] .et-mode { font-weight: 700; font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--rule-2); border-radius: 20px; padding: 1px 9px; }
+  [data-viz="ecr-tags"] .et-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  [data-viz="ecr-tags"] .et-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 14px; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--rule); }
+  [data-viz="ecr-tags"] .et-row.loose { border-style: dashed; }
+  [data-viz="ecr-tags"] .et-row code { font-size: 12.5px; color: var(--ink-2); }
+  [data-viz="ecr-tags"] .et-tag { font-family: var(--mono); font-weight: 700; background: var(--box); color: var(--on-box); padding: 1px 8px; border-radius: 5px; font-size: 13px; }
+  [data-viz="ecr-tags"] .et-tag.none { background: var(--sunk); color: var(--ink-2); }
+  [data-viz="ecr-tags"] .et-arrow { color: var(--ink-3); }
+  [data-viz="ecr-tags"] .et-b { font-weight: 700; padding: 1px 8px; border-radius: 5px; border: 2px solid; }
+  [data-viz="ecr-tags"] .et-b.a { border-color: var(--box); }
+  [data-viz="ecr-tags"] .et-b.b { border-color: var(--auto); border-style: dotted; }
+  [data-viz="ecr-tags"] .et-task { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; font-size: 14px; padding: 8px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--rule); }
+  [data-viz="ecr-tags"] .et-empty { color: var(--ink-3); font-size: 14px; padding: 8px 0; }
+  [data-viz="ecr-tags"] .et-err { margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--bad-bg); border: 1px solid var(--bad); font-size: 13.5px; }
+  [data-viz="ecr-tags"] .et-err b { display: block; color: var(--bad); margin-bottom: 4px; }
+  [data-viz="ecr-tags"] .et-err code { font-size: 12.5px; white-space: normal; overflow-wrap: anywhere; color: var(--ink); }
+  @media (max-width: 700px) {
+    [data-viz="ecr-tags"] .et-stage { grid-template-columns: minmax(0, 1fr); }
+    [data-viz="ecr-tags"] .et-task { grid-template-columns: 1fr; gap: 2px; }
+  }
+</style>

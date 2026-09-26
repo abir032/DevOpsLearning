@@ -1,0 +1,331 @@
+---
+time: 30 minutes
+level: Intermediate
+before: [ecs-fargate, kubernetes-and-eks]
+cost: free
+quiz:
+  - q: A two-person team already runs everything on ECS. A new service is coming. Someone says "Kubernetes is the industry standard, so we should use EKS". What's the strongest reply?
+    answer: 2
+    options:
+      - t: Kubernetes is too new to trust
+        why: Kubernetes has been widely used in production for many years. Age isn't the problem.
+      - t: EKS can't run containers built for ECS
+        why: Both run the same images. The container doesn't care which platform starts it.
+      - t: Being standard doesn't pay for a second platform. Two people would run two ways to release, debug and upgrade
+        why: The question is what this team can run well. Adding EKS next to ECS doubles the platforms without solving a problem they have.
+      - t: EKS is always more expensive than ECS
+        why: Not always. At large scale the control plane is a small part of the bill. For this team, the bigger cost is people's time.
+  - q: What does an EKS cluster cost before any app runs on it, on standard support in us-east-1?
+    answer: 1
+    options:
+      - t: Nothing — you only pay for the servers
+        why: That's ECS. EKS charges for the control plane every hour the cluster exists.
+      - t: About $0.10 an hour for the control plane — roughly $73 a month
+        why: Every EKS cluster pays for its control plane, even if nothing runs on it. Prices change, so check the current pricing page.
+      - t: About $0.10 a month
+        why: It's per hour, not per month.
+      - t: It depends on how many pods you run
+        why: The control plane charge is fixed per cluster. Pods add node or Fargate costs on top.
+  - q: Why does an EKS cluster need regular work even when nobody changes the apps?
+    answer: 0
+    options:
+      - t: Each Kubernetes version is supported for a limited time, so the cluster and its add-ons must be upgraded every so often
+        why: Kubernetes ships a few versions a year. When a version leaves standard support, EKS charges much more for extended support, so teams upgrade the control plane, nodes and add-ons regularly.
+      - t: AWS deletes clusters that haven't changed in 90 days
+        why: AWS doesn't do that. Clusters stay until you delete them.
+      - t: Pods must be restarted by hand every week
+        why: Kubernetes restarts pods itself. Nobody needs to do this by hand.
+      - t: The load balancer controller stops working after a month
+        why: It keeps working, but like every add-on it needs upgrading as Kubernetes versions change.
+  - q: A new version is broken. Its new copies keep failing to start. What do ECS and Kubernetes each do by default?
+    answer: 3
+    options:
+      - t: Both roll back automatically
+        why: Only ECS does, and only with the deployment circuit breaker's rollback turned on.
+      - t: Both remove the old copies and leave the site down
+        why: Neither removes healthy old copies while the new ones fail, if the rolling settings are sensible.
+      - t: Kubernetes rolls back; ECS waits for you
+        why: It's the other way round.
+      - t: ECS, with the circuit breaker on, rolls back by itself. Kubernetes stops the rollout and waits for someone to undo it
+        why: Kubernetes keeps the old pods serving and marks the rollout as stuck, but you run kubectl rollout undo. That's a real difference to write in the memo.
+  - q: Which sentence makes a recommendation hardest to argue with?
+    answer: 1
+    options:
+      - t: '"Kubernetes is better"'
+        why: Better at what, for whom? It's an opinion, and invites an opinion back.
+      - t: '"We''d change our mind if leaving AWS were planned, or if we had a team to own Kubernetes"'
+        why: Naming what would change the answer shows it comes from facts about the team. If those facts change, so does the answer, which is hard to argue against.
+      - t: '"Everyone else uses EKS"'
+        why: Other companies have different teams and different problems.
+      - t: '"ECS is simpler, full stop"'
+        why: Often true, but "full stop" ignores the cases where Kubernetes really does fit.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the platform argument">
+
+QuickCart's orders service runs on ECS. It works: releases have no dropped requests, and a bad release rolls itself back.
+
+Then a new payments service is planned. Kofi wants it on Kubernetes: "It's the industry standard. Every job advert asks for it." Priya wants ECS: "We already know it, and there are four of us."
+
+The argument runs for two weeks, in meetings and in chat. Nobody changes their mind, because nobody is arguing about the same thing. Kofi is talking about the industry; Priya is talking about the team.
+
+</Story>
+
+<Case title="A very common mistake">
+
+A small team moves to Kubernetes because it's popular, not because of a problem it solves. Within months, a large share of their time goes on the platform itself: upgrading the cluster, keeping add-ons working, learning how its networking and permissions fit together. Feature work slows down, and the product sees no benefit from the move.
+
+The opposite mistake happens too. A large company with many teams stays on a simpler platform long after it has outgrown it, and each team builds its own tools for problems Kubernetes already solves.
+
+</Case>
+
+Both mistakes come from deciding by reputation. This lesson is about deciding with evidence: what each platform really costs **this** team, measured, and written down so the decision survives someone arguing the other side.
+
+</Part>
+
+<Part id="idea">
+
+ECS and EKS do the same job. Both take your image, keep a set number of copies running, replace them when they fail, release new versions gradually, and put a load balancer in front. They run **the same container image**, in the same VPC, behind the same kind of load balancer, with the same IAM and CloudWatch.
+
+The difference is **how much of the platform you run yourself**, and **what you get in return**.
+
+<YouKnow title="You already know this: native or cross-platform">
+
+Choosing between Swift and a cross-platform framework is the same trade. Native is tied to one platform, but integrates tightly and has fewer layers to learn. Cross-platform runs everywhere and has a huge ecosystem, but adds its own layer that you learn, upgrade and debug. Neither is better. It depends on your team and whether you really ship to both platforms.
+
+ECS is native to AWS. Kubernetes is the cross-platform framework.
+
+</YouKnow>
+
+<Key>Choose the platform your team can run well at 2am, and write down what would change your mind.</Key>
+
+### The comparison, on the five things that matter
+
+| | ECS on Fargate | EKS |
+|---|---|---|
+| **Operational load** | Very little. No cluster to upgrade, no servers, no add-ons to maintain | A cluster to upgrade regularly, nodes to patch (unless you use Fargate), and add-ons such as the load balancer controller to keep current |
+| **Cost before any app runs** | Nothing. You pay for the tasks that run | About $0.10 an hour per cluster for the control plane on standard support, roughly $73 a month. Older versions on extended support cost about six times more |
+| **Ecosystem** | AWS's own integrations, and not much beyond them | Very large: Helm charts, operators, GitOps tools, custom resources and your own controllers |
+| **Portability** | AWS only | Runs on every major cloud and on your own servers. Your AWS-specific parts, like load balancer annotations and IAM, still need rewriting |
+| **Team skills** | Few new ideas: task definition, service, cluster | Many new ideas: pods, deployments, services, ingress, namespaces, probes, RBAC, and how EKS connects them to AWS |
+
+Prices are for us-east-1 at the time of writing, and they change. Check the ECS and EKS pricing pages before you quote numbers.
+
+### What you actually saw, running the same service on both
+
+These come from the [ECS on Fargate](/lessons/ecs-fargate/) and [Kubernetes and EKS](/lessons/kubernetes-and-eks/) labs, where the same image ran on both:
+
+| | ECS on Fargate | EKS |
+|---|---|---|
+| Creating the cluster | Seconds. It's only a name | About 15 to 20 minutes: a control plane, nodes and their IAM roles |
+| Connecting a load balancer | One section of the service form | Install the AWS Load Balancer Controller: an IAM policy, a service account with a role, a Helm install, then an Ingress |
+| Health check fails | The task is replaced | With a failing readiness probe, the pod gets no traffic but isn't restarted |
+| Undoing a broken release | Automatic, with the circuit breaker's rollback on | You run `kubectl rollout undo`. Kubernetes stops and waits |
+| Releasing without dropped requests | Mostly handled by ECS | You add a readiness gate and a `preStop` wait yourself |
+
+### Six questions that decide it
+
+A recommendation isn't a feature list. It answers: *for this team, running this app, what should they do?*
+
+| Question | Why it matters |
+|---|---|
+| **Who will run the platform?** | The biggest factor. Kubernetes needs people who know it well, on call |
+| **Is running outside AWS a real plan?** | Portability is only worth something if you'll use it. "Maybe one day" rarely counts |
+| **Does the app need something only Kubernetes has?** | Name the tool. If you can't, the answer is no |
+| **What does the team know today?** | Learning Kubernetes well takes months |
+| **What already runs in production?** | Adding a second platform means two ways to release, debug and secure everything |
+| **How many services and teams?** | Kubernetes' fixed costs pay back better across many teams than across a handful of services |
+
+### When each one fits
+
+| ECS usually fits when | EKS usually fits when |
+|---|---|
+| The team is small, and the people running the platform also write features | There's a platform team whose job is to run it |
+| Everything runs on AWS, with no real plan to leave | Running on another cloud or your own servers is planned, with a date |
+| The team knows ECS, or neither | The team already knows Kubernetes well |
+| There's no named Kubernetes-only need | The app needs a specific operator, a custom controller or another Kubernetes-only tool |
+| Other services already run on ECS | Other services already run on Kubernetes |
+
+</Part>
+
+<Part id="see">
+
+Answer each question for your own team, or fill in QuickCart's answers. Then change one answer at a time and watch which ones move the recommendation.
+
+<EcsEksDecider />
+
+**What to notice:** no single feature decides it. The answers that move the recommendation most are about people: who runs it, what they know, and what already runs. That's why the memo you'll write leads with the team, not the technology.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">you write a document. Nothing is created in AWS.</Cost>
+
+You'll write a one-page recommendation, the kind a team lead or architect asks for before a platform decision. About 30 minutes. It's best done after the ECS and EKS labs, so you can use your own numbers. If you haven't done them, use the numbers in [the idea](#idea).
+
+<Steps>
+
+<Step title="Collect the evidence">
+
+Make a table of facts before you write any opinions. For each row, use your own measurement if you have one. Otherwise use the course's figures and say so.
+
+| What | ECS on Fargate | EKS | Where it comes from |
+|---|---|---|---|
+| Time to create the cluster | seconds | your time, or about 15 to 20 minutes | your lab notes |
+| Steps to connect a load balancer | one form section | your count of commands | your lab notes |
+| Failed requests during a release under load | your number | your number | [Releases without downtime](/lessons/zero-downtime-releases/) |
+| Undoing a bad release | automatic | one command | the labs |
+| Cost before any app runs | $0 | about $73 a month | AWS pricing pages, checked today |
+| Servers to look after | none | your nodes, unless on Fargate | the labs |
+
+<See>
+
+A table where every number has a source. If a cell says "I think", find the number or leave the row out.
+
+</See>
+
+</Step>
+
+<Step title="Answer the six questions for your team">
+
+Use the decision helper in [See it](#see). Answer honestly for the team that would run the platform, not for an imaginary bigger one.
+
+Write down the recommendation it gives, and which answers pushed it hardest. Those answers are the reasons you'll lead with.
+
+<Note title="The helper doesn't decide for you">
+
+It adds up points, so it's only as good as your answers. Its job is to make you say out loud which facts matter. The memo is where you check whether you agree.
+
+</Note>
+
+</Step>
+
+<Step title="Write the memo">
+
+Create a file called `recommendation.md` and fill in this template. Replace every line in capitals. Keep it to one page.
+
+```text title="recommendation.md"
+Recommendation: ECS OR EKS for new services.
+
+Why: THE ONE DECIDING REASON, IN ONE SENTENCE.
+
+What we measured:
+  Time to create a cluster:        ECS NUMBER   EKS NUMBER
+  Steps to connect a load balancer: ECS NUMBER   EKS NUMBER
+  Failed requests during a release: ECS NUMBER   EKS NUMBER
+  Undoing a bad release:           ECS ANSWER   EKS ANSWER
+  Cost before any app runs:        ECS NUMBER   EKS NUMBER
+
+Operational burden: WHAT EACH ONE MAKES US LOOK AFTER, AND WHO WOULD DO IT.
+
+Cost at our scale: THE FIXED COST, AND PEOPLE'S TIME, COMPARED WITH OUR BILL.
+
+Team readiness: WHO KNOWS WHAT TODAY, AND HOW LONG LEARNING WOULD TAKE.
+
+Migration risk: WHAT ALREADY RUNS, AND WHAT RUNNING TWO PLATFORMS WOULD COST.
+
+The strongest argument against this, and our answer:
+  ARGUMENT.
+  ANSWER.
+
+What would change our mind: THE FACTS THAT WOULD FLIP THIS DECISION.
+```
+
+| Section | What goes in it |
+|---|---|
+| `Recommendation` | The answer first. A reader who stops here still knows what you think |
+| `Why` | One reason. If you need three, the first one isn't strong enough |
+| `What we measured` | The evidence table, short |
+| The four middle sections | One short paragraph each, with a number where you have one |
+| `The strongest argument against this` | The best case for the other side, stated fairly, then your answer |
+| `What would change our mind` | The facts that would flip the decision. This is what makes it a judgement, not a preference |
+
+<See>
+
+One page. The first line is the answer. Every paragraph has at least one fact or number.
+
+</See>
+
+</Step>
+
+<Step title="Argue the other side">
+
+Before anyone else does, write down the strongest argument against your recommendation, and answer it. These are the ones you'll hear:
+
+| If you recommend ECS, expect | If you recommend EKS, expect |
+|---|---|
+| "Kubernetes is the standard. It's easier to hire for." | "Now we run two platforms. Who looks after both?" |
+| "EKS stops us being locked in to AWS." | "Is leaving AWS actually planned, with a date?" |
+| "Kubernetes has tools ECS doesn't." | "Which tool does this app actually need?" |
+| "We'll outgrow ECS." | "What will we be doing in the months it takes to learn this?" |
+
+Pick the one that worries you most, and put it in the memo with your answer.
+
+<Mistake title="answering the argument with an opinion">
+
+A reply like "ECS is simpler" doesn't answer "Kubernetes is easier to hire for". It changes the subject.
+
+**Why:** an argument is only answered by a fact that outweighs it for this team.
+
+**The fix:** answer with a fact. For example: "We're hiring one person this year. Four existing engineers would need months to learn Kubernetes well, and we'd run two platforms in the meantime."
+
+</Mistake>
+
+</Step>
+
+<Step title="Check it">
+
+Read the memo against this list, and fix anything that fails:
+
+| Check | Passes when |
+|---|---|
+| The answer comes first | The first line says ECS or EKS |
+| Every claim has evidence | Each paragraph has a number, a measurement or a source |
+| Prices are dated | Every price says where and when you checked it |
+| The other side is fair | Someone who disagrees would recognise their best argument |
+| It can change | "What would change our mind" names specific facts |
+| It fits on one page | If not, cut adjectives first, then repeated points |
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Nothing was created in AWS in this lab, so there's nothing to delete. Keep `recommendation.md`; [Project 3](/projects/03-one-service-two-runtimes/) asks for exactly this memo, with your own measurements.
+
+If you still have the ECS service or the EKS cluster from the earlier labs, delete them now using those lessons' clean-up steps. An EKS cluster costs money every hour it exists, even when idle.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Question or fact | What to remember |
+|---|---|
+| Same job? | Yes. Both run the same image, behind the same load balancers, in the same VPC |
+| ECS control plane cost | None. You pay for tasks |
+| EKS control plane cost | About $0.10 an hour on standard support, about six times more on extended support. Prices change |
+| EKS upkeep | Regular version upgrades for the cluster, nodes and add-ons |
+| Broken release | ECS with the circuit breaker rolls back itself. Kubernetes waits for `kubectl rollout undo` |
+| Biggest factor | Who will run the platform |
+| Portability | Worth something only if leaving AWS is really planned |
+| "We need Kubernetes for X" | Name X. If you can't, you don't |
+| Already on one platform? | A second one doubles how you release, debug and secure |
+| A good memo | Answer first, evidence, the strongest counter-argument, and what would change your mind |
+
+</Cheat>
+
+</Part>

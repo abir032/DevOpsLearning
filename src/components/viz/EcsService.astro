@@ -1,0 +1,235 @@
+---
+/*
+ * ECS: a service keeps the desired number of tasks running.
+ * Teaches: you never start tasks yourself. You set a desired count, and the
+ * service keeps replacing tasks until reality matches it. When a task can't
+ * start, the reason is on the stopped task, not in the app's logs.
+ */
+const first = [
+  { id: "3f9a1c", az: "us-east-1a", ip: "172.31.8.41" },
+  { id: "b27e4d", az: "us-east-1b", ip: "172.31.20.17" },
+];
+---
+<div class="viz" data-track="box" data-viz="ecs-service">
+  <div class="viz-controls">
+    <span class="lbl" id="es-lbl">Desired tasks</span>
+    <div class="seg" role="group" aria-labelledby="es-lbl">
+      {[1, 2, 3, 4].map((n) => <button type="button" data-want={n} aria-pressed={String(n === 2)}>{n}</button>)}
+    </div>
+    <span class="lbl" id="es-role">Execution role</span>
+    <div class="seg" role="group" aria-labelledby="es-role">
+      <button type="button" data-role="ok" aria-pressed="true">Working</button>
+      <button type="button" data-role="broken" aria-pressed="false">No ECR permission</button>
+    </div>
+    <button class="btn line" type="button" data-a="kill">Stop a task</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+  </div>
+  <div class="es-stage">
+    <div class="es-top">
+      <div class="es-card">
+        <p class="es-k">Task definition</p>
+        <p class="es-v"><b>order-service:1</b></p>
+        <p class="es-s">image <code>quickcart-orders:v1</code>, 0.25 vCPU, 0.5 GB, port 8080</p>
+      </div>
+      <div class="es-card svc">
+        <p class="es-k">Service order-service</p>
+        <p class="es-v"><span>Desired <b data-n="want">2</b></span><span>Running <b data-n="run">2</b></span></p>
+        <p class="es-s" data-n="mood">Desired and running match. Nothing to do.</p>
+      </div>
+    </div>
+    <div class="es-zones">
+      {["us-east-1a", "us-east-1b"].map((az) => (
+        <div class="es-zone">
+          <p class="es-k">Subnet in {az}</p>
+          <ul class="es-tasks" data-az={az}>
+            {first.filter((t) => t.az === az).map((t) => (
+              <li class="es-task running"><span class="es-id">task {t.id}</span><span class="es-st">RUNNING</span><span class="es-ip">{t.ip}</span></li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+    <div class="es-stopped">
+      <p class="es-k">Stopped tasks (newest first)</p>
+      <ul data-n="stopped"><li class="es-none">None yet</li></ul>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Two tasks are running, one in each zone. Choose <b>Stop a task</b>, or change the desired count.</div>
+</div>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  type Status = "PROVISIONING" | "PENDING" | "RUNNING";
+  interface Task { id: string; az: string; ip: string; status: Status }
+  interface Stopped { id: string; reason: string; bad: boolean }
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="ecs-service"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const wantBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-want]")];
+      const roleBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-role]")];
+      const AZS = ["us-east-1a", "us-east-1b"];
+      let seq = 0;
+      const newId = () => (0x3a17c + (seq++) * 0x1f3d9).toString(16).padStart(6, "0").slice(-6);
+      const newIp = (az: string) => (az === AZS[0] ? "172.31.8." : "172.31.20.") + (40 + ((seq * 7) % 50));
+
+      let desired = 2;
+      let roleOk = true;
+      let tasks: Task[] = [];
+      let stopped: Stopped[] = [];
+      let alive = true;
+      let looping = false;
+      let gen = 0; /* bumped on reset, so a loop in flight gives up */
+
+      function initial() {
+        seq = 0;
+        tasks = [{ id: "3f9a1c", az: AZS[0], ip: "172.31.8.41", status: "RUNNING" }, { id: "b27e4d", az: AZS[1], ip: "172.31.20.17", status: "RUNNING" }];
+        stopped = [];
+      }
+      initial();
+
+      function draw() {
+        for (const az of AZS) {
+          const ul = root.querySelector<HTMLUListElement>(`[data-az="${az}"]`)!;
+          const mine = tasks.filter((t) => t.az === az);
+          ul.innerHTML = mine.length
+            ? mine.map((t) => `<li class="es-task ${t.status.toLowerCase()}"><span class="es-id">task ${t.id}</span><span class="es-st">${t.status}</span><span class="es-ip">${t.status === "PROVISIONING" ? "getting an IP" : t.ip}</span></li>`).join("")
+            : `<li class="es-none">No tasks</li>`;
+        }
+        const running = tasks.filter((t) => t.status === "RUNNING").length;
+        q<HTMLElement>("want").textContent = String(desired);
+        q<HTMLElement>("run").textContent = String(running);
+        q<HTMLElement>("mood").textContent = running === desired && tasks.length === desired
+          ? "Desired and running match. Nothing to do."
+          : "Desired and running differ. The service is working on it.";
+        q<HTMLElement>("stopped").innerHTML = stopped.length
+          ? stopped.map((s) => `<li class="${s.bad ? "bad" : ""}"><span class="es-id">task ${s.id}</span> <span class="es-why">Stopped reason: ${s.reason}</span></li>`).join("")
+          : `<li class="es-none">None yet</li>`;
+      }
+
+      function stopTask(t: Task, reason: string, bad = false) {
+        tasks = tasks.filter((x) => x !== t);
+        stopped = [{ id: t.id, reason, bad }, ...stopped].slice(0, 3);
+      }
+
+      /* The service's loop: compare desired with actual, fix one difference, repeat. */
+      async function reconcile() {
+        if (looping) return;
+        looping = true;
+        const g = gen;
+        const live = () => alive && g === gen;
+        while (live()) {
+          if (tasks.length > desired) {
+            const t = [...tasks].reverse().find((x) => x.status === "RUNNING") || tasks[tasks.length - 1];
+            await beat(500); if (!live()) break;
+            stopTask(t, "Scaling activity initiated by the service (desired count lowered)");
+            draw();
+            tell(say, "Scaling in", `Desired is <b>${desired}</b> but ${tasks.length + 1} tasks existed, so the service stopped task ${t.id}. Its load balancer target is drained first, so no request is cut off.`);
+            continue;
+          }
+          if (tasks.length < desired) {
+            const count = (az: string) => tasks.filter((x) => x.az === az).length;
+            const az = count(AZS[0]) <= count(AZS[1]) ? AZS[0] : AZS[1];
+            const t: Task = { id: newId(), az, ip: newIp(az), status: "PROVISIONING" };
+            tasks = [...tasks, t];
+            draw();
+            tell(say, "Starting a task", `Desired is <b>${desired}</b>, only ${tasks.length - 1} exist. The service asks Fargate for a new task, <b>${t.id}</b>, in ${az} — the zone with fewer tasks. Fargate is giving it a network card and an IP in that subnet.`);
+            await beat(900); if (!live()) break;
+            t.status = "PENDING"; draw();
+            tell(say, "Pulling the image", `Task ${t.id} is <b>PENDING</b>. The <b>execution role</b> is being used to log in to ECR and pull <code>quickcart-orders:v1</code>.`);
+            await beat(1100); if (!live()) break;
+            if (!roleOk) {
+              stopTask(t, "ResourceInitializationError: unable to pull secrets or registry auth (AccessDenied on ECR)", true);
+              draw();
+              tell(say, "The task could not start", `Task ${t.id} <b>stopped before the app ever ran</b>. There are no app logs to read. The answer is in its <b>stopped reason</b>: the execution role may not pull from ECR. The service will keep trying.`, "bad");
+              await beat(1600);
+              continue;
+            }
+            t.status = "RUNNING"; draw();
+            const ok = tasks.filter((x) => x.status === "RUNNING").length === desired && tasks.length === desired;
+            tell(say, ok ? "Back to desired" : "Task running", ok
+              ? `Task ${t.id} is <b>RUNNING</b> and registered with the load balancer's target group. Running matches desired again: <b>${desired}</b>. Nobody had to do anything.`
+              : `Task ${t.id} is <b>RUNNING</b>. The service still needs more to reach <b>${desired}</b>.`, ok ? "good" : "");
+            continue;
+          }
+          break;
+        }
+        looping = false;
+        /* something may have changed while the last step finished */
+        if (live() && tasks.length !== desired) reconcile();
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.want) {
+          desired = Number(b.dataset.want);
+          press(wantBtns, (x) => x === b);
+          draw();
+          tell(say, "Desired count: " + desired, `You changed one number. You didn't start or stop anything yourself — the service compares <b>${desired}</b> with what is running and closes the gap.`);
+          reconcile();
+        } else if (b.dataset.role) {
+          roleOk = b.dataset.role === "ok";
+          press(roleBtns, (x) => x === b);
+          tell(say, roleOk ? "Execution role fixed" : "Execution role broken", roleOk
+            ? "The execution role can pull from ECR again. The next task the service starts will work."
+            : "The execution role has lost its ECR permission. Tasks that are already running keep running — they pulled their image long ago. Now <b>stop a task</b> and watch the replacement.", roleOk ? "" : "bad");
+          reconcile();
+        } else if (b.dataset.a === "kill") {
+          const run = tasks.filter((t) => t.status === "RUNNING");
+          if (!run.length) { tell(say, "Nothing to stop", "No task is running right now."); return; }
+          const t = run[0];
+          stopTask(t, "Task stopped by user");
+          draw();
+          tell(say, "A task stopped", `Task ${t.id} is gone, as if its server had failed. Running is now <b>${tasks.filter((x) => x.status === "RUNNING").length}</b>, desired is still <b>${desired}</b>.`, "bad");
+          reconcile();
+        } else if (b.dataset.a === "reset") {
+          gen++; looping = false;
+          desired = 2; roleOk = true;
+          press(wantBtns, (x) => x.dataset.want === "2");
+          press(roleBtns, (x) => x.dataset.role === "ok");
+          initial(); draw();
+          tell(say, "Ready", "Two tasks are running, one in each zone. Choose <b>Stop a task</b>, or change the desired count.");
+        }
+      });
+      stops.push(() => { alive = false; gen++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>
+
+<style is:global>
+  [data-viz="ecs-service"] .es-stage { padding: 14px 16px; display: grid; gap: 12px; }
+  [data-viz="ecs-service"] p { margin: 0; }
+  [data-viz="ecs-service"] .es-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  [data-viz="ecs-service"] .es-card { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+  [data-viz="ecs-service"] .es-card.svc { border: 2px solid var(--box); }
+  [data-viz="ecs-service"] .es-k { font-size: 13px; font-weight: 800; color: var(--ink-2); margin-bottom: 4px; }
+  [data-viz="ecs-service"] .es-v { font-size: 17px; display: flex; gap: 18px; flex-wrap: wrap; }
+  [data-viz="ecs-service"] .es-v b { font-weight: 800; }
+  [data-viz="ecs-service"] .es-s { font-size: 13.5px; color: var(--ink-2); margin-top: 2px; }
+  [data-viz="ecs-service"] .es-zones { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  [data-viz="ecs-service"] .es-zone { border: 1.5px dashed var(--rule-2); border-radius: 10px; padding: 10px 12px; min-height: 120px; }
+  [data-viz="ecs-service"] ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  [data-viz="ecs-service"] .es-task { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 8px 10px; border-radius: 8px; border: 1.5px solid var(--rule-2); background: var(--surface); font-size: 14px; }
+  [data-viz="ecs-service"] .es-task.running { border-color: var(--box); }
+  [data-viz="ecs-service"] .es-task.pending, [data-viz="ecs-service"] .es-task.provisioning { border-style: dashed; }
+  [data-viz="ecs-service"] .es-id { font-family: var(--mono); font-weight: 600; }
+  [data-viz="ecs-service"] .es-st { font-size: 12px; font-weight: 800; padding: 1px 7px; border-radius: 5px; background: var(--sunk); color: var(--ink-2); }
+  [data-viz="ecs-service"] .running .es-st { background: var(--box); color: var(--on-box); }
+  [data-viz="ecs-service"] .es-ip { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+  [data-viz="ecs-service"] .es-none { color: var(--ink-3); font-size: 14px; }
+  [data-viz="ecs-service"] .es-stopped { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+  [data-viz="ecs-service"] .es-stopped li { font-size: 13.5px; }
+  [data-viz="ecs-service"] .es-stopped li.bad .es-why { color: var(--bad); font-weight: 700; }
+  [data-viz="ecs-service"] .es-why { overflow-wrap: anywhere; }
+  @media (max-width: 700px) {
+    [data-viz="ecs-service"] .es-top, [data-viz="ecs-service"] .es-zones { grid-template-columns: minmax(0, 1fr); }
+    [data-viz="ecs-service"] .es-zone { min-height: 0; }
+  }
+</style>

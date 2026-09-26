@@ -1,0 +1,468 @@
+---
+time: 40 minutes
+level: Beginner
+before: [vpc, routing]
+cost: pennies
+quiz:
+  - q: The app's security group allows port 8080 from the load balancer's security group. A request reaches the app. Which rule lets the app's reply go back to the load balancer?
+    answer: 2
+    options:
+      - t: An outbound rule allowing port 8080
+        why: Replies don't need an outbound rule. Even with every outbound rule deleted, the reply would still get out.
+      - t: An inbound rule on the load balancer's security group
+        why: The load balancer started the connection, so its own security group remembers it too. No extra inbound rule is needed for the reply.
+      - t: None. Security groups are stateful, so the reply to an allowed request is always allowed
+        why: A security group remembers every connection it lets in and lets that connection's replies out. You only write rules for new connections.
+      - t: A network ACL rule for ports 1024 to 65535
+        why: That's the rule a network ACL needs, because network ACLs are stateless. Security groups are not.
+  - q: How do you block one attacker's address with a security group?
+    answer: 0
+    options:
+      - t: You can't. Security groups only have allow rules
+        why: Right. Anything a security group doesn't allow is already blocked. To actively deny one address while allowing everyone else, you need a network ACL, which has deny rules.
+      - t: Add a deny rule with the attacker's address
+        why: There is no deny rule in a security group. The console only lets you add rules that allow.
+      - t: Add an allow rule with a lower number
+        why: Security group rules have no numbers or order. Numbered rules belong to network ACLs.
+      - t: Remove the outbound rule
+        why: That stops your server starting new connections. It does nothing to stop anyone reaching it.
+  - q: A request through the load balancer fails with 504 Gateway Timeout after exactly 10 seconds. The app's logs show nothing at all. What do you check first?
+    answer: 3
+    options:
+      - t: The app's code, for a slow database query
+        why: A slow query would still show up in the app's logs. Empty logs mean the request never arrived.
+      - t: The database's password
+        why: A wrong password fails fast, with a clear error in the app's log.
+      - t: Whether the app has enough memory
+        why: Possible, but it wouldn't explain empty logs. Look at what's between the load balancer and the app first.
+      - t: The app's security group, for a rule allowing the right port from the load balancer's security group
+        why: A time-out with nothing in the app's logs means packets were dropped on the way. The security group rule is the most common cause.
+  - q: Why should the database's rule say "from quickcart-app-sg" and not "from 10.0.11.0/24"?
+    answer: 1
+    options:
+      - t: Security groups don't accept address ranges
+        why: They do. A range works, which is why people use one. It's just the weaker choice.
+      - t: It allows exactly the app servers, wherever they are, including new ones in new subnets
+        why: The rule follows membership of the group, not addresses. Anything else placed in that subnet can't reach the database, and a new app subnet in a second zone works with no rule change.
+      - t: It's faster
+        why: Both kinds of rule are checked just as fast.
+      - t: Ranges only work for inbound rules
+        why: Ranges work in both directions. This is about what the rule means, not whether it's allowed.
+  - q: New app servers boot but never become healthy. Session Manager can't connect to them. The system log shows the start-up script stuck on a package update. What's the most likely cause?
+    answer: 2
+    options:
+      - t: The load balancer's security group blocks port 443
+        why: That would stop customers reaching the load balancer. It wouldn't stop a server downloading packages.
+      - t: The database is down
+        why: Package updates don't touch the database.
+      - t: The app's security group has no outbound rule, so the server can't start any connection
+        why: Without outbound rules, the server can't reach the package repository, and the Session Manager agent can't reach AWS. Replies to inbound traffic still work, which makes it confusing.
+      - t: The server has too little disk space
+        why: That fails with a clear error in the system log, not a hang.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the night the servers kept dying">
+
+Priya tidied up QuickCart's security groups one evening. On `quickcart-app-sg` she removed the outbound rule. The app only ever *answered* requests, she reasoned, so why would it need to send anything out?
+
+Nothing broke straight away. The running servers kept serving orders. But the next morning the auto scaling group started new servers, and none of them came up.
+
+The auto scaling group launched a server, waited, marked it unhealthy, terminated it, and launched another. All morning. Session Manager couldn't connect to any of them. The load balancer said they failed their health checks. Nobody could see why.
+
+Leo finally opened the console log of one doomed server with **Actions → Monitor and troubleshoot → Get system log**. The start-up script was stuck on `dnf update`. It wasn't failing, just waiting. So was the Session Manager agent. Neither could reach the internet, because a server with no outbound rule can't start any connection at all.
+
+</Story>
+
+The app didn't need to send anything *to customers*. But a server does plenty of things on its own: it downloads updates, installs the app, and reports in to AWS. Every one of those is a connection the server starts.
+
+<Case title="A very common mistake">
+
+A connection times out. Someone "fixes" it by adding a rule that allows **all traffic from 0.0.0.0/0**, meaning every port from anywhere. It works, so the rule stays.
+
+Now every port on that server, including SSH and the database port, is open to the whole internet. Automated scanners probe every public address all day, looking for exactly this. The real problem was usually one missing, narrow rule.
+
+</Case>
+
+This lesson is about getting those rules right: what a security group allows, what it quietly drops, and how to tell a network problem from a code problem in seconds.
+
+</Part>
+
+<Part id="idea">
+
+A **security group** is a firewall attached to one resource: a server, a load balancer, a database. It's a list of rules saying what may connect to that resource, and what the resource may connect to.
+
+The [route table](/lessons/routing/) decides whether traffic *can find a path* to a subnet. The security group decides whether the resource *lets it in*. Both have to say yes.
+
+### Four rules about how security groups behave
+
+| Behaviour | What it means | Why it matters |
+|---|---|---|
+| **Allow only** | Every rule allows something. There are no deny rules | Anything not allowed is blocked. You never write "block this" |
+| **Stateful** | Once a connection is allowed in, its replies are allowed out, automatically. The same is true the other way round | You only write rules for connections that *start*. Replies take care of themselves |
+| **Silent** | Blocked traffic is dropped without a reply. The sender hears nothing | The sender waits until it gives up. This is why blocked traffic shows up as a **time-out** |
+| **Immediate** | A rule change applies within seconds, to every resource using the group | No restart. Also no undo button, so change rules carefully |
+
+<YouKnow title="You already know this: app permissions">
+
+An app can't use the camera, location or contacts until the user allows it. There is no "deny camera" switch, because denied is the starting point. A security group is the same: nothing is allowed until you add a rule for it.
+
+</YouKnow>
+
+### What's in a rule
+
+Each rule has three parts:
+
+| Part | Example | What it means |
+|---|---|---|
+| Protocol | TCP | The kind of traffic. Nearly everything you'll write is TCP |
+| Port | `8080` | Which door on the resource. A web server might listen on 443, an app on 8080, PostgreSQL on 5432 |
+| Source (inbound) or destination (outbound) | `quickcart-alb-sg` | Who may connect. An address range such as `0.0.0.0/0`, or **another security group** |
+
+### What a new security group allows
+
+| Direction | A new security group starts with | So |
+|---|---|---|
+| Inbound | **No rules** | Nothing can connect in until you add a rule |
+| Outbound | **One rule: all traffic to 0.0.0.0/0** | The resource can start connections to anywhere |
+
+That outbound rule is the one Priya deleted. It looks unnecessary, which is why people remove it.
+
+### Name the group before, not an address range
+
+A source can be another security group. The rule then means *anything that has that security group attached*, wherever it is and whatever its address.
+
+That's how QuickCart chains its three tiers, each one letting in only the one in front of it:
+
+| Security group | Attached to | Inbound rule | Why |
+|---|---|---|---|
+| `quickcart-alb-sg` | The load balancer | HTTPS, port 443, from `0.0.0.0/0` | Customers can be anywhere |
+| `quickcart-app-sg` | The app servers | TCP, port 8080, from `quickcart-alb-sg` | Only the load balancer may reach the app |
+| `quickcart-db-sg` | The database | PostgreSQL, port 5432, from `quickcart-app-sg` | Only the app may reach the database |
+
+If the auto scaling group adds ten servers, the database rule needs no change: the new servers carry `quickcart-app-sg`, so they're allowed. And if someone puts a test server in the app subnet without that group, it **can't** reach the database, even though its address is in the same range.
+
+<Key>A request that times out was dropped by the network. A request that fails fast reached something that answered.</Key>
+
+### Time-out or error: the fastest diagnosis you'll ever make
+
+| What you see | What happened | Where to look |
+|---|---|---|
+| Waits, then **times out** | Packets were silently dropped. Nothing answered | Security groups, route tables, network ACLs |
+| **Connection refused**, straight away | The packet arrived, but nothing is listening on that port | Is the app running? Is it listening on that port? |
+| An **HTTP error** such as 500, straight away | The app received the request and failed | The app's logs |
+
+Behind a load balancer the same rule holds. The load balancer tries to connect to a server for 10 seconds, then returns **504 Gateway Timeout**. A 504 with nothing in the app's logs almost always means a security group.
+
+<Mistake title="an app security group with no outbound rule">
+
+New servers never become healthy, and the auto scaling group launches and terminates them in a loop. Its **Activity** tab shows the same cause again and again:
+
+```output title="The auto scaling group's activity history includes"
+an instance was taken out of service in response to an ELB system health check failure.
+```
+
+Session Manager can't connect, so you can't log in to look. **EC2 → Instances → select the instance → Actions → Monitor and troubleshoot → Get system log** still works, because it reads the server's console from outside. It shows the start-up script hanging on a package update.
+
+**Why:** a server that's booting mostly *starts* connections: to download packages, to fetch the app, and for the Session Manager agent to reach AWS. With no outbound rule, every one of them is dropped and waits. The app never finishes installing, so it never answers health checks. Replies to inbound traffic would still work, because security groups are stateful. That's what makes this confusing.
+
+**The fix:** put back an outbound rule. The default, all traffic to `0.0.0.0/0`, is fine for most app servers. If you want it tighter, allow HTTPS (443) to `0.0.0.0/0` for updates and AWS, and PostgreSQL (5432) to `quickcart-db-sg`.
+
+</Mistake>
+
+### Network ACLs, briefly
+
+A VPC has a second, older firewall: the **network ACL**. You'll rarely change it, but you should recognise it.
+
+| | Security group | Network ACL |
+|---|---|---|
+| Attached to | One resource | A whole subnet |
+| Rules | Allow only | Allow **and** deny |
+| Order | No order. All rules are checked | Numbered. The lowest-numbered match wins |
+| Replies | **Stateful**: replies are automatic | **Stateless**: replies need their own rule |
+| Default | New group: nothing in, everything out | The VPC's default ACL allows everything both ways |
+
+Because a network ACL is stateless, a reply needs its own rule. Replies go back to the random high port the other side picked, called an **ephemeral port**, usually somewhere between 1024 and 65535. Forgetting that return rule is the classic network ACL mistake. QuickCart leaves the default network ACL alone and does all its filtering with security groups.
+
+</Part>
+
+<Part id="see">
+
+Below is QuickCart's chain: load balancer, app, database, each with its own security group. Send a request with every rule right. Then **break one rule at a time**, send again, and watch the clock at the bottom. Finally, try a bug in the code instead.
+
+<SgChain />
+
+**What to notice:** every broken rule gave the same result: a long wait, then a time-out, and nothing in the app's logs about why. The bug in the code failed in a fraction of a second. How long a failure takes tells you where to look.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">security groups are free. The test server costs about two cents an hour while it runs, including its public IP address (prices change). You delete it at the end.</Cost>
+
+You'll build QuickCart's three-group chain, then launch one small server and see a time-out, a success and a refused connection with your own eyes. About 30 minutes.
+
+Check the region selector at the top right says **N. Virginia (us-east-1)**. The lab uses your account's **default VPC**, which AWS creates in every region. If you deleted it, create the VPC from the [VPC lesson](/lessons/vpc/) and choose it instead, with a public subnet.
+
+<Steps>
+
+<Step title="Create the load balancer's security group">
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-alb-sg` |
+| Description | `QuickCart load balancer: HTTPS from anywhere` |
+| VPC | your default VPC |
+
+Under **Inbound rules**, choose **Add rule**:
+
+| Type | Source |
+|---|---|
+| **HTTPS** (port 443 fills in) | **Anywhere-IPv4** (`0.0.0.0/0`) |
+
+Leave **Outbound rules** as they are: one rule, **All traffic** to `0.0.0.0/0`. Choose **Create security group**.
+
+<See>
+
+The group's details page, with one inbound rule and one outbound rule.
+
+</See>
+
+</Step>
+
+<Step title="Create the app's security group, pointing at the first">
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-app-sg` |
+| Description | `QuickCart app servers: 8080 from the load balancer only` |
+| VPC | your default VPC |
+
+Under **Inbound rules**, choose **Add rule**:
+
+| Type | Port range | Source |
+|---|---|---|
+| **Custom TCP** | `8080` | **Custom**, then start typing `quickcart-alb-sg` and pick it from the list |
+
+Leave the outbound rule. Choose **Create security group**.
+
+<See>
+
+The inbound rule's source shows the ID of `quickcart-alb-sg`, starting `sg-`, instead of an address range.
+
+</See>
+
+</Step>
+
+<Step title="Create the database's security group, pointing at the app">
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-db-sg` |
+| Description | `QuickCart database: PostgreSQL from the app only` |
+| VPC | your default VPC |
+
+| Type | Source |
+|---|---|
+| **PostgreSQL** (port 5432 fills in) | **Custom**, then pick `quickcart-app-sg` |
+
+Choose **Create security group**. That's the whole chain: three groups, three inbound rules, and no address ranges except the front door.
+
+</Step>
+
+<Step title="Create a test group with no inbound rules">
+
+Now you'll see the three outcomes for yourself. Create one more group:
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-lab-sg` |
+| Description | `Lab: test time-outs from my laptop` |
+| VPC | your default VPC |
+
+Add **no** inbound rules. Choose **Create security group**.
+
+</Step>
+
+<Step title="Launch a small server running a web server on port 8080">
+
+<ConsolePath path="EC2 > Instances > Launch instances" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-lab` |
+| Application and OS Images | **Amazon Linux 2023 AMI** (the default) |
+| Instance type | **t3.micro** |
+| Key pair | **Proceed without a key pair** |
+| Network settings → Edit → Auto-assign public IP | **Enable** |
+| Firewall (security groups) | **Select existing security group**, then `quickcart-lab-sg` |
+
+Open **Advanced details**. In the **User data** box at the bottom, paste this script. It runs once, as the server first starts:
+
+```sh title="user data"
+#!/bin/bash
+systemd-run --unit quickcart-web /usr/bin/python3 -m http.server 8080
+```
+
+| Part | What it means |
+|---|---|
+| `#!/bin/bash` | run this script with bash |
+| `systemd-run` | start a program as a background service, so it keeps running after the script ends |
+| `--unit quickcart-web` | the service's name |
+| `/usr/bin/python3 -m http.server` | Python's built-in web server. Amazon Linux 2023 includes Python |
+| `8080` | the port it listens on, like QuickCart's app |
+
+Choose **Launch instance**. Wait until the instance shows **Running** and its status check shows **2/2 checks passed**, about two minutes. Then select it and copy its **Public IPv4 address**.
+
+</Step>
+
+<Step title="Try it with no rule: a time-out">
+
+On your Mac, open Terminal and run the command below. Replace the highlighted address with the public IPv4 address you copied:
+
+```sh ph="203.0.113.10"
+curl --max-time 5 http://203.0.113.10:8080
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request from the terminal and print the answer |
+| `--max-time 5` | give up after 5 seconds instead of waiting for minutes |
+| `http://203.0.113.10:8080` | your server's public address, port 8080 |
+
+It waits five seconds, then:
+
+```output
+curl: (28) Connection timed out after 5005 milliseconds
+```
+
+The number of milliseconds will be slightly different. The web server is running, but `quickcart-lab-sg` allows nothing in, so your request was dropped and nothing replied.
+
+</Step>
+
+<Step title="Allow port 8080 from your address: success">
+
+<ConsolePath path="EC2 > Security Groups > quickcart-lab-sg > Inbound rules > Edit inbound rules" />
+
+Choose **Add rule**:
+
+| Type | Port range | Source |
+|---|---|---|
+| **Custom TCP** | `8080` | **My IP** |
+
+**My IP** fills in your current public address with `/32` on the end, meaning that one address only. Choose **Save rules**, then run the same `curl` command again.
+
+```output title="Straight away, you should see an HTML page that includes"
+<title>Directory listing for /</title>
+```
+
+No restart, no waiting. The rule applied within seconds.
+
+</Step>
+
+<Step title="Allow a port nothing listens on: refused">
+
+Edit the inbound rules again and add one more:
+
+| Type | Port range | Source |
+|---|---|---|
+| **Custom TCP** | `8081` | **My IP** |
+
+Save, then try port 8081. Use your address again:
+
+```sh ph="203.0.113.10"
+curl --max-time 5 http://203.0.113.10:8081
+```
+
+| Part | What it means |
+|---|---|
+| `curl --max-time 5` | the same request, with the same 5-second limit |
+| `:8081` | a port the security group now allows, but where no program is listening |
+
+```output title="It fails at once, with a message like"
+curl: (7) Failed to connect to 203.0.113.10 port 8081 after 97 ms: Couldn't connect to server
+```
+
+Older versions of curl say `Connection refused` instead. Either way it's **fast**: the packet got through the security group and the server itself answered "nothing here". That's a different problem from a time-out, with a different place to look.
+
+<Mistake title="My IP stops working later">
+
+```output
+curl: (28) Connection timed out after 5005 milliseconds
+```
+
+**Why:** your home or office address can change, and the rule only allows the address you had when you saved it. A different Wi-Fi network means a different address.
+
+**The fix:** edit the rule and choose **My IP** again. Never "fix" it with `0.0.0.0/0` on a real server.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+<ConsolePath path="EC2 > Instances > quickcart-lab > Instance state > Terminate (delete) instance" />
+
+Confirm. Wait until its state is **Terminated**. A security group can't be deleted while something is still using it.
+
+<ConsolePath path="EC2 > Security Groups" />
+
+Delete the groups **in this order**, one at a time: select, then **Actions → Delete security groups**.
+
+| Order | Group | Why this order |
+|---|---|---|
+| 1 | `quickcart-lab-sg` | Free once the server is terminated |
+| 2 | `quickcart-db-sg` | Nothing refers to it |
+| 3 | `quickcart-app-sg` | The database group referred to it; now it's gone |
+| 4 | `quickcart-alb-sg` | The app group referred to it; now it's gone |
+
+If you try them in another order, AWS refuses because another group's rule still names that group. Delete the one that refers to it first.
+
+<See>
+
+None of the four `quickcart-` groups in the list, and no `quickcart-lab` instance except as **Terminated**, which disappears on its own after about an hour.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| Security group | A firewall on one resource. Allow rules only |
+| Stateful | Replies to an allowed connection are allowed automatically |
+| New group | No inbound rules; outbound allows all traffic |
+| Source = another group | Allows whatever carries that group, at any address |
+| The chain | ALB from `0.0.0.0/0` on 443 → app from ALB group on 8080 → database from app group on 5432 |
+| Times out | Dropped by the network: security group, route table or network ACL |
+| Refused, fast | Reached the server; nothing listening on that port |
+| HTTP 500, fast | Reached the app; the code failed. Read its logs |
+| 504 from the load balancer | It couldn't reach a server within 10 seconds. Check the app's security group |
+| Can't log in to a broken server? | Actions → Monitor and troubleshoot → Get system log |
+| Network ACL | Subnet firewall. Stateless, numbered, allow and deny. Usually left at the default |
+
+</Cheat>
+
+</Part>

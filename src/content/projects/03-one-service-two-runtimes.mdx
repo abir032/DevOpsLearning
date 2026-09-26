@@ -1,0 +1,1940 @@
+---
+time: 7 to 9 hours, in two sittings. Do the EKS half in one go.
+cost: about $6 a day while both runtimes run. EKS is most of it
+---
+
+QuickCart's order service is outgrowing its servers. The team is split. Maya wants to move it to ECS, which they already know. Leo says everyone is moving to Kubernetes, so they should too. Nobody has tried both.
+
+In this project you settle it with evidence. You run the **same container image** on ECS Fargate and on EKS, each behind its own HTTPS load balancer. You release a new version on each while a script keeps ordering, and you count exactly how many requests fail. The target is zero. Then you write a recommendation that the other side can argue with and still not beat.
+
+## What you'll have at the end
+
+<TwoRuntimes />
+
+**What to notice:** the image is identical on both sides. On ECS you create the load balancer and there are no servers. On EKS a controller builds the load balancer for you, but you now own two EC2 nodes, a controller to keep up to date, and two extra settings that ECS handles on its own.
+
+| Piece | ECS side | EKS side |
+|---|---|---|
+| The image | `quickcart-orders:v1` and `v2` in ECR | the same image |
+| Load balancer | `quickcart-ecs-alb`, created by you, HTTPS on 443 | created by the AWS Load Balancer Controller from an Ingress |
+| What keeps two copies running | an ECS **service** with 2 tasks | a Kubernetes **Deployment** with 2 pods |
+| Where they run | Fargate: no servers in your account | 2 `t3.small` EC2 nodes in your account |
+| Network | the default VPC, two zones | the same default VPC and zones |
+| Certificate | one self-signed certificate in ACM | the same certificate |
+
+To keep the cost down, this project uses your account's **default VPC** with public subnets and no NAT gateway. The containers get public IP addresses only so they can download their image; their security group still lets in nothing but the load balancer. [Project 1](/projects/01-network-by-hand/) built the stricter private-subnet version, and [Project 4](/projects/04-everything-as-code/) rebuilds this project that way, in code.
+
+## Before you start
+
+Read these first. The project assumes them and doesn't explain them again.
+
+| Read | Why you need it here |
+|---|---|
+| [Images and containers](/lessons/images-and-containers/) and [Writing a Dockerfile](/lessons/dockerfile/) | You build the image in the first stage |
+| [Storing images: ECR](/lessons/ecr/) | Immutable tags and scanning |
+| [Security groups](/lessons/security-groups/) and [Load balancers](/lessons/load-balancers/) | The load balancer to app chain |
+| [Domain names and HTTPS](/lessons/dns-and-https/) | Why the certificate here is self-signed |
+| [ECS on Fargate](/lessons/ecs-fargate/) and [Releases without downtime](/lessons/zero-downtime-releases/) | Every ECS setting you choose |
+| [Kubernetes and EKS](/lessons/kubernetes-and-eks/) | Pods, Deployments, Services and Ingress |
+| [ECS or EKS?](/lessons/ecs-or-eks/) | How to turn measurements into a decision |
+
+You also need these on your Mac. [Set up your Mac](/lessons/mac-setup/) installs the first three and a safe AWS login.
+
+| Tool | Used for |
+|---|---|
+| AWS CLI | ECR login, and connecting `kubectl` to the cluster |
+| Docker Desktop | building and running the image |
+| `curl` and `openssl` | testing, and making the certificate. Both come with macOS |
+| `kubectl` | talking to the Kubernetes cluster |
+| `helm` | installing the load balancer controller into the cluster |
+
+Install the last two with Homebrew:
+
+```sh
+brew install kubectl helm
+```
+
+| Part | What it means |
+|---|---|
+| `brew install` | install programs with Homebrew |
+| `kubectl` | the command-line tool for any Kubernetes cluster |
+| `helm` | installs packaged add-ons, called charts, into a cluster |
+
+Check your AWS login works in the terminal:
+
+```sh
+aws sts get-caller-identity
+```
+
+| Part | What it means |
+|---|---|
+| `aws sts get-caller-identity` | ask AWS which identity your terminal is using |
+
+<See>
+
+Three lines: `UserId`, `Account` and `Arn`. The `Account` is your 12-digit account ID. This page shows it as `111122223333`; wherever you see that, use yours. The `Arn` must **not** end in `:root`. If it does, stop and follow [Who can do what: IAM](/lessons/iam/) first.
+
+</See>
+
+## Cost
+
+<Cost kind="paid">about $6 a day while both runtimes run, and about $2.50 a day of that is EKS. Delete it the same day.</Cost>
+
+| What | Price in us-east-1 (check the pricing pages; prices change) | Per day, roughly |
+|---|---|---|
+| EKS control plane | $0.10 an hour, even with nothing running on it | $2.40 |
+| 2 EKS nodes, `t3.small` | about $0.021 an hour each | $1.00 |
+| 2 Application Load Balancers | about $0.0225 an hour each, plus a little per unit of traffic | $1.10 |
+| 2 Fargate tasks, 0.25 vCPU and 0.5 GB each | about $0.012 an hour each | $0.60 |
+| Public IPv4 addresses on tasks, nodes and load balancers | $0.005 an hour each, about eight of them | $1.00 |
+| Node disks, ECR storage, CloudWatch logs | a few cents | pennies |
+| The imported certificate in ACM | free | $0 |
+
+<Note title="EKS charges by the hour, whether you use it or not">
+
+The EKS control plane costs about **$73 a month** before a single pod runs. A cluster forgotten over a weekend costs more than everything else in this project put together.
+
+Do the EKS stages in **one sitting**, then go straight to [Clean up](#clean-up). If you have to stop half-way, delete the cluster and start the EKS stages again next time; creating it takes about 15 minutes.
+
+</Note>
+
+## Build and run the order service
+
+The app is small on purpose, so all your attention goes on running it. You prove it works on your Mac before AWS is involved, where problems are far easier to find.
+
+<Steps>
+
+<Step title="Create the three files">
+
+Make a folder called `quickcart-orders` and open it in your editor. Create these three files in it.
+
+```python title="app.py"
+import os
+import socket
+
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+VERSION = os.environ.get("APP_VERSION", "v1")
+
+ORDERS = [
+    {"id": 1, "item": "margherita pizza", "qty": 2},
+    {"id": 2, "item": "pad thai", "qty": 1},
+    {"id": 3, "item": "mango lassi", "qty": 3},
+]
+
+
+@app.get("/health")
+def health():
+    return jsonify(status="ok", version=VERSION)
+
+
+@app.get("/")
+def home():
+    return jsonify(service="orders", version=VERSION, served_by=socket.gethostname())
+
+
+@app.get("/orders")
+def orders():
+    return jsonify(version=VERSION, count=len(ORDERS), orders=ORDERS)
+```
+
+| Page | What it returns | Who uses it |
+|---|---|---|
+| `/health` | `ok` and the version | The load balancer, to decide whether a copy may get traffic |
+| `/` | the version, and the name of the copy that answered | You, to see which version and which copy served you |
+| `/orders` | three example orders | You, to check the app really works |
+
+```ini title="requirements.txt"
+flask==3.1.3
+gunicorn==23.0.0
+```
+
+| Line | What it means |
+|---|---|
+| `flask==3.1.3` | the web framework, pinned to one exact version so every build is the same |
+| `gunicorn==23.0.0` | the web server that runs the app in production and stops cleanly when asked |
+
+```dockerfile title="Dockerfile"
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app.py .
+RUN useradd --create-home --uid 1001 appuser
+USER 1001
+ARG APP_VERSION=v1
+ENV APP_VERSION=$APP_VERSION
+EXPOSE 8080
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--graceful-timeout", "20", "app:app"]
+```
+
+| Line | What it does | Why it matters in this project |
+|---|---|---|
+| `FROM python:3.12-slim` | start from a small Linux with Python | small images download faster, so new copies start faster |
+| `WORKDIR /app` | work in a folder called `/app` | keeps the app's files in one place |
+| `COPY requirements.txt .` then `RUN pip install` | install the libraries **before** copying the code | a code change reuses the cached library layer, so builds take seconds |
+| `COPY app.py .` | copy the code in | the part that changes most, so it goes last |
+| `RUN useradd` and `USER 1001` | create a normal user and run as it | a break-in only gets a normal user's power |
+| `ARG` and `ENV APP_VERSION` | stamp a version into the image when you build it | this is how you tell v1 from v2 during a release |
+| `EXPOSE 8080` | a note that the app listens on 8080 | only root may use ports below 1024 |
+| `CMD [...]` in square brackets | start gunicorn **directly**, with no shell in between | gunicorn hears the stop signal, finishes its requests and exits. This is one of the three settings that make zero failures possible |
+| `--graceful-timeout 20` | give requests in progress up to 20 seconds to finish on stop | shorter than the 30-second drain you set later |
+
+</Step>
+
+<Step title="Build the image">
+
+In a terminal, go into the folder, then build:
+
+```sh
+cd quickcart-orders
+```
+
+| Part | What it means |
+|---|---|
+| `cd quickcart-orders` | move into the project folder. Every later command runs here |
+
+```sh
+docker build --platform linux/amd64 --provenance=false -t quickcart-orders:v1 .
+```
+
+| Part | What it means |
+|---|---|
+| `docker build` | make an image from the Dockerfile |
+| `--platform linux/amd64` | build for Intel and AMD processors, which is what your Fargate tasks and `t3` nodes use |
+| `--provenance=false` | don't attach a build record, so ECR sees one plain image and can scan it |
+| `-t quickcart-orders:v1` | name the image `quickcart-orders`, tag `v1` |
+| `.` | use the files in this folder |
+
+<See>
+
+A list of build steps, ending with a line that names the image `quickcart-orders:v1`.
+
+</See>
+
+<Mistake title="leaving out --platform on an Apple silicon Mac">
+
+```output title="The task or pod stops, and its log says"
+exec format error
+```
+
+**Why:** your Mac builds for ARM processors unless told otherwise. The image runs on your Mac and fails on AWS.
+
+**The fix:** always build with `--platform linux/amd64` when the image is going to AWS, then push again under a **new** tag. The repository is immutable, so the old tag can't be reused.
+
+</Mistake>
+
+</Step>
+
+<Step title="Run it on your Mac">
+
+```sh
+docker run -d -p 8080:8080 --name orders quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker run` | start a container from an image |
+| `-d` | run it in the background, so you get the terminal back |
+| `-p 8080:8080` | connect port 8080 on your Mac to port 8080 in the container |
+| `--name orders` | call the container `orders` so later commands can use the name |
+| `quickcart-orders:v1` | the image to start |
+
+<See>
+
+A long container ID. Docker may also warn that the image's platform doesn't match your Mac's. That's expected on Apple silicon: the image is built for AWS, and Docker Desktop translates it.
+
+</See>
+
+```sh
+curl localhost:8080/health
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch a web page and print it |
+| `localhost:8080` | port 8080 on your own Mac, which leads into the container |
+| `/health` | the page to fetch |
+
+```output
+{"status":"ok","version":"v1"}
+```
+
+Check it isn't running as root:
+
+```sh
+docker exec orders whoami
+```
+
+| Part | What it means |
+|---|---|
+| `docker exec` | run a command inside a running container |
+| `orders` | which container |
+| `whoami` | print the name of the current user |
+
+```output
+appuser
+```
+
+Stop and remove it:
+
+```sh
+docker rm -f orders
+```
+
+| Part | What it means |
+|---|---|
+| `docker rm` | delete a container |
+| `-f` | stop it first if it's running |
+| `orders` | which container |
+
+```output
+orders
+```
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** you have an image called `quickcart-orders:v1` that answers `/health` with `ok` and runs as `appuser`.
+
+</See>
+
+## Put the image in ECR
+
+ECS and EKS both download your image from ECR, AWS's private image store.
+
+<Steps>
+
+<Step title="Create the repository">
+
+<ConsolePath path="ECR > Private registry > Repositories > Create repository" />
+
+| Field | Enter |
+|---|---|
+| Repository name | `quickcart-orders` |
+| Image tag mutability | **Immutable** |
+| Scan on push | **On**. It may sit under **Image scanning settings** |
+| Encryption | leave the default, **AES-256** |
+
+Choose **Create**.
+
+| Setting | Why |
+|---|---|
+| Immutable | once `v1` is pushed, nothing can replace it. `v1` always means the same code, which is what makes going back safe |
+| Scan on push | every image is checked for known security problems as it arrives |
+
+</Step>
+
+<Step title="Log Docker in to ECR">
+
+```sh ph="111122223333"
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `aws ecr get-login-password` | ask AWS for a temporary registry password |
+| `--region us-east-1` | for the registry in this region |
+| `\|` | a pipe: pass the password straight into the next command, so it's never shown or typed |
+| `docker login` | log Docker in to a registry |
+| `--username AWS` | the username for ECR is always the word `AWS` |
+| `--password-stdin` | read the password from the pipe |
+| `111122223333.dkr.ecr.us-east-1.amazonaws.com` | your registry's address. Replace the account ID with yours |
+
+```output
+Login Succeeded
+```
+
+The login lasts 12 hours.
+
+</Step>
+
+<Step title="Tag and push v1">
+
+Docker needs the image named with the registry's full address. `docker tag` gives it a second name; it copies nothing.
+
+```sh ph="111122223333"
+docker tag quickcart-orders:v1 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give an existing image another name |
+| `quickcart-orders:v1` | the image you built |
+| the second argument | the new name: your registry's address, then `/quickcart-orders:v1` |
+
+It prints nothing when it works.
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload an image to a registry |
+| the address | which image, by its full name |
+
+<See>
+
+Each layer uploads, then a last line starting `v1: digest: sha256:`.
+
+</See>
+
+</Step>
+
+<Step title="Read the scan">
+
+<ConsolePath path="ECR > Repositories > quickcart-orders > v1 > Vulnerabilities" />
+
+Give it a minute after the push.
+
+<See>
+
+A count of findings by severity. The slim Python image usually has a few low or medium findings and no critical ones.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `quickcart-orders` in ECR holds one image tagged `v1`, with a finished scan.
+
+</See>
+
+## Network, security groups and the certificate
+
+<Steps>
+
+<Step title="Find two subnets in the default VPC">
+
+<ConsolePath path="VPC > Subnets" />
+
+Look for the subnets whose **VPC** is the one marked **Default VPC: Yes**. There is one per availability zone. Write down three values; you need them later:
+
+| Write down | Where it is |
+|---|---|
+| The default VPC's ID, like `vpc-0abc` | the **VPC** column |
+| The subnet ID in `us-east-1a` | the row whose **Availability Zone** is `us-east-1a` |
+| The subnet ID in `us-east-1b` | the row for `us-east-1b` |
+
+</Step>
+
+<Step title="Tag both subnets for EKS">
+
+The EKS load balancer controller only places an internet-facing load balancer in subnets tagged for it. Adding the tag now saves a confusing failure later.
+
+<ConsolePath path="VPC > Subnets > the us-east-1a subnet > Tags > Manage tags > Add new tag" />
+
+| Field | Enter |
+|---|---|
+| Key | `kubernetes.io/role/elb` |
+| Value | `1` |
+
+Choose **Save**, then do the same on the `us-east-1b` subnet.
+
+</Step>
+
+<Step title="Create the load balancer's security group">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-alb-sg` |
+| Description | `QuickCart load balancer` |
+| VPC | the default VPC |
+
+| Inbound rule type | Port | Source |
+|---|---|---|
+| HTTPS | 443 | Anywhere-IPv4 |
+| HTTP | 80 | Anywhere-IPv4 |
+
+Leave the outbound rule as it is. Choose **Create security group**.
+
+</Step>
+
+<Step title="Create the app's security group">
+
+<ConsolePath path="EC2 > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-app-sg` |
+| Description | `QuickCart order service tasks` |
+| VPC | the default VPC |
+
+| Inbound rule type | Port | Source |
+|---|---|---|
+| Custom TCP | `8080` | **Custom**, then choose `quickcart-alb-sg` |
+
+Leave the outbound rule allowing everything: the tasks need it to download their image.
+
+<Mistake title="port 0, or the wrong security group on the tasks">
+
+```output title="The target group shows the tasks as unhealthy with"
+Request timed out
+```
+
+**Why:** "timed out" means the health check never arrived. That's the network, not your code. It happens when the inbound rule's port is left at `0`, or when the tasks are given `quickcart-alb-sg` instead of `quickcart-app-sg`.
+
+**The fix:** open `quickcart-app-sg`, check the inbound rule says port `8080` from `quickcart-alb-sg`, and check the ECS service's networking uses `quickcart-app-sg` only.
+
+</Mistake>
+
+</Step>
+
+<Step title="Make a self-signed certificate">
+
+A certificate encrypts traffic and proves who the site is. ACM only issues trusted certificates for domains you own. This project doesn't need a domain, so you make a certificate yourself. It encrypts exactly as well; browsers just warn that nobody trusted vouched for it.
+
+In the `quickcart-orders` folder:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 30 -subj "/CN=orders.quickcart.test"
+```
+
+| Part | What it means |
+|---|---|
+| `openssl req -x509` | make a certificate that signs itself |
+| `-newkey rsa:2048` | make a new 2048-bit RSA key to go with it. ACM accepts this type |
+| `-nodes` | don't put a password on the key. ACM needs it without one |
+| `-keyout key.pem` | save the private key as `key.pem` |
+| `-out cert.pem` | save the certificate as `cert.pem` |
+| `-days 30` | valid for 30 days, plenty for this project |
+| `-subj "/CN=orders.quickcart.test"` | the name written inside it. Any name works for a self-signed certificate |
+
+<See>
+
+Two new files in the folder: `cert.pem` and `key.pem`.
+
+</See>
+
+<Note title="key.pem is a secret">
+
+It's the private half of the certificate. Never commit it to git or paste it anywhere except ACM. You delete it in [Clean up](#clean-up).
+
+</Note>
+
+</Step>
+
+<Step title="Import it into Certificate Manager">
+
+Print each file so you can copy it:
+
+```sh
+cat cert.pem
+```
+
+| Part | What it means |
+|---|---|
+| `cat` | print a file |
+| `cert.pem` | the certificate |
+
+<See>
+
+Text starting `-----BEGIN CERTIFICATE-----` and ending `-----END CERTIFICATE-----`. Do the same with `cat key.pem`.
+
+</See>
+
+<ConsolePath path="Certificate Manager > Import" />
+
+| Field | Enter |
+|---|---|
+| Certificate body | all of `cert.pem`, including the `BEGIN` and `END` lines |
+| Certificate private key | all of `key.pem`, including the `BEGIN` and `END` lines |
+| Certificate chain | leave empty |
+
+Choose **Import certificate**.
+
+<See>
+
+The certificate listed with status **Issued** and type **Imported**. Open it and copy its **ARN**, which starts `arn:aws:acm:us-east-1:111122223333:certificate/`. EKS needs it later.
+
+</See>
+
+<Mistake title="ACM says the private key is not valid">
+
+```output title="The import fails with a message like"
+The private key is not supported.
+```
+
+**Why:** some versions of `openssl` write the key in a format ACM's form doesn't accept.
+
+**The fix:** rewrite the key in the older RSA format, then paste `key-rsa.pem` instead:
+
+```sh
+openssl rsa -in key.pem -out key-rsa.pem
+```
+
+| Part | What it means |
+|---|---|
+| `openssl rsa` | read and rewrite an RSA key |
+| `-in key.pem` | the key you made |
+| `-out key-rsa.pem` | save the rewritten key under a new name |
+
+Open `key-rsa.pem`. If its first line is `-----BEGIN RSA PRIVATE KEY-----`, it's ready. If it still says `BEGIN PRIVATE KEY`, run the command again with `-traditional` added before `-in`.
+
+</Mistake>
+
+<Note title="If you own a domain">
+
+Use a trusted certificate instead and the browser warning disappears. In **Certificate Manager > Request > Request a public certificate**, enter a name such as `orders.example.com`, choose **DNS validation**, and add the record it gives you (with **Create records in Route 53** if the domain is there). Once it says **Issued**, use it everywhere this project uses the imported one, and later point `orders.example.com` at each load balancer with an alias record. [Domain names and HTTPS](/lessons/dns-and-https/) walks through it.
+
+</Note>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** two tagged subnets, two security groups in a chain (`quickcart-alb-sg` lets anyone in on 443 and 80; `quickcart-app-sg` lets only the load balancer in on 8080), and one certificate showing **Issued**.
+
+</See>
+
+## Run it on ECS
+
+<Steps>
+
+<Step title="Create the target group">
+
+<ConsolePath path="EC2 > Target Groups > Create target group" />
+
+| Field | Enter |
+|---|---|
+| Target type | **IP addresses** |
+| Target group name | `quickcart-ecs-tg` |
+| Protocol : Port | HTTP : `8080` |
+| VPC | the default VPC |
+| Health check path | `/health` |
+| Healthy threshold (under **Advanced health check settings**) | `2` |
+| Unhealthy threshold | `2` |
+| Interval | `10` seconds |
+
+Choose **Next**. **Don't register any targets**; ECS adds them itself. Choose **Create target group**.
+
+| Setting | Why |
+|---|---|
+| IP addresses | a Fargate task has no server behind it, just its own IP address |
+| `/health` | a page that proves the app works, not just that something answers |
+| Healthy threshold 2 | the default of 5 makes each new task wait 50 seconds for traffic; 2 makes it 20 |
+
+</Step>
+
+<Step title="Shorten the drain">
+
+<ConsolePath path="EC2 > Target Groups > quickcart-ecs-tg > Attributes > Edit" />
+
+| Field | Enter |
+|---|---|
+| Deregistration delay | `30` seconds |
+
+Choose **Save changes**. The default of 300 seconds makes every release wait five minutes for nothing. Thirty seconds is plenty for this app's requests to finish.
+
+</Step>
+
+<Step title="Create the load balancer">
+
+<ConsolePath path="EC2 > Load Balancers > Create load balancer > Application Load Balancer > Create" />
+
+| Field | Enter |
+|---|---|
+| Load balancer name | `quickcart-ecs-alb` |
+| Scheme | **Internet-facing** |
+| Load balancer IP address type | **IPv4** |
+| VPC | the default VPC |
+| Availability Zones | tick `us-east-1a` and `us-east-1b` |
+| Security groups | `quickcart-alb-sg` only. Remove `default` |
+
+Under **Listeners and routing**, change the first listener, then add a second:
+
+| Listener | Default action |
+|---|---|
+| HTTPS : 443 | Forward to `quickcart-ecs-tg` |
+| HTTP : 80 | **Redirect to URL**: HTTPS, port `443`, status code **301** |
+
+Adding the HTTPS listener shows **Secure listener settings**:
+
+| Field | Enter |
+|---|---|
+| Security policy | leave the recommended default |
+| Default SSL/TLS server certificate | **From ACM**, then choose the certificate you imported |
+
+Choose **Create load balancer**. It takes a few minutes to become **Active**.
+
+<Mistake title="the default VPC is greyed out">
+
+```output title="The default VPC can't be picked, and the console's reason is along the lines of"
+The selected VPC does not have an internet gateway.
+```
+
+**Why:** an internet-facing load balancer needs a way to the internet, and this default VPC has lost its internet gateway.
+
+**The fix:** in **VPC > Internet gateways**, create one and attach it to the default VPC. Then in the default VPC's main route table, add a route `0.0.0.0/0` to that gateway.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the ECS cluster">
+
+<ConsolePath path="ECS > Clusters > Create cluster" />
+
+| Field | Enter |
+|---|---|
+| Cluster name | `quickcart-cluster` |
+| Infrastructure | **Fargate only** |
+
+Choose **Create**.
+
+<See>
+
+The cluster in the list within seconds. Look in **EC2 > Instances**: nothing new. On Fargate a cluster is just a name.
+
+</See>
+
+<Mistake title="Unable to assume the service linked role">
+
+```output title="Creating the cluster fails with"
+Unable to assume the service linked role. Please verify that the ECS service linked role exists.
+```
+
+**Why:** the first time an account uses ECS, AWS creates a role called `AWSServiceRoleForECS`. Sometimes it isn't ready yet. The console has no button for this role, so use the CLI:
+
+```sh
+aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com
+```
+
+| Part | What it means |
+|---|---|
+| `aws iam create-service-linked-role` | create a role that belongs to an AWS service |
+| `--aws-service-name ecs.amazonaws.com` | the service it belongs to: ECS |
+
+**The fix:** run it, then create the cluster again. If it says the role already exists, AWS was just slow; wait a minute and retry.
+
+</Mistake>
+
+</Step>
+
+<Step title="Create the task definition">
+
+<ConsolePath path="ECS > Task definitions > Create new task definition" />
+
+| Field | Enter |
+|---|---|
+| Task definition family | `quickcart-orders` |
+| Launch type | **AWS Fargate** |
+| Operating system/Architecture | **Linux/X86_64**, to match `--platform linux/amd64` |
+| CPU | `.25 vCPU` |
+| Memory | `.5 GB` |
+| Task role | none |
+| Task execution role | **Create new role**, or `ecsTaskExecutionRole` if it's already listed |
+| Container name | `app` |
+| Image URI | `111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1`, with your account ID |
+| Container port | `8080`, protocol **TCP**, app protocol **HTTP** |
+| Log collection | leave **Use log collection** ticked |
+
+Choose **Create**.
+
+<See>
+
+`quickcart-orders:1`: revision 1 of the recipe. Every change you make creates a new revision, and the old ones stay exactly as they were.
+
+</See>
+
+| Role | Used by | This app |
+|---|---|---|
+| Execution role | ECS itself, before your code starts: to pull the image and write logs | needs one |
+| Task role | your code while it runs, to call AWS services | needs none; the app never calls AWS |
+
+</Step>
+
+<Step title="Create the service">
+
+<ConsolePath path="ECS > Clusters > quickcart-cluster > Services > Create" />
+
+| Field | Enter |
+|---|---|
+| Compute options | **Launch type**, then **FARGATE** |
+| Task definition family | `quickcart-orders`, revision **LATEST** |
+| Service name | `orders` |
+| Desired tasks | `2` |
+
+Under **Deployment options**:
+
+| Field | Enter |
+|---|---|
+| Deployment type | **Rolling update** |
+| Min running tasks % | `100` |
+| Max running tasks % | `200` |
+| Deployment failure detection | tick **Use the Amazon ECS deployment circuit breaker** and **Rollback on failures** |
+
+Under **Networking**:
+
+| Field | Enter |
+|---|---|
+| VPC | the default VPC |
+| Subnets | only the `us-east-1a` and `us-east-1b` ones |
+| Security group | **Use an existing security group**: `quickcart-app-sg` only. Remove `default` |
+| Public IP | **Turned on** |
+
+Under **Load balancing**:
+
+| Field | Enter |
+|---|---|
+| Load balancer type | **Application Load Balancer** |
+| Load balancer | **Use an existing load balancer**: `quickcart-ecs-alb` |
+| Container | `app 8080:8080` |
+| Listener | **Use an existing listener**: `443:HTTPS` |
+| Target group | **Use an existing target group**: `quickcart-ecs-tg` |
+| Health check grace period | `30` seconds |
+
+Choose **Create**.
+
+| Setting | In plain words |
+|---|---|
+| Desired tasks 2 | always keep two copies running, one per zone |
+| Min 100% | during a release, never drop below two working copies |
+| Max 200% | during a release, up to four copies may run at once |
+| Circuit breaker with rollback | if the new version keeps failing to start, stop and go back by itself |
+| Public IP on | lets each task reach ECR to download its image, because there's no NAT gateway |
+
+<See>
+
+After one to three minutes, the service shows **2/2 tasks running**. In **EC2 > Target Groups > quickcart-ecs-tg > Targets**, two IP addresses are **Healthy**.
+
+</See>
+
+</Step>
+
+<Step title="Test it over HTTPS">
+
+<ConsolePath path="EC2 > Load Balancers > quickcart-ecs-alb" />
+
+Copy its **DNS name**. It looks like `quickcart-ecs-alb-1234567890.us-east-1.elb.amazonaws.com`. Use yours wherever this page shows `ECS_ALB`.
+
+```sh ph="ECS_ALB"
+curl -k https://ECS_ALB/orders
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | fetch a web page |
+| `-k` | accept the self-signed certificate. Without it, curl refuses to connect |
+| `https://ECS_ALB/orders` | the orders page, through your load balancer, over HTTPS |
+
+<See>
+
+The three orders, with `"version":"v1"`.
+
+</See>
+
+Now ask six times in a row, to see the load balancer share the work:
+
+```sh ph="ECS_ALB"
+for i in 1 2 3 4 5 6; do echo "request $i"; curl -sk https://ECS_ALB/; echo; done
+```
+
+| Part | What it means |
+|---|---|
+| `for i in 1 2 3 4 5 6; do` | repeat what follows six times, with `i` counting 1 to 6 |
+| `echo "request $i"` | print which request this is |
+| `curl -sk https://ECS_ALB/` | fetch the home page quietly, accepting the certificate. It says which copy answered |
+| `echo` | print a new line, so each answer sits on its own line |
+| `done` | the end of the part to repeat |
+
+<See>
+
+Six answers. `served_by` switches between two different names: the two tasks.
+
+</See>
+
+</Step>
+
+<Step title="Watch it heal itself">
+
+<ConsolePath path="ECS > Clusters > quickcart-cluster > Services > orders > Tasks" />
+
+Tick one task and choose **Stop**, then **Stop** again to confirm.
+
+<See>
+
+The running count drops to 1. A new task appears and the count is back to 2 in about a minute, with no one touching anything.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `curl -k https://ECS_ALB/orders` returns the orders over HTTPS, `http://` redirects to `https://`, and a stopped task is replaced by itself.
+
+</See>
+
+## Release v2 on ECS under load
+
+This is the heart of the project: release a new version while traffic flows, and count exactly how many requests failed.
+
+<Steps>
+
+<Step title="Create the load-testing script">
+
+In the `quickcart-orders` folder, create `load.sh`:
+
+```sh title="load.sh"
+#!/usr/bin/env bash
+# Ask one address for a page, about five times a second, and count the failures.
+# Usage: bash load.sh URL SECONDS
+url="$1"
+seconds="${2:-180}"
+if [ -z "$url" ]; then
+  echo "usage: bash load.sh URL SECONDS"
+  exit 1
+fi
+ok=0
+failed=0
+end=$((SECONDS + seconds))
+while [ "$SECONDS" -lt "$end" ]; do
+  code=$(curl --silent --insecure --output /dev/null --write-out "%{http_code}" --max-time 3 "$url")
+  if [ "$code" = "200" ]; then
+    ok=$((ok + 1))
+  else
+    failed=$((failed + 1))
+    echo "$(date -u +%H:%M:%S) failed with $code"
+  fi
+  sleep 0.1
+done
+echo "----"
+echo "requests: $((ok + failed))   ok: $ok   failed: $failed"
+```
+
+| Line | What it does |
+|---|---|
+| `url="$1"` and `seconds="${2:-180}"` | the first thing you type after the script's name is the address; the second is how many seconds to run, 180 if you leave it out |
+| `if [ -z "$url" ]` | stop with a usage message if you forgot the address |
+| `end=$((SECONDS + seconds))` | `SECONDS` is bash's own stopwatch. This works out when to stop |
+| `while [ "$SECONDS" -lt "$end" ]` | keep going until that time |
+| `code=$(curl ...)` | fetch the page and keep only the status code, like `200` or `502` |
+| `--silent --insecure --output /dev/null` | print nothing, accept the self-signed certificate, and throw the page away |
+| `--write-out "%{http_code}"` | print just the status code, which `$(...)` captures |
+| `--max-time 3` | count anything slower than 3 seconds as a failure. A connection that never answers shows as `000` |
+| `if [ "$code" = "200" ]` | 200 is success; everything else is a failure, printed with the time it happened |
+| `sleep 0.1` | wait a tenth of a second between requests |
+| the last two `echo` lines | print the totals: your evidence |
+
+Try it for ten seconds:
+
+```sh ph="ECS_ALB"
+bash load.sh https://ECS_ALB/ 10
+```
+
+| Part | What it means |
+|---|---|
+| `bash load.sh` | run the script |
+| `https://ECS_ALB/` | the page to keep asking for. There's a space before the next part |
+| `10` | run for 10 seconds |
+
+<See>
+
+After ten seconds, one line like `requests: 48   ok: 48   failed: 0`. Your count depends on your connection; anything from 30 to 90 is normal.
+
+</See>
+
+</Step>
+
+<Step title="Build and push v2">
+
+```sh
+docker build --platform linux/amd64 --provenance=false --build-arg APP_VERSION=v2 -t quickcart-orders:v2 .
+```
+
+| Part | What it means |
+|---|---|
+| `--build-arg APP_VERSION=v2` | stamp this image as `v2`. Nothing else changes |
+| `-t quickcart-orders:v2` | name it with tag `v2` |
+| everything else | the same as for v1 |
+
+```sh ph="111122223333"
+docker tag quickcart-orders:v2 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker tag` | give the v2 image its ECR name |
+
+```sh ph="111122223333"
+docker push 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `docker push` | upload it |
+
+<See>
+
+Most layers say `Layer already exists`. Only what changed is uploaded.
+
+</See>
+
+</Step>
+
+<Step title="Make revision 2 of the task definition">
+
+<ConsolePath path="ECS > Task definitions > quickcart-orders > quickcart-orders:1 > Create new revision" />
+
+Change **one thing**: the end of the container's **Image URI**, from `:v1` to `:v2`. Choose **Create**.
+
+<See>
+
+`quickcart-orders:2`. Revision 1 is still there, untouched. That's what makes going back easy.
+
+</See>
+
+</Step>
+
+<Step title="Release while traffic runs">
+
+Open **two terminal windows**, both in the `quickcart-orders` folder.
+
+**Window 1:** the load test, for four minutes.
+
+```sh ph="ECS_ALB"
+bash load.sh https://ECS_ALB/ 240
+```
+
+| Part | What it means |
+|---|---|
+| `240` | run for four minutes, long enough to cover the whole release |
+
+**Window 2:** watch which version answers.
+
+```sh ph="ECS_ALB"
+while true; do curl -sk https://ECS_ALB/; echo; sleep 1; done
+```
+
+| Part | What it means |
+|---|---|
+| `while true; do` | repeat forever, until you press Ctrl+C |
+| `curl -sk https://ECS_ALB/` | fetch the home page quietly (`-s`), accepting the certificate (`-k`) |
+| `echo` | a new line after each answer |
+| `sleep 1` | wait one second between requests |
+| `done` | the end of the part to repeat |
+
+Now release:
+
+<ConsolePath path="ECS > Clusters > quickcart-cluster > Services > orders > Update service" />
+
+| Field | Enter |
+|---|---|
+| Revision | `2` |
+
+Choose **Update**, and watch the service's **Deployments** tab.
+
+<See>
+
+Window 2 shows `v1`, then a mix of `v1` and `v2`, then only `v2`. When window 1 finishes, it prints its totals, like `requests: 1150   ok: 1150   failed: 0`. **Write the numbers down.** They are your evidence.
+
+</See>
+
+| What happened | Which setting made it safe |
+|---|---|
+| ECS started two v2 tasks next to the two v1 tasks | Max 200% |
+| It waited until the v2 tasks passed `/health` before touching v1 | Min 100% |
+| It took the v1 tasks out of the target group and waited | 30-second deregistration delay |
+| It told the v1 tasks to stop; gunicorn finished its requests and exited | `CMD` in square brackets |
+
+</Step>
+
+<Step title="Release a broken version, and watch ECS undo it">
+
+Create another revision, `quickcart-orders:3`, from revision 2, and change the image tag to `:v9-broken`. There is no such image.
+
+Start the load test in window 1 for ten minutes:
+
+```sh ph="ECS_ALB"
+bash load.sh https://ECS_ALB/ 600
+```
+
+| Part | What it means |
+|---|---|
+| `600` | ten minutes, long enough for the circuit breaker to act |
+
+Then update the `orders` service to revision `3`, as before, and watch the **Deployments** and **Events** tabs.
+
+<See>
+
+New tasks keep failing to start. After several minutes the deployment is marked **Failed**, and the service goes back to revision 2 by itself. Window 1 shows **zero failures**: the v2 tasks were never removed.
+
+</See>
+
+Find out why the tasks failed:
+
+<ConsolePath path="ECS > Clusters > quickcart-cluster > Services > orders > Tasks > Filter: Stopped > a stopped task" />
+
+<See>
+
+A **Stopped reason** starting `CannotPullContainerError` and mentioning `not found`. There are no application logs, because the app never started. When a task won't start, read the stopped reason first.
+
+</See>
+
+Then remove the broken recipe, so nobody picks it by accident:
+
+<ConsolePath path="ECS > Task definitions > quickcart-orders > quickcart-orders:3 > Actions > Deregister" />
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** one written total from the v2 release (the target is `failed: 0`), and a note of how long the circuit breaker took to roll back the broken release.
+
+</See>
+
+## Run it on EKS
+
+The clock is now running at about $3.50 a day extra. Do this stage and the next together.
+
+<Steps>
+
+<Step title="Create the cluster">
+
+<ConsolePath path="EKS > Clusters > Create cluster" />
+
+| Field | Enter |
+|---|---|
+| Configuration options | **Custom configuration** |
+| Use EKS Auto Mode | **Off**. Auto Mode costs extra and manages nodes differently from this guide |
+| Name | `quickcart-eks` |
+| Cluster IAM role | choose **Create recommended role**, accept the defaults in the new tab, then come back, refresh the list and pick it |
+| Kubernetes version | leave the default. Older versions move to extended support, which costs six times as much |
+| Upgrade policy | **Standard** |
+| Cluster access | leave **Allow cluster administrator access** on |
+
+On the **Networking** page:
+
+| Field | Enter |
+|---|---|
+| VPC | the default VPC |
+| Subnets | only the `us-east-1a` and `us-east-1b` subnets |
+| Security groups | leave empty |
+| Cluster endpoint access | **Public and private** |
+
+On the **Add-ons** page, make sure **Amazon EKS Pod Identity Agent** is ticked alongside the defaults. Leave everything else as it is and choose **Create**.
+
+<See>
+
+Status **Creating**, then **Active** after about 10 to 15 minutes. Write down how long it took; it goes in your recommendation. ECS's cluster took about a second.
+
+</See>
+
+</Step>
+
+<Step title="Add the nodes">
+
+<ConsolePath path="EKS > Clusters > quickcart-eks > Compute > Add node group" />
+
+| Field | Enter |
+|---|---|
+| Name | `quickcart-nodes` |
+| Node IAM role | **Create recommended role**, accept the defaults, come back and pick it |
+| AMI type | leave the default, Amazon Linux 2023 |
+| Instance types | `t3.small` only. Remove any others |
+| Disk size | `20` GiB |
+| Desired, minimum, maximum size | `2`, `2`, `3` |
+| Subnets | only `us-east-1a` and `us-east-1b` |
+
+Choose **Create**.
+
+<See>
+
+The node group becomes **Active** in about five minutes. **EC2 > Instances** now shows two new instances. They're yours, and on your bill.
+
+</See>
+
+</Step>
+
+<Step title="Connect kubectl">
+
+The console can't run `kubectl`, so this part is always the terminal:
+
+```sh
+aws eks update-kubeconfig --name quickcart-eks --region us-east-1
+```
+
+| Part | What it means |
+|---|---|
+| `aws eks update-kubeconfig` | save the cluster's address and login method where `kubectl` looks for them |
+| `--name quickcart-eks` | which cluster |
+| `--region us-east-1` | where it is |
+
+```output
+Added new context arn:aws:eks:us-east-1:111122223333:cluster/quickcart-eks to /Users/you/.kube/config
+```
+
+```sh
+kubectl get nodes
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get nodes` | list the servers in the cluster |
+
+<See>
+
+Two nodes, each with **STATUS** `Ready`.
+
+</See>
+
+<Mistake title="kubectl says you must be logged in">
+
+```output title="kubectl stops with"
+error: You must be logged in to the server (Unauthorized)
+```
+
+**Why:** the cluster only trusts the identity that created it. You created it in the console, and your terminal is using a different identity.
+
+**The fix:** give your terminal's identity access. Find its ARN with `aws sts get-caller-identity`, then:
+
+<ConsolePath path="EKS > Clusters > quickcart-eks > Access > Create access entry" />
+
+| Field | Enter |
+|---|---|
+| IAM principal ARN | the `Arn` your terminal printed |
+| Type | **Standard** |
+| Policy name | `AmazonEKSClusterAdminPolicy` |
+| Access scope | **Cluster** |
+
+Wait a few seconds and run `kubectl get nodes` again.
+
+</Mistake>
+
+</Step>
+
+<Step title="Give the load balancer controller its permissions">
+
+On ECS, attaching a load balancer was a dropdown. On EKS, a program inside the cluster, the **AWS Load Balancer Controller**, watches for Ingress objects and builds real load balancers. It needs AWS permissions to do that, and it gets them through **EKS Pod Identity**: an IAM role tied to one Kubernetes service account.
+
+First download AWS's list of the permissions it needs, pinned to the controller's version:
+
+```sh
+curl -o lbc-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v3.5.0/docs/install/iam_policy.json
+```
+
+| Part | What it means |
+|---|---|
+| `curl -o lbc-policy.json` | download a file and save it as `lbc-policy.json` |
+| the address | the official policy for controller version 3.5.0 |
+
+<ConsolePath path="IAM > Policies > Create policy > JSON" />
+
+Open `lbc-policy.json` in your editor, copy all of it, and paste it into the box, replacing what's there. Choose **Next**.
+
+| Field | Enter |
+|---|---|
+| Policy name | `quickcart-lbc-policy` |
+
+Choose **Create policy**. Now the role:
+
+<ConsolePath path="IAM > Roles > Create role" />
+
+| Field | Enter |
+|---|---|
+| Trusted entity type | **AWS service** |
+| Service or use case | **EKS**, then **EKS - Pod Identity** |
+| Permissions | tick `quickcart-lbc-policy` |
+| Role name | `quickcart-lbc-role` |
+
+Choose **Create role**. Then tie the role to the controller's service account:
+
+<ConsolePath path="EKS > Clusters > quickcart-eks > Access > Pod Identity associations > Create" />
+
+| Field | Enter |
+|---|---|
+| IAM role | `quickcart-lbc-role` |
+| Kubernetes namespace | `kube-system` |
+| Kubernetes service account | `aws-load-balancer-controller` |
+
+Choose **Create**.
+
+<See>
+
+One association in the list, for `kube-system` and `aws-load-balancer-controller`. Only pods using that exact service account get the role, not every pod on the node.
+
+</See>
+
+</Step>
+
+<Step title="Install the controller">
+
+Helm only runs in the terminal; there's no console equivalent.
+
+```sh
+helm repo add eks https://aws.github.io/eks-charts
+```
+
+| Part | What it means |
+|---|---|
+| `helm repo add` | tell Helm where to find a set of charts |
+| `eks` | the short name you'll use for it |
+| `https://aws.github.io/eks-charts` | AWS's official chart repository |
+
+```output
+"eks" has been added to your repositories
+```
+
+```sh ph="VPC_ID"
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller --version 3.5.0 -n kube-system --set clusterName=quickcart-eks --set region=us-east-1 --set vpcId=VPC_ID --set serviceAccount.name=aws-load-balancer-controller
+```
+
+| Part | What it means |
+|---|---|
+| `helm install aws-load-balancer-controller` | install a chart, and call this installation `aws-load-balancer-controller` |
+| `eks/aws-load-balancer-controller` | which chart, from the `eks` repository |
+| `--version 3.5.0` | the chart version that matches the policy you downloaded |
+| `-n kube-system` | put it with the other system programs |
+| `--set clusterName=quickcart-eks` | which cluster it runs in |
+| `--set region=us-east-1` and `--set vpcId=VPC_ID` | the region and your default VPC's ID. On newer nodes the controller often can't discover these by itself, and fails |
+| `--set serviceAccount.name=aws-load-balancer-controller` | the service account name, which must match the Pod Identity association exactly |
+
+<See>
+
+Output that includes `STATUS: deployed`.
+
+</See>
+
+```sh
+kubectl get deployment -n kube-system aws-load-balancer-controller
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get deployment` | show a deployment and how many of its pods are ready |
+| `-n kube-system` | in the system namespace |
+| `aws-load-balancer-controller` | which deployment |
+
+<See>
+
+`2/2` under **READY**. If it shows `0/2`, wait a minute and run it again.
+
+</See>
+
+Count what you just did: a policy, a role, an association and a Helm install, just to connect a load balancer. And this controller needs upgrading like everything else. That is a real cost of EKS; it goes in the recommendation.
+
+</Step>
+
+<Step title="Turn on the readiness gate">
+
+```sh
+kubectl label namespace default elbv2.k8s.aws/pod-readiness-gate-inject=enabled
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl label` | add a label to something |
+| `namespace default` | the namespace your app will run in |
+| `elbv2.k8s.aws/pod-readiness-gate-inject=enabled` | ask the controller to add a readiness gate to every new pod here |
+
+```output
+namespace/default labeled
+```
+
+With the gate, a new pod only counts as ready once the **load balancer** says it's healthy. Without it, Kubernetes can remove an old pod before the load balancer is sending traffic to the new one, and requests fail. ECS does this for you.
+
+</Step>
+
+<Step title="Describe the app in one file">
+
+Create `orders.yaml` in the folder. Replace the account ID in the image, and replace `CERT_ID` with the end of your certificate's ARN.
+
+```yaml title="orders.yaml" ph="111122223333,CERT_ID"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orders
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: orders
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: app
+          image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v1
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+spec:
+  selector:
+    app: orders
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orders
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:111122223333:certificate/CERT_ID
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orders
+                port:
+                  number: 80
+```
+
+The `---` lines split the file into three objects.
+
+| Setting | What it does | The ECS equivalent |
+|---|---|---|
+| **Deployment** `replicas: 2` | keep two pods running | the service's desired tasks |
+| `maxUnavailable: 0`, `maxSurge: 1` | during a release, add one new pod before removing an old one | Min 100%, Max 200% |
+| `readinessProbe` on `/health` | only send traffic to a pod once `/health` answers | the target group's health check |
+| `requests` | the CPU and memory the scheduler reserves for the pod on a node | the task size |
+| `limits` `memory: 256Mi` | the most memory the pod may use; above it, it's killed | the task's memory |
+| `preStop` `sleep 15` | wait 15 seconds before stopping, so the load balancer stops sending first | ECS does this for you with the drain |
+| `terminationGracePeriodSeconds: 40` | time allowed for the 15-second wait plus gunicorn's 20-second finish | ECS's stop timeout |
+| **Service** | a fixed name, `orders`, in front of pods that come and go | the target group |
+| **Ingress** and its annotations | ask the controller for an internet-facing HTTPS load balancer that targets pod IPs, redirects HTTP to HTTPS, checks `/health` and drains for 30 seconds | the load balancer, listeners and target group you clicked |
+
+Before applying, check you replaced the placeholder:
+
+```sh
+grep -c 111122223333 orders.yaml
+```
+
+| Part | What it means |
+|---|---|
+| `grep -c` | count the lines that contain some text |
+| `111122223333` | the example account ID |
+| `orders.yaml` | the file to search |
+
+```output
+0
+```
+
+Any number other than `0` means the example account ID is still in the file.
+
+</Step>
+
+<Step title="Start it">
+
+```sh
+kubectl apply -f orders.yaml
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl apply` | create or update whatever a file describes |
+| `-f orders.yaml` | the file |
+
+```output
+deployment.apps/orders created
+service/orders created
+ingress.networking.k8s.io/orders created
+```
+
+```sh
+kubectl get pods
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get pods` | list the pods in the `default` namespace |
+
+<See>
+
+Two pods named `orders-` followed by random letters, each `1/1` **READY** and **Running**.
+
+</See>
+
+```sh
+kubectl get ingress orders
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get ingress orders` | show the Ingress, including the address of the load balancer built for it |
+
+<See>
+
+After two to three minutes, an **ADDRESS** starting `k8s-default-orders-`. Look in **EC2 > Load Balancers**: a new one exists. Your YAML file made a real AWS resource. Use this address wherever this page shows `EKS_ALB`.
+
+</See>
+
+<Mistake title="the Ingress never gets an address">
+
+```output title="kubectl describe ingress orders shows an event like"
+Failed build model due to couldn't auto-discover subnets: unable to resolve at least one subnet
+```
+
+**Why:** the controller only uses subnets tagged `kubernetes.io/role/elb` with value `1` for internet-facing load balancers.
+
+**The fix:** add the tag to both subnets, as in the network stage. The controller retries by itself within a few minutes.
+
+</Mistake>
+
+</Step>
+
+<Step title="Test it over HTTPS">
+
+```sh ph="EKS_ALB"
+curl -k https://EKS_ALB/orders
+```
+
+| Part | What it means |
+|---|---|
+| `-k` | accept the self-signed certificate |
+| `https://EKS_ALB/orders` | the orders page, through the EKS load balancer |
+
+<See>
+
+The same three orders, now served from EKS.
+
+</See>
+
+```sh ph="EKS_ALB"
+for i in 1 2 3 4 5 6; do echo "request $i"; curl -sk https://EKS_ALB/; echo; done
+```
+
+| Part | What it means |
+|---|---|
+| the loop | the same six-request loop as on ECS, against the EKS load balancer |
+
+<See>
+
+`served_by` switches between the two pod names.
+
+</See>
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** `kubectl get pods` shows two ready pods, and `curl -k https://EKS_ALB/orders` returns the orders.
+
+</See>
+
+## Release v2 on EKS under load
+
+<Steps>
+
+<Step title="Release v2 while traffic runs">
+
+**Window 1:**
+
+```sh ph="EKS_ALB"
+bash load.sh https://EKS_ALB/ 240
+```
+
+| Part | What it means |
+|---|---|
+| `240` | four minutes of requests against the EKS load balancer |
+
+**Window 2:**
+
+```sh ph="EKS_ALB"
+while true; do curl -sk https://EKS_ALB/; echo; sleep 1; done
+```
+
+| Part | What it means |
+|---|---|
+| the loop | one request a second, showing which version answered, until Ctrl+C |
+
+**Window 3:** release.
+
+```sh ph="111122223333"
+kubectl set image deployment/orders app=111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v2
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl set image` | change the image a deployment uses, which starts a rolling release |
+| `deployment/orders` | which deployment |
+| `app=…:v2` | the container called `app` should now run `v2` |
+
+```output
+deployment.apps/orders image updated
+```
+
+```sh
+kubectl rollout status deployment/orders
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl rollout status` | wait, showing progress, until the release finishes |
+
+<See>
+
+Progress lines, ending with `deployment "orders" successfully rolled out`. Window 2 moves from `v1` to `v2`. Write down window 1's totals. The target is `failed: 0`.
+
+</See>
+
+</Step>
+
+<Step title="Go back with one command">
+
+```sh
+kubectl rollout undo deployment/orders
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl rollout undo` | go back to the previous version of the deployment |
+
+```output
+deployment.apps/orders rolled back
+```
+
+<See>
+
+Within about a minute, window 2 shows `v1` again. Nothing was rebuilt: Kubernetes kept the previous version's recipe.
+
+</See>
+
+</Step>
+
+<Step title="Release something broken">
+
+```sh ph="111122223333"
+kubectl set image deployment/orders app=111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders:v9-broken
+```
+
+| Part | What it means |
+|---|---|
+| `:v9-broken` | an image tag that doesn't exist |
+
+```sh
+kubectl get pods
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl get pods` | list the pods |
+
+<See>
+
+One new pod with **STATUS** `ErrImagePull` or `ImagePullBackOff`. The two old pods keep running and serving. Kubernetes stops and waits for you; it doesn't go back by itself.
+
+</See>
+
+```sh
+kubectl rollout undo deployment/orders
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl rollout undo` | go back to the last good version |
+
+That difference goes in your recommendation: ECS noticed the failure and went back by itself after a few minutes. Kubernetes kept the old pods safe but waited for a person.
+
+</Step>
+
+</Steps>
+
+<See>
+
+**Checkpoint:** a second written total, from the EKS release, and a note of how long `rollout undo` took.
+
+</See>
+
+## Prove it
+
+You now have numbers. Put them in one table, then write the recommendation.
+
+| What you measured | ECS on Fargate | EKS |
+|---|---|---|
+| Time to create the cluster | about 1 second | your time, usually 10 to 15 minutes |
+| Steps to connect a load balancer | one dropdown in the service form | a policy, a role, a Pod Identity association, a Helm install and an Ingress |
+| Release under load: requests, failed | your numbers. Target: 0 failed | your numbers. Target: 0 failed |
+| Undoing a broken release | automatic, a few minutes | one command, seconds, but someone has to run it |
+| Settings you added for zero downtime | Min 100%, 30-second drain, `CMD` in brackets | those three, plus the readiness gate and the `preStop` wait |
+| Cost before any app runs | $0 | about $73 a month, plus the nodes |
+| Servers you look after | none | two nodes, and a Kubernetes upgrade every few months |
+
+**Zero is the pass mark.** If either release showed failures, read the failure lines in window 1: the times tell you which part of the release they happened in. The [Troubleshooting](#troubleshooting) section covers the usual causes.
+
+<Note title="Want to see why the extra EKS settings matter?">
+
+Remove the `preStop` block from `orders.yaml`, run `kubectl apply -f orders.yaml`, and release v2 again under load. You will often see a handful of failures around the moment old pods stop. The race is timing-dependent, so if you see zero, try once more. Put the block back afterwards.
+
+</Note>
+
+### The recommendation
+
+QuickCart asked a question: should new services go on ECS or EKS? Answer it in writing, with your numbers. Use this shape. It works because it ends with **what would change your mind**, which shows the answer comes from facts rather than taste.
+
+```text title="recommendation.md"
+Recommendation: ECS or EKS for new QuickCart services.
+
+Why, in one sentence: the single deciding reason.
+
+What we measured:
+  Release under load on ECS: N requests, N failed.
+  Release under load on EKS: N requests, N failed.
+  Cluster creation: ECS about 1 second; EKS N minutes.
+  Undoing a bad release: ECS automatic in N minutes; EKS one command in N seconds.
+
+Operational burden: what each platform makes the team look after.
+Cost at QuickCart's size: fixed monthly cost, and how it compares to the rest of the bill.
+Team readiness: who knows each platform today, and how long learning the other takes.
+Migration risk: what running two platforms at once would cost in releases and debugging.
+
+The strongest argument against this, and our answer to it.
+
+What would change our mind: for example, a real plan to run outside AWS,
+a team large enough to own Kubernetes, or a tool the service needs that only one platform has.
+```
+
+Before you call it done, argue the other side. If you recommend ECS, expect "Kubernetes is the industry standard and easier to hire for" and "EKS stops us being locked in to AWS". If you recommend EKS, expect "now we run two platforms; who looks after both?" and "which Kubernetes feature does this service actually need?". Write down the strongest one and your answer. [ECS or EKS?](/lessons/ecs-or-eks/) has more on weighing them.
+
+<Note title="Say what you didn't do">
+
+State plainly that HTTPS used a self-signed certificate because no domain was used. The traffic is fully encrypted; with a domain, ACM would issue a trusted certificate and the browser warning would go away. Naming a limit yourself is stronger than having someone else find it.
+
+</Note>
+
+## Troubleshooting
+
+Every one of these happened to someone building this project. Most are small settings, not code, which is true of real outages too. The skill is knowing where to look: the stopped reason, then the target health, then the network.
+
+<Mistake title="every request in the load test fails with 404">
+
+```output title="Window 1 prints"
+14:02:11 failed with 404
+14:02:11 failed with 404
+14:02:12 failed with 404
+```
+
+**Why:** the command was typed as `bash load.sh https://ECS_ALB/10`, with no space before the `10`. The script asked for a page called `/10`, which doesn't exist, and ran for the default 180 seconds.
+
+**The fix:** put a space between the address and the number of seconds. When numbers look wrong, check the test before blaming the system.
+
+</Mistake>
+
+<Mistake title="the terminal shows a > prompt and does nothing">
+
+```output title="After pasting the loop, the terminal shows"
+while>
+```
+
+**Why:** the shell is waiting for the rest of the loop. The word `done` is missing, so it thinks you're still typing.
+
+**The fix:** press Ctrl+C and paste the whole line again, including `done`. Use the copy button so nothing gets cut off.
+
+</Mistake>
+
+<Mistake title="curl returns 301 instead of the page">
+
+```output title="curl prints"
+<html>
+<head><title>301 Moved Permanently</title></head>
+```
+
+**Why:** the address started with `http://`, or had no scheme at all. The load balancer's port 80 listener redirects to HTTPS, which is exactly what you asked it to do.
+
+**The fix:** use `https://` and `-k`. The redirect is working correctly.
+
+</Mistake>
+
+<Mistake title="ECR's scan says the image is not found">
+
+```output title="The v1 row's artifact type shows"
+Image Index
+```
+
+**Why:** without `--provenance=false`, Docker Desktop uploads an image index, a list, plus the real image as a separate untagged entry. ECR scans images, not lists. ECS and EKS still run it fine; they read the list and pick the right image.
+
+**The fix:** tick the untagged entry that's about 50 MB and choose **Scan**. Next time, build with `--provenance=false`. Your message may differ slightly between console versions.
+
+</Mistake>
+
+<Mistake title="ECS tasks keep starting and stopping">
+
+```output title="The service's Events tab repeats lines like"
+(service orders) (port 8080) is unhealthy in (target-group arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/quickcart-ecs-tg/0123456789abcdef) due to (reason Request timed out).
+```
+
+**Why:** the tasks start, but the load balancer can't reach them, so ECS replaces them over and over. The two usual causes are the app security group's inbound rule (wrong port, or not from `quickcart-alb-sg`) and the tasks using the wrong security group. The circuit breaker may stop the deployment for you.
+
+**The fix:** check **Target Groups > quickcart-ecs-tg > Targets**. "Request timed out" means the network: fix the security groups. "Health checks failed with these codes: [404]" means the path: it must be `/health`.
+
+</Mistake>
+
+<Mistake title="the load balancer controller stays at 0/2">
+
+```output title="kubectl logs -n kube-system deployment/aws-load-balancer-controller shows an error about the VPC, such as"
+failed to get VPC ID
+```
+
+**Why:** the `vpcId` value was empty or wrong in the `helm install` command, and the controller couldn't discover it from the node.
+
+**The fix:** run `helm uninstall aws-load-balancer-controller -n kube-system`, then install again with the right VPC ID. If instead the log mentions `AccessDenied`, check the Pod Identity association's namespace and service account name match exactly.
+
+</Mistake>
+
+<Mistake title="the EKS console says you have no access to Kubernetes objects">
+
+```output title="EKS > quickcart-eks > Resources shows"
+Your current IAM principal doesn't have access to Kubernetes objects on this cluster.
+```
+
+**Why:** access to the cluster's contents is separate from access to AWS. The cluster trusts the identity that created it, and the console is logged in as someone else.
+
+**The fix:** nothing is broken; `kubectl` still sees everything. To use the console too, add an access entry for the console identity, as in the kubectl mistake above.
+
+</Mistake>
+
+## Clean up
+
+EKS first: it's the expensive one. And delete the app from EKS **before** the cluster, or its load balancer is left behind, still billing, with nothing to delete it.
+
+<Steps>
+
+<Step title="Delete the app from EKS">
+
+```sh
+kubectl delete -f orders.yaml
+```
+
+| Part | What it means |
+|---|---|
+| `kubectl delete -f orders.yaml` | delete everything the file describes. The controller then deletes the load balancer it built |
+
+```output
+deployment.apps "orders" deleted
+service "orders" deleted
+ingress.networking.k8s.io "orders" deleted
+```
+
+Wait two minutes, then check **EC2 > Load Balancers**: the `k8s-default-orders-` one must be gone before you go on. If it's still there after five minutes, delete it by hand.
+
+</Step>
+
+<Step title="Delete the EKS nodes and cluster">
+
+<ConsolePath path="EKS > Clusters > quickcart-eks > Compute > quickcart-nodes > Delete" />
+
+Type the node group's name to confirm. Wait until it's gone (about five minutes); the cluster can't be deleted while it has a node group.
+
+<ConsolePath path="EKS > Clusters > quickcart-eks > Delete cluster" />
+
+Type the cluster's name to confirm. The Pod Identity association is deleted with it.
+
+</Step>
+
+<Step title="Delete the EKS roles and policy">
+
+<ConsolePath path="IAM > Roles" />
+
+Delete `quickcart-lbc-role`, and the cluster and node roles the console created for you (their names start with `AmazonEKS`). Then in **IAM > Policies**, delete `quickcart-lbc-policy`.
+
+</Step>
+
+<Step title="Delete the ECS side, in this order">
+
+| Order | Where | What to do |
+|---|---|---|
+| 1 | ECS > Clusters > quickcart-cluster > Services > orders | **Delete service**, and tick **Force delete** so it stops the tasks for you |
+| 2 | ECS > Clusters | delete `quickcart-cluster` |
+| 3 | EC2 > Load Balancers | delete `quickcart-ecs-alb` |
+| 4 | EC2 > Target Groups | delete `quickcart-ecs-tg` |
+| 5 | EC2 > Security Groups | delete `quickcart-app-sg`, then `quickcart-alb-sg`. If one refuses, wait a minute; something is still letting go of it |
+| 6 | ECS > Task definitions > quickcart-orders | deregister every revision, then delete them |
+| 7 | ECR > Repositories | delete `quickcart-orders`. [Project 4](/projects/04-everything-as-code/) creates it again in code |
+| 8 | CloudWatch > Log groups | delete `/ecs/quickcart-orders` |
+| 9 | Certificate Manager | delete the imported certificate |
+| 10 | VPC > Subnets | optional: remove the `kubernetes.io/role/elb` tag from both subnets |
+
+</Step>
+
+<Step title="Delete the key from your Mac">
+
+```sh
+rm -f key.pem key-rsa.pem cert.pem
+```
+
+| Part | What it means |
+|---|---|
+| `rm -f` | delete files, with no error if one of them doesn't exist |
+| `key.pem key-rsa.pem cert.pem` | the certificate and both copies of its private key |
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+Check nothing is left billing:
+
+| Where | Should show |
+|---|---|
+| EKS > Clusters | nothing |
+| ECS > Clusters | nothing |
+| EC2 > Load Balancers | nothing from this project |
+| EC2 > Instances | no running instances from this project |
+| EC2 > Network Interfaces | nothing with a description mentioning `ELB` or `aws-K8S` |
+| VPC > Your VPCs > default VPC > Resource map | no leftover load balancer or instance |
+
+<See>
+
+All empty. The next day, **Billing and Cost Management > Bills** should show EKS, EC2 and Elastic Load Balancing charges stopping on the day you deleted them.
+
+</See>
+
+</Step>
+
+</Steps>

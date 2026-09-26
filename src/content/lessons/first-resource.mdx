@@ -1,0 +1,732 @@
+---
+time: 45 minutes
+level: Beginner
+before: [why-terraform, ecr]
+cost: free
+quiz:
+  - q: A plan line starts with -/+ and ends with "# forces replacement". What will happen?
+    answer: 1
+    options:
+      - t: The attribute is updated, and the resource keeps running
+        why: That's what ~ means. -/+ is different, and much more serious.
+      - t: The resource is destroyed, then a new one is created
+        why: AWS can't change that attribute on the existing resource, so Terraform deletes it and builds a new one. Anything stored inside is lost.
+      - t: Terraform creates a copy and keeps the old one
+        why: The old one is destroyed. Only the lifecycle setting create_before_destroy changes the order, and even then the old one goes.
+      - t: Nothing happens until you run apply twice
+        why: One apply carries out the whole plan.
+  - q: Which file should you commit to git?
+    answer: 3
+    options:
+      - t: The .terraform folder
+        why: That's the downloaded provider plugin, hundreds of megabytes. init downloads it again on any machine.
+      - t: terraform.tfstate
+        why: State can hold secrets in plain text, and git has no lock. It belongs in a remote backend, covered in the Terraform state lesson.
+      - t: None of them. Only .tf files go in git
+        why: One more file belongs there too.
+      - t: .terraform.lock.hcl
+        why: It records the exact provider version and its checksums, so everyone, and the pipeline, gets the same version.
+  - q: What does version = "~> 6.0" allow?
+    answer: 0
+    options:
+      - t: Any 6.x version, but never 7.0
+        why: "~> 6.0 lets the last number shown move up: 6.1, 6.20, 6.66. A new major version, which may break things, needs you to change the constraint."
+      - t: Exactly version 6.0 and nothing else
+        why: That would be version = "6.0.0". The ~> allows newer 6.x versions.
+      - t: Any version of 6.0 or newer, including 7 and 8
+        why: That's ">= 6.0". ~> stops before the next major version.
+      - t: Only versions older than 6.0
+        why: ~> never allows older versions.
+  - q: You haven't changed anything, and plan says "Plan 0 to add, 1 to change, 0 to destroy". What's the most likely cause?
+    answer: 2
+    options:
+      - t: Terraform has a bug
+        why: Terraform is reporting a real difference. Find out what it is.
+      - t: The provider was upgraded and deleted the resource
+        why: A deleted resource would show as + create, not a change.
+      - t: Someone changed the resource outside Terraform, for example in the console
+        why: That's drift. The plan shows which attribute differs. Apply would put it back to what the code says.
+      - t: The state file is missing
+        why: With no state, Terraform would plan to create everything, not change one thing.
+  - q: What is a provider?
+    answer: 1
+    options:
+      - t: The company that hosts your Terraform code
+        why: Your code lives in git, wherever you like. That's not a provider.
+      - t: A plugin that teaches Terraform how to talk to one platform, such as AWS
+        why: Terraform itself knows nothing about AWS. The hashicorp/aws provider knows every AWS resource type and how to create, change and delete it.
+      - t: The AWS account you deploy to
+        why: The account comes from your login. The provider is the plugin that uses that login.
+      - t: A region
+        why: A region is one setting of the AWS provider, not the provider itself.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, a small tidy-up">
+
+Theo was new to Terraform. QuickCart's image repository was called `quickcart-orders`, and he wanted it to match a new naming scheme: `quickcart-orders-api`. One word, in one file.
+
+He ran `terraform apply`. A long plan scrolled past, ending in `Plan: 1 to add, 0 to change, 1 to destroy.` That looked like a rename, so he typed `yes`.
+
+It wasn't a rename. AWS can't rename an image repository, so Terraform deleted the old one — with every image the team had ever pushed — and made a new, empty one. The next deployment couldn't find the image it needed. The plan had said so, in one short comment: `# forces replacement`.
+
+</Story>
+
+Terraform told Theo exactly what it would do. He just couldn't read it yet.
+
+<Case title="A very common mistake">
+
+Someone runs apply without reading the plan, because it's long and the change feels small. The summary line says something will be destroyed, and they assume it's the thing they meant. Reading the plan, every time, is the single most important Terraform habit. The whole design of Terraform — plan first, then ask for `yes` — exists to give you that chance.
+
+</Case>
+
+This lesson builds one real resource and teaches you to read what Terraform says it will do with it.
+
+</Part>
+
+<Part id="idea">
+
+A Terraform project is a folder of `.tf` files. Terraform reads **all** of them together, so how you split them into files is up to you. A few names are usual:
+
+| File | What usually goes in it |
+|---|---|
+| `main.tf` | The resources |
+| `variables.tf` | Inputs. Covered in [Variables, locals and outputs](/lessons/terraform-variables/) |
+| `outputs.tf` | Values to print or share |
+| `backend.tf` | Where state lives. Covered in [Terraform state](/lessons/terraform-state/) |
+
+### Providers: how Terraform talks to AWS
+
+Terraform itself knows nothing about AWS. A **provider** is a plugin that teaches it one platform: every resource type, and how to create, change and delete each one. There are providers for AWS, Azure, Google Cloud, GitHub and hundreds more.
+
+You say which provider you need, and which versions are allowed, in a `terraform` block:
+
+| Version constraint | What it allows | When you'd use it |
+|---|---|---|
+| `"~> 6.0"` | Any 6.x, never 7.0 | The usual choice: fixes and new features, no breaking changes |
+| `"6.66.0"` | Exactly that version | Rarely. You'd miss every fix |
+| `">= 6.0"` | 6.0 or anything newer, including 7 | Avoid: a new major version can break your code without warning |
+
+A **major version** is the first number. When it goes up, things you rely on may change or disappear. That's why `~>` stops before it.
+
+### Resources: the things you build
+
+A **resource** is one thing in AWS that Terraform creates and looks after. Its first line has two names:
+
+| Part | Example | What it is |
+|---|---|---|
+| `resource` | | Create and manage something |
+| Type | `aws_ecr_repository` | What kind of thing. The provider defines the types |
+| Name | `orders` | Your code's name for it. Other code refers to it as `aws_ecr_repository.orders` |
+| `name =` inside | `"quickcart-orders"` | What AWS calls it |
+
+`orders` and `quickcart-orders` are different names for different readers. One is for your code; the other is what you see in the console.
+
+### Four commands
+
+| Command | What it does | How often |
+|---|---|---|
+| `terraform init` | Download the providers and set up the folder | Once, and again when you add a provider or module |
+| `terraform plan` | Show what would change. Changes nothing | Before every apply |
+| `terraform apply` | Show the plan, ask for `yes`, then make the changes | Whenever you change the code |
+| `terraform destroy` | Delete everything this folder manages | Practice environments only |
+
+### Reading a plan
+
+Each resource in a plan starts with a symbol. It tells you how careful to be.
+
+| Symbol | Meaning | How careful to be |
+|---|---|---|
+| `+` | Create | Normal |
+| `~` | Change in place. The resource stays; some settings change | Read which settings |
+| `-/+` | **Destroy, then create a replacement** | **Stop and read.** For a database, this is data loss |
+| `+/-` | Create the replacement first, then destroy the old one | Read carefully. Only happens with a lifecycle setting, covered in [Loops and lifecycle](/lessons/terraform-loops/) |
+| `-` | **Destroy** | **Stop and read** |
+| `<=` | Read something that already exists | Harmless |
+
+Inside a resource, each line has a symbol too, and a few phrases matter:
+
+| You see | What it means |
+|---|---|
+| `"old" -> "new"` | This setting changes from old to new |
+| `# forces replacement` | **This** line is why the resource must be destroyed and rebuilt. AWS can't change it in place |
+| `(known after apply)` | AWS decides this value when it creates the resource, so Terraform can't show it yet |
+| `-> null` | This value will be gone |
+| `# (6 unchanged attributes hidden)` | Terraform hides settings that don't change, so the real change stands out |
+
+Which settings force replacement is decided by AWS, not by you. You can't memorise them all, and you don't need to. The plan always tells you.
+
+<Key>Read every plan before you type yes. The first symbol tells you how careful to be.</Key>
+
+### What init leaves in the folder
+
+| Item | What it is | Commit to git? |
+|---|---|---|
+| `.terraform/` | The downloaded provider plugin. Hundreds of megabytes | **No.** `init` downloads it again anywhere |
+| `.terraform.lock.hcl` | The **exact** provider version chosen, with checksums of the download | **Yes** |
+| `terraform.tfstate` | Appears after apply: Terraform's record of what it built | **No.** It can hold secrets. It moves to S3 in [Terraform state](/lessons/terraform-state/) |
+
+<YouKnow title="You already know this: package-lock.json">
+
+`~> 6.0` in your code is like `"^6.0.0"` in `package.json`, or a version range in Gradle. It allows a range. The lock file is `package-lock.json`, `Podfile.lock` or a Gradle lockfile: the exact version that was chosen, so every machine gets the same one until someone deliberately upgrades.
+
+</YouKnow>
+
+</Part>
+
+<Part id="see">
+
+Here is QuickCart's repository in code. Pick a change, and see the plan Terraform makes for it.
+
+<TfPlanReader />
+
+**What to notice:** adding a tag and renaming the repository are both one-line changes. One is a harmless `~`. The other is a `-/+` that deletes every image inside. The size of the change in your code tells you nothing; only the plan does.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="free">one empty ECR repository, which costs nothing, created and destroyed in the same lab.</Cost>
+
+You'll build QuickCart's image repository with Terraform, change it in place, see a change that would force replacement, and destroy it. About 30 minutes.
+
+You need Terraform (see [Why Terraform](/lessons/why-terraform/)) and a working AWS login in your terminal ([Set up your Mac](/lessons/mac-setup/) covers it). Terraform uses the same login as the AWS CLI. Check it:
+
+```sh
+aws sts get-caller-identity
+```
+
+| Part | What it means |
+|---|---|
+| `aws sts get-caller-identity` | ask AWS "who am I?" — it answers with your account and user |
+
+```output
+{
+    "UserId": "AIDAEXAMPLEUSERID1234",
+    "Account": "111122223333",
+    "Arn": "arn:aws:iam::111122223333:user/quickcart-admin"
+}
+```
+
+Your account number and user name will be your own. If this command fails, fix your login first: Terraform will fail the same way.
+
+<Steps>
+
+<Step title="Make the project folder">
+
+```sh
+mkdir quickcart-tf
+```
+
+| Part | What it means |
+|---|---|
+| `mkdir` | make a directory |
+| `quickcart-tf` | its name. Later lessons build on this folder |
+
+```sh
+cd quickcart-tf
+```
+
+| Part | What it means |
+|---|---|
+| `cd` | change directory. Every later command runs in here |
+| `quickcart-tf` | the folder you just made |
+
+</Step>
+
+<Step title="Write the code">
+
+Create `main.tf` in that folder:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "quickcart-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+  }
+}
+```
+
+| Setting | What it does | If you leave it out | When you'd change it |
+|---|---|---|---|
+| `terraform` block | Settings for Terraform itself, not for AWS | Terraform runs with no version rules at all | — |
+| `required_version` | Refuse to run on a Terraform older than 1.10 | An older Terraform may fail later, with a confusing error | When you start using a newer Terraform feature |
+| `required_providers` → `aws` | Which provider this code needs, under the local name `aws` | Terraform guesses `hashicorp/aws` and takes the newest version, even a new major one | When you add another provider |
+| `source` | Where to download it: `hashicorp/aws` on the public Terraform Registry | Terraform assumes `hashicorp/aws`. Saying it is clearer | Almost never |
+| `version` | Which versions are allowed: any 6.x | Always the newest, which one day brings breaking changes | When you deliberately move to a new major version |
+| `provider "aws"` | Settings for the AWS provider | Terraform still uses the provider, with default settings | — |
+| `region` | Where the resources are built | Terraform uses the region from your AWS login settings, which may not be what you expect | To build somewhere else |
+| `resource "aws_ecr_repository" "orders"` | One ECR repository. `orders` is your code's name for it | — | — |
+| `name` | The repository's name in AWS | Required: plan stops with an error | Never casually. Changing it **replaces** the repository, as you'll see |
+| `image_tag_mutability` | `IMMUTABLE`: once `v1` is pushed, no other image can take that tag | Defaults to `MUTABLE`: someone can push a different image under an old tag | Rarely. [Storing images: ECR](/lessons/ecr/) explains why immutable is safer |
+| `force_delete` | Let `terraform destroy` delete the repository even if it holds images | Destroy fails while any image is inside | Set it to `false` for production, so images can't be deleted by accident |
+| `tags` | Labels to find and cost everything that belongs to QuickCart | No labels. Harder to find later | Add owner and environment tags in real projects |
+
+Now tidy the formatting:
+
+```sh
+terraform fmt
+```
+
+| Part | What it means |
+|---|---|
+| `terraform fmt` | line up the `=` signs and fix the spacing in every `.tf` file here |
+
+It prints the name of any file it changed, or nothing if the file was already tidy. Everyone running `fmt` means code reviews show real changes, not spacing.
+
+</Step>
+
+<Step title="Initialise the folder">
+
+```sh
+terraform init
+```
+
+| Part | What it means |
+|---|---|
+| `terraform init` | download the AWS provider and prepare this folder |
+
+```output
+Initializing the backend...
+
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching "~> 6.0"...
+- Installing hashicorp/aws v6.66.0...
+- Installed hashicorp/aws v6.66.0 (signed by HashiCorp)
+
+Terraform has created a lock file .terraform.lock.hcl to record the provider
+selections it made above. Include this file in your version control repository
+so that Terraform can guarantee to make the same selections by default when
+you run "terraform init" in the future.
+
+Terraform has been successfully initialized!
+```
+
+Your version number will probably be newer. Now check the code makes sense:
+
+```sh
+terraform validate
+```
+
+| Part | What it means |
+|---|---|
+| `terraform validate` | check the code for mistakes — wrong types, unknown settings — without contacting AWS |
+
+```output
+Success! The configuration is valid.
+```
+
+Open `.terraform.lock.hcl` in your editor. It starts like this:
+
+```output title="The start of .terraform.lock.hcl"
+# This file is maintained automatically by "terraform init".
+# Manual edits may be lost in future updates.
+
+provider "registry.terraform.io/hashicorp/aws" {
+  version     = "6.66.0"
+  constraints = "~> 6.0"
+  hashes = [
+```
+
+`version` is what was chosen; `constraints` is the range you allowed. The hashes are checksums, so a tampered download is refused. When a colleague runs `init`, they get exactly this version, not whatever is newest that day.
+
+<Mistake title="running plan before init">
+
+```output title="Terraform stops with"
+Error: Inconsistent dependency lock file
+
+The following dependency selections recorded in the lock file are
+inconsistent with the current configuration:
+  - provider registry.terraform.io/hashicorp/aws: required by this configuration but no version is selected
+
+To make the initial dependency selections that will initialize the dependency
+lock file, run:
+  terraform init
+```
+
+**Why:** the code needs the AWS provider, but it hasn't been downloaded or chosen yet.
+
+**The fix:** run `terraform init`. Run it again whenever you add a provider or a module.
+
+</Mistake>
+
+</Step>
+
+<Step title="Keep the right files out of git">
+
+If this folder will go into git, create a file called `.gitignore` next to `main.tf`:
+
+```text title=".gitignore"
+.terraform/
+*.tfstate
+*.tfstate.*
+```
+
+| Line | What it keeps out of git |
+|---|---|
+| `.terraform/` | the downloaded plugin: large, and `init` fetches it again |
+| `*.tfstate` | the state file, which can hold secrets |
+| `*.tfstate.*` | the backup copy Terraform keeps, `terraform.tfstate.backup` |
+
+`.terraform.lock.hcl` isn't listed, so it **is** committed. That's what you want.
+
+</Step>
+
+<Step title="Read the plan">
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | compare the code, the state and AWS, and show what would change. Changes nothing |
+
+```output
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # aws_ecr_repository.orders will be created
+  + resource "aws_ecr_repository" "orders" {
+      + arn                  = (known after apply)
+      + force_delete         = true
+      + id                   = (known after apply)
+      + image_tag_mutability = "IMMUTABLE"
+      + name                 = "quickcart-orders"
+      + region               = "us-east-1"
+      + registry_id          = (known after apply)
+      + repository_url       = (known after apply)
+      + tags                 = {
+          + "Project" = "quickcart"
+        }
+      + tags_all             = {
+          + "Project" = "quickcart"
+        }
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+```
+
+Every line starts with `+`: all new. `arn`, `id` and `repository_url` are `(known after apply)`, because AWS makes them up when it creates the repository. `tags_all` is your tags plus any the provider adds for every resource; here they're the same.
+
+<Mistake title="no AWS login">
+
+```output title="Plan stops with"
+Planning failed. Terraform encountered an error while generating this plan.
+
+Error: No valid credential sources found
+
+  with provider["registry.terraform.io/hashicorp/aws"],
+  on main.tf line 12, in provider "aws":
+  12: provider "aws" {
+```
+
+**Why:** the AWS provider couldn't find any login: no profile, no access keys, no role. There's more after this, which varies with your setup.
+
+**The fix:** get `aws sts get-caller-identity` working first. If you use a named profile, set it in this terminal, as [Set up your Mac](/lessons/mac-setup/) shows.
+
+</Mistake>
+
+</Step>
+
+<Step title="Apply it">
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | make the plan again, show it, and carry it out once you type `yes` |
+
+It shows the same plan. **Read the summary line**, then type `yes`:
+
+```output
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: yes
+
+aws_ecr_repository.orders: Creating...
+aws_ecr_repository.orders: Creation complete after 1s [id=quickcart-orders]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+Check it in the console:
+
+<ConsolePath path="Amazon ECR > Private registry > Repositories" />
+
+<See>
+
+`quickcart-orders` in the list, with **Tag immutability** shown as immutable. Built from one short file, and you can build it again identically whenever you like.
+
+</See>
+
+</Step>
+
+<Step title="Change it in place">
+
+Add a second tag, `Team`. The whole file now reads:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "quickcart-orders"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+    Team    = "platform"
+  }
+}
+```
+
+| Setting | What changed |
+|---|---|
+| `tags` → `Team` | a second label, saying which team owns the repository. Every other setting is as before |
+
+```sh
+terraform apply
+```
+
+| Part | What it means |
+|---|---|
+| `terraform apply` | plan the tag change, show it, and carry it out once you type `yes` |
+
+```output
+Terraform will perform the following actions:
+
+  # aws_ecr_repository.orders will be updated in-place
+  ~ resource "aws_ecr_repository" "orders" {
+        id                   = "quickcart-orders"
+        name                 = "quickcart-orders"
+      ~ tags                 = {
+            "Project" = "quickcart"
+          + "Team"    = "platform"
+        }
+      ~ tags_all             = {
+          + "Team"    = "platform"
+            # (1 unchanged element hidden)
+        }
+        # (6 unchanged attributes hidden)
+
+        # (2 unchanged blocks hidden)
+    }
+
+Plan: 0 to add, 1 to change, 0 to destroy.
+```
+
+`~`: the same repository, updated. Type `yes`:
+
+```output
+aws_ecr_repository.orders: Modifying... [id=quickcart-orders]
+aws_ecr_repository.orders: Modifications complete after 1s [id=quickcart-orders]
+
+Apply complete! Resources: 0 added, 1 changed, 0 destroyed.
+```
+
+</Step>
+
+<Step title="See a change that forces replacement — and don't apply it">
+
+Now do what Theo did. Change the name to `quickcart-orders-api`:
+
+```hcl title="main.tf"
+terraform {
+  required_version = ">= 1.10.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_ecr_repository" "orders" {
+  name                 = "quickcart-orders-api"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = true
+
+  tags = {
+    Project = "quickcart"
+    Team    = "platform"
+  }
+}
+```
+
+| Setting | What changed |
+|---|---|
+| `name` | `quickcart-orders` becomes `quickcart-orders-api` |
+
+This time, only **plan**:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | show what the rename would do, without doing it |
+
+```output
+Terraform will perform the following actions:
+
+  # aws_ecr_repository.orders must be replaced
+-/+ resource "aws_ecr_repository" "orders" {
+      ~ arn                  = "arn:aws:ecr:us-east-1:111122223333:repository/quickcart-orders" -> (known after apply)
+      ~ id                   = "quickcart-orders" -> (known after apply)
+      ~ name                 = "quickcart-orders" -> "quickcart-orders-api" # forces replacement
+      ~ registry_id          = "111122223333" -> (known after apply)
+      ~ repository_url       = "111122223333.dkr.ecr.us-east-1.amazonaws.com/quickcart-orders" -> (known after apply)
+        tags                 = {
+            "Project" = "quickcart"
+            "Team"    = "platform"
+        }
+        # (4 unchanged attributes hidden)
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+```
+
+There are a few more lines about the repository's settings blocks; they don't matter here. Read the rest:
+
+| Line | What it tells you |
+|---|---|
+| `must be replaced` and `-/+` | the repository will be destroyed, then a new one created |
+| `# forces replacement` | the `name` change is the cause |
+| `repository_url ... -> (known after apply)` | the address changes, so anything pushing or pulling images breaks until it's updated |
+| `1 to add, 1 to destroy` | **not** a rename. A delete and a create |
+
+**Don't apply it.** Change the name back to `quickcart-orders`, then plan again:
+
+```sh
+terraform plan
+```
+
+| Part | What it means |
+|---|---|
+| `terraform plan` | check the code matches what's built again |
+
+```output
+No changes. Your infrastructure matches the configuration.
+```
+
+<Note title="Renaming in Terraform's code is different">
+
+Changing the name **AWS** sees (`name = …`) forces replacement here. Changing the name **your code** uses (`"orders"` in the first line) also looks like a destroy and a create to Terraform, unless you tell it about the move. [Operating Terraform](/lessons/operating-terraform/) shows the `moved` block that fixes that.
+
+</Note>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+```sh
+terraform destroy
+```
+
+| Part | What it means |
+|---|---|
+| `terraform destroy` | plan the removal of everything this folder built, and carry it out once you type `yes` |
+
+It shows the plan, with every line starting `-`. Check the summary says `1 to destroy`, then type `yes`:
+
+```output
+Plan: 0 to add, 0 to change, 1 to destroy.
+
+Do you really want to destroy all resources?
+  Terraform will destroy all your managed infrastructure, as shown above.
+  There is no undo. Only 'yes' will be accepted to confirm.
+
+  Enter a value: yes
+
+aws_ecr_repository.orders: Destroying... [id=quickcart-orders]
+aws_ecr_repository.orders: Destruction complete after 1s
+
+Destroy complete! Resources: 1 destroyed.
+```
+
+Check **Amazon ECR → Private registry → Repositories**: `quickcart-orders` has gone.
+
+**Keep the `quickcart-tf` folder.** [Terraform state](/lessons/terraform-state/) starts from it.
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Command or symbol | What it means |
+|---|---|
+| `terraform init` | Download providers, create `.terraform.lock.hcl`. Again after adding a provider or module |
+| `terraform fmt` | Tidy the formatting |
+| `terraform validate` | Check the code without contacting AWS |
+| `terraform plan` | Show what would change. Changes nothing |
+| `terraform apply` | Show the plan, ask for `yes`, make the changes |
+| `terraform destroy` | Delete everything this folder manages |
+| `+` / `~` / `-` | Create / change in place / destroy |
+| `-/+` and `# forces replacement` | Destroy then create. Stop and read |
+| `(known after apply)` | AWS decides the value when it creates the resource |
+| `version = "~> 6.0"` | Any 6.x provider, never 7.0 |
+| Commit | `.tf` files and `.terraform.lock.hcl` |
+| Never commit | `.terraform/` and `*.tfstate` |
+
+</Cheat>
+
+</Part>

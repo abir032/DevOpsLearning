@@ -1,0 +1,664 @@
+---
+time: 45 minutes
+level: Beginner
+before: [vpc, security-groups]
+cost: paid
+quiz:
+  - q: QuickCart created a hosted zone in Route 53 with the right records, but example.com still shows the registrar's parking page. What is the most likely cause?
+    answer: 1
+    options:
+      - t: The records need a higher TTL
+        why: TTL only controls how long answers are cached. It can't make anyone read the hosted zone in the first place.
+      - t: The registrar still lists its own name servers, not Route 53's
+        why: The .com servers send every lookup to whichever name servers the registrar lists. Until those are Route 53's four, your hosted zone is never asked.
+      - t: Route 53 only works for domains bought from AWS
+        why: Any domain works. You just have to point it at Route 53 from wherever you bought it.
+      - t: The load balancer is in the wrong region
+        why: The lookup never gets as far as the load balancer. It stops at the wrong name servers.
+  - q: Why does QuickCart point example.com at the load balancer with an alias record rather than a CNAME?
+    answer: 3
+    options:
+      - t: CNAME records are slower
+        why: Speed isn't the problem. A CNAME simply isn't allowed at this name.
+      - t: Alias records are encrypted
+        why: DNS records aren't encrypted either way.
+      - t: A CNAME can only point at an IP address
+        why: It's the other way round. A CNAME points one name at another name.
+      - t: DNS rules forbid a CNAME at the root of a domain, and an alias works there
+        why: The root, or apex, must hold the NS and SOA records, and a CNAME can't share a name with anything. An alias is Route 53's way round that, and it follows the load balancer's addresses as they change.
+  - q: How does ACM's DNS validation prove you own example.com?
+    answer: 0
+    options:
+      - t: It asks you to create a specific CNAME record, and checks that it appears in public DNS
+        why: Only someone who controls the domain's DNS can create that record. Leave it in place and ACM uses it again to renew the certificate automatically.
+      - t: It emails a code to the person who registered the domain
+        why: That's email validation, the other option. DNS validation needs no email, and allows automatic renewal.
+      - t: It checks that the load balancer is running
+        why: ACM doesn't look at your load balancer at all when validating.
+      - t: It trusts any request from inside your AWS account
+        why: Anyone can have an AWS account. ACM needs proof you control the domain itself.
+  - q: What is the trade-off of a self-signed certificate on the load balancer?
+    answer: 2
+    options:
+      - t: The traffic isn't encrypted
+        why: It is encrypted, just as strongly. The problem is proving who is on the other end.
+      - t: It costs more than an ACM certificate
+        why: It costs nothing, and ACM public certificates are free too.
+      - t: The traffic is encrypted, but browsers and apps don't trust it and show a warning
+        why: No trusted authority vouches for it, so nobody can tell it apart from an attacker's certificate. Fine for learning; never for customers.
+      - t: It only lasts one day
+        why: You choose how long it lasts when you make it. The trust problem stays however long it lasts.
+  - q: Someone types http://example.com. What should the load balancer's port 80 listener do?
+    answer: 1
+    options:
+      - t: Serve the site normally over HTTP
+        why: Then the customer's order and login travel unencrypted, and iOS and Android block plain HTTP by default anyway.
+      - t: Answer with a 301 redirect to the https:// address
+        why: The browser follows it and comes back on port 443, encrypted. 301 means permanent, so browsers remember it.
+      - t: Refuse the connection
+        why: Customers who type the address without https would just see an error. Redirect them instead.
+      - t: Forward to the servers on port 443
+        why: The listener would still be talking to the customer over plain HTTP. The encryption has to be between the customer and the load balancer.
+  - q: QuickCart changes a record's value, but some customers still reach the old address for an hour. Why?
+    answer: 0
+    options:
+      - t: Resolvers saved the old answer, and keep it until its TTL runs out
+        why: Each answer carries a TTL, in seconds. Until it expires, resolvers answer from their saved copy. Lower the TTL before a planned change.
+      - t: Route 53 takes an hour to save changes
+        why: Route 53 changes reach its own name servers within about a minute.
+      - t: The load balancer is still starting
+        why: A starting load balancer doesn't make DNS return an old address.
+      - t: The customers' phones need restarting
+        why: Phones do cache too, but they follow the same TTL rule. No restart is needed.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the first app release">
+
+The QuickCart app needed an address for its API. Noor, the mobile developer, copied the load balancer's name from the console — a long string ending in `elb.amazonaws.com` — and put it straight into the app.
+
+It was plain `http://`. iOS refused to connect, so Noor added an exception to App Transport Security to allow it.
+
+A month later, the team rebuilt the load balancer. Its name changed. Every installed copy of the app now pointed at an address that no longer existed. Fixing it meant shipping an app update, waiting for review, and waiting again for customers to install it.
+
+</Story>
+
+<Case title="A very common mistake">
+
+Certificates expire, and the ones renewed by hand eventually get forgotten. Expired certificates have caused outages at large, well-known services more than once, and the pattern is always the same: a renewal reminder that went to someone who had left, or to nobody. The site itself was fine. Every browser and app simply refused to talk to it.
+
+</Case>
+
+QuickCart needs three things:
+
+- An address it owns, like `example.com`, that stays the same whatever changes behind it.
+- A certificate, so the app talks HTTPS with no exceptions.
+- A certificate that renews itself, so nobody has to remember.
+
+</Part>
+
+<Part id="idea">
+
+Computers find each other by IP address, like `203.0.113.10`. People and apps use names, like `example.com`. **DNS** — the Domain Name System — is the internet's way of turning a name into an address.
+
+### Where a name's answer comes from
+
+No single computer knows every name. A lookup is a chain of questions, and each server only knows who to ask next:
+
+| Who | What they know | Their answer for `example.com` |
+|---|---|---|
+| **Resolver** | Nothing permanent. It asks on your behalf and remembers answers for a while. Run by your Wi-Fi, your mobile network, or a public service | "Let me find out" |
+| **Root servers** | Who runs each ending, like `.com` or `.org` | "Ask the `.com` servers" |
+| **`.com` servers** | Which **name servers** are in charge of each `.com` domain | "Ask these four name servers" |
+| **Your name servers** | Your actual records | "It's `203.0.113.10`" |
+
+The resolver saves each answer for a number of seconds set by the record, called its **TTL** — time to live. That's why a change can take a while to reach everyone.
+
+### The registrar and the hosted zone
+
+Two different companies can be involved, and people mix them up:
+
+| Piece | What it is | QuickCart's |
+|---|---|---|
+| **Registrar** | Where you bought the domain. It tells the `.com` servers which name servers are in charge | Any registrar, including Route 53 itself |
+| **Hosted zone** | Where the records live. In Route 53, one hosted zone per domain | The `example.com` hosted zone |
+| **NS record** | The list of name servers in charge. Route 53 gives every hosted zone four | Copied from the hosted zone into the registrar |
+
+Creating a hosted zone doesn't make anyone use it. **The registrar has to point to it.** If you bought the domain through Route 53, that's done for you. Anywhere else, you copy the hosted zone's four name servers into the registrar's settings. This is called **delegation**.
+
+<Key>The registrar decides which name servers answer for your domain. Nothing in Route 53 matters until it points there.</Key>
+
+### The records you'll use
+
+| Type | Points a name at | Example |
+|---|---|---|
+| `A` | An IPv4 address | `example.com → 203.0.113.10` |
+| `AAAA` | An IPv6 address | `example.com → 2001:db8::10` |
+| `CNAME` | Another name. Not allowed at the domain's root | `www.example.com → example.com` |
+| `NS` | The name servers in charge of the domain | Four Route 53 servers |
+| `SOA` | Housekeeping for the zone. Created for you | — |
+| **Alias** (Route 53 only) | An AWS resource, like a load balancer. Allowed at the root | `example.com → quickcart-web-alb` |
+
+**Never point a record at one server's IP address.** Servers get replaced and their addresses change. Point it at the **load balancer**, which stays put while servers come and go behind it.
+
+A load balancer has no fixed IP address either — AWS changes them as it scales. A normal `A` record would go stale. An **alias record** fixes that: Route 53 looks up the load balancer's current addresses every time it answers. Alias queries to AWS resources are also free.
+
+Why not a `CNAME`? The root of a domain, `example.com` itself (called the **apex**), must hold the `NS` and `SOA` records. DNS rules forbid a `CNAME` from sharing its name with any other record, so it can't go there. An alias can.
+
+### HTTPS and certificates
+
+**HTTPS** is HTTP inside an encrypted connection, using a protocol called **TLS**. It does two jobs:
+
+| Job | What it means | Without it |
+|---|---|---|
+| **Encryption** | Nobody between the phone and QuickCart can read or change the traffic | Anyone on the same café Wi-Fi can read passwords and orders |
+| **Identity** | The phone can check it's really talking to `example.com` | An attacker can pretend to be QuickCart |
+
+The identity part comes from a **certificate**: a file that says "this key belongs to `example.com`", signed by a **certificate authority** that every browser and phone already trusts.
+
+<YouKnow title="You already know this: App Transport Security">
+
+iOS blocks plain `http://` connections by default, and so does Android since version 9. You've probably seen the error, and maybe added an exception to get past it. An exception is a promise to fix it later. A trusted certificate on the load balancer is the fix.
+
+</YouKnow>
+
+### ACM: free certificates that renew themselves
+
+**ACM** — AWS Certificate Manager — issues trusted certificates for free, as long as you use them on AWS services like a load balancer. Before it issues one, you prove you control the domain:
+
+| Validation | How you prove it | Renews by itself? |
+|---|---|---|
+| **DNS** (use this) | ACM gives you a `CNAME` record to create. It checks the record appears in public DNS | Yes, as long as the record stays |
+| Email | ACM emails the domain's contacts, and someone clicks a link | No — someone has to click again each time |
+
+With the domain in Route 53, one button creates the validation record for you.
+
+### Where the encryption ends
+
+The certificate goes on the **load balancer**, not on the servers. The load balancer decrypts each request and passes it to the servers inside the VPC. This is called **TLS termination**. The servers don't handle certificates at all.
+
+The load balancer gets two **listeners** — the ports it answers on:
+
+| Listener | What it does |
+|---|---|
+| **HTTPS on 443** | Uses the certificate. Sends requests on to the app |
+| **HTTP on 80** | Answers every request with a **301 redirect** to the same address on `https://`. 301 means "moved permanently", so browsers remember it |
+
+### If you don't own a domain
+
+A **self-signed certificate** is one you make yourself, signed by nobody. It's free and instant, and the traffic is just as encrypted. But no trusted authority vouches for it, so every browser shows a warning, and apps refuse to connect.
+
+| | Your own domain + ACM | Self-signed |
+|---|---|---|
+| Cost | A domain, roughly $10–15 a year for `.com`, plus $0.50 a month for the hosted zone | Nothing |
+| Browser | A padlock | "Your connection is not private" |
+| Apps | Connect normally | Refuse, unless you add an exception |
+| Renewal | Automatic | You make a new one and import it |
+| Good for | Anything customers use | Learning how the pieces fit |
+
+</Part>
+
+<Part id="see">
+
+Follow one lookup for `example.com`, from a customer's phone to QuickCart's load balancer. Then switch the registrar to **Still the registrar's** — as if you created the hosted zone but forgot the last step — and try again.
+
+<DnsJourney />
+
+**What to notice:** in the second run, Route 53 and its records didn't change at all. The lookup simply never reached them. When DNS "isn't working" after you create a hosted zone, check the name servers at the registrar first.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="paid">about $0.03 an hour for the load balancer and its public addresses in us-east-1 — delete it after. The hosted zone is $0.50 a month; AWS doesn't charge for one deleted within 12 hours of creation. A domain, if you buy one, is roughly $10–15 a year for `.com`. Prices change; check the pricing pages.</Cost>
+
+<Note title="This lab creates a load balancer, which costs money while it exists">
+
+A load balancer bills by the hour whether or not anyone uses it. Do the whole lab in one sitting, and do the clean-up step at the end.
+
+</Note>
+
+You'll put a load balancer on HTTPS, redirect HTTP to it, and — if you have a domain — give it a proper name. About 40 minutes, plus waiting for DNS.
+
+There are two paths. Steps 1–3 and 8–9 are the same for both.
+
+| Path | You need | Steps |
+|---|---|---|
+| **A: your own domain** | A domain you control. This lesson writes `example.com`; use yours everywhere you see it | 1, 2, 3, 4, 5, 6, 8, 9, 10, 11 |
+| **B: self-signed** | Nothing extra | 1, 2, 3, 7, 8, 9, 11 |
+
+Check the region selector at the top right says **N. Virginia (us-east-1)**. The lab uses the **default VPC**, which every account has in every region, with a public subnet in each zone.
+
+<Steps>
+
+<Step title="Create the load balancer's security group">
+
+<ConsolePath path="EC2 > Network & Security > Security Groups > Create security group" />
+
+| Field | Enter |
+|---|---|
+| Security group name | `quickcart-alb-sg` |
+| Description | `QuickCart load balancer: HTTP and HTTPS from anywhere` |
+| VPC | the default VPC |
+
+Under **Inbound rules**, choose **Add rule** twice:
+
+| Type | Source |
+|---|---|
+| **HTTP** (port 80) | **Anywhere-IPv4** (`0.0.0.0/0`) |
+| **HTTPS** (port 443) | **Anywhere-IPv4** (`0.0.0.0/0`) |
+
+Leave the outbound rule as it is. Choose **Create security group**.
+
+<See>
+
+The group's details page, with two inbound rules: ports 80 and 443 from `0.0.0.0/0`.
+
+</See>
+
+</Step>
+
+<Step title="Create an empty target group">
+
+A load balancer needs somewhere to send traffic when you create it. There are no servers in this lab, so the target group stays empty; you'll replace its job with a fixed response in step 8.
+
+<ConsolePath path="EC2 > Load Balancing > Target Groups > Create target group" />
+
+| Field | Enter |
+|---|---|
+| Choose a target type | **Instances** |
+| Target group name | `quickcart-web-tg` |
+| Protocol : Port | **HTTP** : `80` |
+| VPC | the default VPC |
+
+Leave the rest at its defaults and choose **Next**. Register nothing. Choose **Create target group**.
+
+</Step>
+
+<Step title="Create the load balancer">
+
+<ConsolePath path="EC2 > Load Balancing > Load Balancers > Create load balancer" />
+
+Under **Application Load Balancer**, choose **Create**.
+
+| Field | Enter |
+|---|---|
+| Load balancer name | `quickcart-web-alb` |
+| Scheme | **Internet-facing** |
+| Load balancer IP address type | **IPv4** |
+| VPC | the default VPC |
+| Availability Zones and subnets | tick **us-east-1a** and **us-east-1b** |
+| Security groups | remove **default**, choose `quickcart-alb-sg` |
+| Listener | **HTTP** : `80`, default action **Forward to** `quickcart-web-tg` |
+
+Choose **Create load balancer**, then **View load balancer**.
+
+<See>
+
+**State: Provisioning**, changing to **Active** after a few minutes. Copy its **DNS name** — a long name ending in `us-east-1.elb.amazonaws.com`. This lesson calls it `ALB_DNS_NAME`.
+
+</See>
+
+</Step>
+
+<Step title="Path A: create the hosted zone">
+
+If you bought your domain through Route 53, a hosted zone already exists. **Skip to step 6** — creating a second one is a common mistake, below.
+
+<ConsolePath path="Route 53 > Hosted zones > Create hosted zone" />
+
+| Field | Enter |
+|---|---|
+| Domain name | `example.com` — your domain |
+| Type | **Public hosted zone** |
+
+Choose **Create hosted zone**.
+
+<See>
+
+Two records already exist: an `NS` record listing four name servers, like `ns-123.awsdns-45.com`, and an `SOA` record. Yours have different numbers.
+
+</See>
+
+<Mistake title="two hosted zones for one domain">
+
+```output title="Records you add have no effect, and dig shows name servers you don't recognise"
+ns-812.awsdns-37.net.
+ns-1204.awsdns-23.org.
+```
+
+**Why:** registering a domain with Route 53 creates a hosted zone automatically. Creating another one gives it four *different* name servers. The registrar points at the first zone, so records in the second are never read.
+
+**The fix:** delete the extra hosted zone, and add your records to the one whose `NS` values match the registrar's.
+
+</Mistake>
+
+</Step>
+
+<Step title="Path A: point the registrar at Route 53">
+
+Open your hosted zone and copy the four values from its `NS` record.
+
+In your registrar's website, find the domain's **name servers** setting. Replace whatever is there with the four Route 53 name servers, and save. Every registrar's page looks different; search its help pages for "change name servers" or "custom nameservers".
+
+Then check what the world sees, from your Mac's terminal:
+
+```sh ph="example.com"
+dig +short NS example.com
+```
+
+| Part | What it means |
+|---|---|
+| `dig` | ask DNS a question and print the answer |
+| `+short` | print only the answer, not the full report |
+| `NS` | ask for the name servers in charge of the domain |
+| `example.com` | your domain |
+
+```output
+ns-123.awsdns-45.com.
+ns-678.awsdns-12.net.
+ns-1024.awsdns-00.org.
+ns-1600.awsdns-10.co.uk.
+```
+
+When this matches your hosted zone's four, delegation is working. It often takes minutes, but can take up to a day or two, because resolvers may still hold the old answer until its TTL runs out.
+
+</Step>
+
+<Step title="Path A: request a certificate">
+
+<ConsolePath path="Certificate Manager > Certificates > Request" />
+
+Choose **Request a public certificate**, then **Next**.
+
+| Field | Enter |
+|---|---|
+| Fully qualified domain name | `example.com` |
+| Add another name to this certificate | `www.example.com` |
+| Validation method | **DNS validation** |
+| Key algorithm | **RSA 2048** |
+
+Leave anything else at its default. Choose **Request**.
+
+Open the new certificate. Its status is **Pending validation**. In the **Domains** section, choose **Create records in Route 53**, check both names are ticked, and choose **Create records**.
+
+<See>
+
+Within a few minutes — occasionally up to half an hour — **Status: Issued**. In the hosted zone, a new `CNAME` record with a long random name. **Leave it there for good**: ACM checks it again every time it renews the certificate.
+
+</See>
+
+<Mistake title="the certificate stays pending">
+
+```output title="The certificate's status"
+Pending validation
+```
+
+**Why:** ACM can't see the validation record in public DNS. Usually the registrar still points at other name servers (step 5), or the record was created in the wrong hosted zone. After 72 hours ACM gives up and the status becomes **Validation timed out**.
+
+**The fix:** check delegation with `dig +short NS example.com`. Once it shows Route 53's name servers, ACM finds the record by itself. If it timed out, delete the certificate and request a new one.
+
+</Mistake>
+
+Now skip to step 8.
+
+</Step>
+
+<Step title="Path B: make and import a self-signed certificate">
+
+Make a certificate and its private key, in any folder on your Mac:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -keyout quickcart-key.pem -out quickcart-cert.pem -days 30 -subj "/CN=quickcart.example.com"
+```
+
+| Part | What it means |
+|---|---|
+| `openssl req` | the tool's certificate-making command |
+| `-x509` | make a finished, self-signed certificate, instead of a request for someone else to sign |
+| `-newkey rsa:2048` | make a new 2048-bit RSA private key to go with it — a type ACM accepts |
+| `-nodes` | don't protect the key with a password. ACM only imports unprotected keys |
+| `-keyout quickcart-key.pem` | where to save the private key. Keep it secret |
+| `-out quickcart-cert.pem` | where to save the certificate |
+| `-days 30` | how long it lasts |
+| `-subj "/CN=quickcart.example.com"` | the name it claims to be for, set here so it doesn't ask you questions |
+
+<See>
+
+A burst of dots and plus signs while the key is generated, then two new files in the folder: `quickcart-key.pem` and `quickcart-cert.pem`.
+
+</See>
+
+Print the certificate, so you can copy it:
+
+```sh
+cat quickcart-cert.pem
+```
+
+| Part | What it means |
+|---|---|
+| `cat` | print a file's contents |
+| `quickcart-cert.pem` | the certificate you just made |
+
+```output
+-----BEGIN CERTIFICATE-----
+MIIDITCCAgmgAwIBAgIUU+7pZ7yAR4jewxjumSmlJukGtrcwDQYJKoZIhvcNAQEL
+```
+
+It continues for about 20 lines and ends with `-----END CERTIFICATE-----`. Yours has different letters.
+
+<ConsolePath path="Certificate Manager > Certificates > Import" />
+
+| Field | Enter |
+|---|---|
+| Certificate body | everything printed by `cat quickcart-cert.pem`, including the BEGIN and END lines |
+| Certificate private key | everything in `quickcart-key.pem` — print it the same way |
+| Certificate chain | leave empty. A self-signed certificate has no chain |
+
+Choose **Import**. If the console shows a review page first, choose **Import** there too.
+
+<See>
+
+The certificate in the list, **Type: Imported**, **Status: Issued**, for `quickcart.example.com`.
+
+</See>
+
+</Step>
+
+<Step title="Add the HTTPS listener">
+
+<ConsolePath path="EC2 > Load Balancers > quickcart-web-alb > Listeners and rules > Add listener" />
+
+| Field | Enter |
+|---|---|
+| Protocol : Port | **HTTPS** : `443` |
+| Default action | **Return fixed response** |
+| Response code | `200` |
+| Content type | **text/plain** |
+| Response body | `QuickCart over HTTPS` |
+| Security policy | leave the recommended default |
+| Default SSL/TLS server certificate | **From ACM**, then your certificate |
+
+Choose **Add**.
+
+A real service would forward to a target group of servers here. The fixed response lets you test HTTPS without any.
+
+<See>
+
+Two listeners: **HTTP:80** and **HTTPS:443**, the second showing your certificate.
+
+</See>
+
+</Step>
+
+<Step title="Redirect HTTP to HTTPS">
+
+In the same **Listeners and rules** tab, select **HTTP:80**, then choose **Manage listener → Edit listener**.
+
+| Field | Enter |
+|---|---|
+| Default action | **Redirect to URL** |
+| Redirect to | **URI parts** |
+| Protocol : Port | **HTTPS** : `443` |
+| Status code | **301 - Permanently moved** |
+
+Choose **Save changes**.
+
+</Step>
+
+<Step title="Path A: point your domain at the load balancer">
+
+<ConsolePath path="Route 53 > Hosted zones > example.com > Create record" />
+
+| Field | Enter |
+|---|---|
+| Record name | leave empty — this is the apex, `example.com` itself |
+| Record type | **A** |
+| Alias | **On** |
+| Route traffic to | **Alias to Application and Classic Load Balancer** |
+| Region | **US East (N. Virginia)** |
+| Load balancer | `dualstack.quickcart-web-alb-` followed by numbers — yours |
+| Routing policy | **Simple routing** |
+
+Choose **Create records**. Do it once more with **Record name** `www`, so both names on the certificate lead somewhere.
+
+</Step>
+
+<Step title="Test it">
+
+**Path A.** Ask for the plain HTTP address:
+
+```sh ph="example.com"
+curl -I http://example.com
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request from the terminal |
+| `-I` | print only the response's headers, not the page |
+| `http://example.com` | your domain, deliberately over plain HTTP |
+
+```output
+HTTP/1.1 301 Moved Permanently
+Server: awselb/2.0
+Location: https://example.com:443/
+```
+
+There are a few more header lines; these are the ones that matter. The load balancer sent you to HTTPS. Now open `https://example.com` in a browser.
+
+<See>
+
+A padlock in the address bar and the text **QuickCart over HTTPS**. Select the padlock to see the certificate, issued by Amazon.
+
+</See>
+
+<Mistake title="the browser says the name doesn't match">
+
+```output title="Chrome shows"
+Your connection is not private
+NET::ERR_CERT_COMMON_NAME_INVALID
+```
+
+**Why:** the certificate doesn't list the name you typed. The classic case: the certificate is for `example.com` only, and you opened `www.example.com`.
+
+**The fix:** request a new certificate that lists every name you'll use, validate it, and choose it on the HTTPS listener.
+
+</Mistake>
+
+**Path B.** Use the load balancer's DNS name from step 3:
+
+```sh ph="ALB_DNS_NAME"
+curl https://ALB_DNS_NAME
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request |
+| `https://ALB_DNS_NAME` | the load balancer's DNS name, over HTTPS |
+
+```output
+curl: (60) SSL certificate problem: self signed certificate
+```
+
+The wording may differ slightly with your version of curl. Curl refused: the traffic would be encrypted, but nobody trusted vouches for the certificate. Tell curl you accept that, for this test only:
+
+```sh ph="ALB_DNS_NAME"
+curl -k https://ALB_DNS_NAME
+```
+
+| Part | What it means |
+|---|---|
+| `curl` | make a web request |
+| `-k` | carry on even though the certificate isn't trusted. Only ever for testing |
+| `https://ALB_DNS_NAME` | the load balancer's DNS name, over HTTPS |
+
+```output
+QuickCart over HTTPS
+```
+
+Open the same address in a browser. It shows **Your connection is not private** — that's the trade-off from [the idea](#idea). You can click through it; your customers shouldn't have to.
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+The load balancer bills every hour, so delete it first.
+
+<ConsolePath path="EC2 > Load Balancers > quickcart-web-alb > Actions > Delete load balancer" />
+
+Type `confirm` and choose **Delete**. Then delete the rest, in this order:
+
+| Where | Delete |
+|---|---|
+| EC2 > Target Groups | `quickcart-web-tg` — **Actions → Delete** |
+| EC2 > Security Groups | `quickcart-alb-sg` — **Actions → Delete security groups**. If it refuses, wait a minute for the load balancer to finish deleting |
+| Certificate Manager | your certificate — **Delete** |
+| Route 53 > Hosted zones > example.com (path A) | the two `A` records and the validation `CNAME`. Then the hosted zone itself — **Delete zone** |
+
+A hosted zone can only be deleted once it holds nothing but its `NS` and `SOA` records. If you plan to keep using the domain with Route 53, keep the hosted zone instead, at $0.50 a month.
+
+For path B, delete the two `.pem` files from your Mac.
+
+<See>
+
+No load balancer, target group, certificate or hosted zone left. If you bought a domain just for this, it stays yours until it expires; turn off auto-renew at the registrar if you don't want it.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term | In one line |
+|---|---|
+| DNS | Turns names into IP addresses, by a chain of servers |
+| Resolver | Asks on your behalf, and caches answers |
+| TTL | How many seconds an answer may be cached |
+| Registrar | Where you bought the domain. Sets its name servers |
+| Hosted zone | Where a domain's records live in Route 53. $0.50 a month |
+| NS record | The four name servers in charge. Must match at the registrar |
+| `A` / `AAAA` | Name → IPv4 / IPv6 address |
+| `CNAME` | Name → another name. Never at the apex |
+| Alias | Route 53 only. Name → AWS resource, allowed at the apex |
+| ACM | Free trusted certificates for load balancers. DNS validation renews itself |
+| TLS termination | The load balancer decrypts; servers don't handle certificates |
+| Port 80 listener | 301 redirect to HTTPS |
+| Self-signed | Encrypted, but untrusted. For learning only |
+| DNS not working? | `dig +short NS example.com` — does it match the hosted zone? |
+
+</Cheat>
+
+</Part>

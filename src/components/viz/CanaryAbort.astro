@@ -1,0 +1,241 @@
+---
+/*
+ * Canary from a pipeline: traffic shifts in steps, and each step is judged
+ * against abort criteria written down in advance.
+ * Teaches: a version that raises errors is stopped and rolled back
+ * automatically; too little data is not a pass.
+ */
+const STEPS = [10, 50, 100];
+---
+<div class="viz" data-track="auto" data-viz="canary-abort">
+  <div class="viz-controls">
+    <span class="lbl" id="ca-v">New version</span>
+    <div class="seg" role="group" aria-labelledby="ca-v">
+      <button type="button" data-ver="good" aria-pressed="true">Healthy</button>
+      <button type="button" data-ver="bad" aria-pressed="false">Raises errors</button>
+    </div>
+    <span class="lbl" id="ca-t">Traffic</span>
+    <div class="seg" role="group" aria-labelledby="ca-t">
+      <button type="button" data-traffic="busy" aria-pressed="true">Busy</button>
+      <button type="button" data-traffic="quiet" aria-pressed="false">Quiet night</button>
+    </div>
+    <button class="btn line" type="button" data-a="start">Start the canary</button>
+    <button class="btn" type="button" data-a="reset">Reset</button>
+  </div>
+  <div class="viz-stage ca-stage">
+    <div class="ca-split" aria-hidden="true">
+      <div class="ca-bar">
+        <span class="ca-stable" data-n="stable" style="width:100%">stable 100%</span>
+        <span class="ca-canary" data-n="canary" style="width:0%"></span>
+      </div>
+    </div>
+    <p class="sr" data-n="split-text">All traffic goes to the stable version.</p>
+    <div class="ca-grid">
+      <section class="ca-box" aria-label="Traffic steps">
+        <h3>The steps</h3>
+        <ol class="ca-ladder">
+          {STEPS.map((s) => (
+            <li data-step={s}><span class="ca-dot" aria-hidden="true"></span><span><b>{s}%</b> to the new version</span> <span class="ca-st" data-st>waiting</span></li>
+          ))}
+        </ol>
+      </section>
+      <section class="ca-box" aria-label="Abort criteria">
+        <h3>Abort criteria, agreed first</h3>
+        <dl class="ca-crit">
+          <div><dt>Canary requests this step</dt><dd><span data-n="req">0</span> <small>need at least 20</small></dd></div>
+          <div><dt>Canary error rate</dt><dd><span data-n="err">0.0%</span> <small>abort above 2%</small></dd></div>
+        </dl>
+        <div class="ca-meter" aria-hidden="true"><i data-n="meter"></i><b class="ca-limit"></b></div>
+      </section>
+      <section class="ca-box ca-logbox" aria-label="Pipeline log">
+        <h3>Pipeline log</h3>
+        <pre class="ca-log" data-n="log">Waiting to start.</pre>
+      </section>
+    </div>
+  </div>
+  <div class="viz-say" aria-live="polite"><span class="step-l">Ready</span>Choose a new version, then <b>Start the canary</b>. The pipeline judges every step against the criteria on the right.</div>
+</div>
+
+<style is:global>
+  [data-viz="canary-abort"] .ca-stage { padding: 14px 16px 8px; }
+  [data-viz="canary-abort"] .ca-bar { display: flex; height: 34px; border-radius: 8px; overflow: hidden; border: 1px solid var(--rule-2); background: var(--sunk); }
+  [data-viz="canary-abort"] .ca-bar span { display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; white-space: nowrap; overflow: hidden; transition: width .6s ease; }
+  [data-viz="canary-abort"] .ca-stable { background: color-mix(in srgb, var(--cloud) 22%, var(--surface)); color: var(--ink); }
+  [data-viz="canary-abort"] .ca-canary { background: var(--auto); color: var(--on-auto); }
+  [data-viz="canary-abort"].is-bad .ca-canary { background: var(--bad); color: #fff; }
+  [data-viz="canary-abort"] .ca-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.3fr); gap: 12px; margin-top: 14px; }
+  [data-viz="canary-abort"] .ca-box { border: 1px solid var(--rule); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+  [data-viz="canary-abort"] .ca-box h3 { margin: 0 0 8px; font-size: 14.5px; font-weight: 800; }
+  [data-viz="canary-abort"] .ca-ladder { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+  [data-viz="canary-abort"] .ca-ladder li { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+  [data-viz="canary-abort"] .ca-dot { width: 12px; height: 12px; border-radius: 50%; border: 2.5px solid var(--line); background: var(--bg); flex: none; }
+  [data-viz="canary-abort"] .ca-st { font-size: 12.5px; font-weight: 700; color: var(--ink-3); }
+  [data-viz="canary-abort"] li.checking .ca-dot { background: var(--auto); }
+  [data-viz="canary-abort"] li.checking .ca-st { color: var(--auto-t); }
+  [data-viz="canary-abort"] li.passed .ca-dot { background: var(--ok); border-color: var(--ok); }
+  [data-viz="canary-abort"] li.passed .ca-st { color: var(--ok); }
+  [data-viz="canary-abort"] li.failed .ca-dot { background: var(--bad); border-color: var(--bad); }
+  [data-viz="canary-abort"] li.failed .ca-st { color: var(--bad); }
+  [data-viz="canary-abort"] .ca-crit { margin: 0; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+  [data-viz="canary-abort"] .ca-crit dt { color: var(--ink-2); }
+  [data-viz="canary-abort"] .ca-crit dd { margin: 0; font-weight: 800; font-size: 17px; }
+  [data-viz="canary-abort"] .ca-crit dd small { font-weight: 600; font-size: 12.5px; color: var(--ink-3); margin-left: 4px; }
+  [data-viz="canary-abort"] .ca-crit dd.over span { color: var(--bad); }
+  [data-viz="canary-abort"] .ca-crit dd.short span { color: var(--warn); }
+  [data-viz="canary-abort"] .ca-meter { position: relative; height: 10px; border-radius: 5px; background: var(--sunk); margin-top: 10px; overflow: hidden; }
+  [data-viz="canary-abort"] .ca-meter i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .4s; }
+  [data-viz="canary-abort"] .ca-meter i.over { background: var(--bad); }
+  /* the 2% limit, drawn on a scale that tops out at 25% */
+  [data-viz="canary-abort"] .ca-limit { position: absolute; top: -2px; bottom: -2px; left: 8%; width: 2px; background: var(--ink); }
+  [data-viz="canary-abort"] .ca-log { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; color: var(--ink-2); max-height: 190px; overflow: auto; }
+  @media (max-width: 860px) {
+    [data-viz="canary-abort"] .ca-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { beat, press, tell } from "../../scripts/viz";
+  import { onPage, once } from "../../scripts/page";
+
+  /* What each step sees. Fixed numbers, so every run teaches the same thing. */
+  type Ver = "good" | "bad";
+  type Traffic = "busy" | "quiet";
+  interface Sample { req: number; err: number }
+  const MIN_REQ = 20;
+  const MAX_RATE = 2;
+  const SAMPLES: Record<Ver, Record<Traffic, Record<number, Sample[]>>> = {
+    good: {
+      busy: { 10: [{ req: 26, err: 0 }], 50: [{ req: 131, err: 1 }], 100: [] },
+      quiet: { 10: [{ req: 4, err: 0 }, { req: 11, err: 0 }, { req: 23, err: 0 }], 50: [{ req: 64, err: 0 }], 100: [] },
+    },
+    bad: {
+      busy: { 10: [{ req: 27, err: 6 }], 50: [], 100: [] },
+      quiet: { 10: [{ req: 3, err: 0 }, { req: 9, err: 1 }, { req: 22, err: 5 }], 50: [], 100: [] },
+    },
+  };
+
+  onPage(() => {
+    const stops: (() => void)[] = [];
+    document.querySelectorAll<HTMLElement>('[data-viz="canary-abort"]').forEach((root) => {
+      if (!once(root)) return;
+      const q = <T extends Element>(n: string) => root.querySelector<T>(`[data-n="${n}"]`)!;
+      const say = root.querySelector<HTMLElement>(".viz-say")!;
+      const start = root.querySelector<HTMLButtonElement>('[data-a="start"]')!;
+      const verBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-ver]")];
+      const trBtns = [...root.querySelectorAll<HTMLButtonElement>("[data-traffic]")];
+      const steps = [...root.querySelectorAll<HTMLElement>("[data-step]")];
+      let ver: Ver = "good";
+      let traffic: Traffic = "busy";
+      let run = 0;
+
+      function split(pct: number) {
+        q<HTMLElement>("stable").style.width = 100 - pct + "%";
+        q<HTMLElement>("stable").textContent = pct < 100 ? `stable ${100 - pct}%` : "";
+        q<HTMLElement>("canary").style.width = pct + "%";
+        q<HTMLElement>("canary").textContent = pct > 0 ? `new ${pct}%` : "";
+        q<HTMLElement>("split-text").textContent = pct === 0
+          ? "All traffic goes to the stable version."
+          : pct === 100 ? "All traffic goes to the new version." : `${pct}% of traffic goes to the new version, ${100 - pct}% to the stable one.`;
+      }
+      function crit(s: Sample | null) {
+        const req = q<HTMLElement>("req"), err = q<HTMLElement>("err"), meter = q<HTMLElement>("meter");
+        const rate = s && s.req ? (s.err / s.req) * 100 : 0;
+        req.textContent = String(s ? s.req : 0);
+        err.textContent = rate.toFixed(1) + "%";
+        req.parentElement!.classList.toggle("short", !!s && s.req < MIN_REQ);
+        err.parentElement!.classList.toggle("over", rate > MAX_RATE);
+        meter.style.width = Math.min(100, (rate / 25) * 100) + "%";
+        meter.classList.toggle("over", rate > MAX_RATE);
+      }
+      function stepState(pct: number, state: "" | "checking" | "passed" | "failed", label: string) {
+        const li = steps.find((x) => Number(x.dataset.step) === pct)!;
+        li.className = state;
+        li.querySelector("[data-st]")!.textContent = label;
+      }
+      function log(line: string, fresh = false) {
+        const el = q<HTMLElement>("log");
+        el.textContent = fresh ? line : el.textContent + "\n" + line;
+        el.scrollTop = el.scrollHeight;
+      }
+      function busy(on: boolean) {
+        start.disabled = on;
+        [...verBtns, ...trBtns].forEach((b) => (b.disabled = on));
+      }
+      function reset(message = true) {
+        run++;
+        busy(false);
+        root.classList.remove("is-bad");
+        split(0);
+        crit(null);
+        steps.forEach((li) => { li.className = ""; li.querySelector("[data-st]")!.textContent = "waiting"; });
+        log("Waiting to start.", true);
+        if (message) tell(say, "Ready", "Choose a new version, then <b>Start the canary</b>. The pipeline judges every step against the criteria on the right.");
+      }
+
+      async function canary() {
+        reset(false);
+        const me = run;
+        const live = () => me === run;
+        busy(true);
+        log(`Deploying the new version next to the stable one.`, true);
+        tell(say, "Deploying", "The pipeline deploys the new version <b>alongside</b> the stable one. No customer reaches it yet.");
+        await beat(700); if (!live()) return;
+
+        for (const pct of [10, 50]) {
+          split(pct);
+          stepState(pct, "checking", "checking");
+          log(`Shifting ${pct}% of traffic to the new version.`);
+          tell(say, `Step: ${pct}%`, `<b>${pct}%</b> of customers now reach the new version. The pipeline watches it for a few minutes before judging.`);
+          await beat(900); if (!live()) return;
+
+          for (const s of SAMPLES[ver][traffic][pct]) {
+            crit(s);
+            const rate = (s.err / s.req) * 100;
+            if (s.req < MIN_REQ) {
+              log(`  ${s.req} canary requests, ${s.err} errors. Too few to judge; waiting longer.`);
+              tell(say, `Step: ${pct}%, not enough data`, `Only <b>${s.req}</b> requests reached the new version. That's too few to trust, so the pipeline <b>waits for more</b> instead of calling it a pass.`);
+              await beat(1100); if (!live()) return;
+              continue;
+            }
+            log(`  ${s.req} canary requests, ${s.err} errors: ${rate.toFixed(1)}%.`);
+            if (rate > MAX_RATE) {
+              stepState(pct, "failed", "aborted");
+              root.classList.add("is-bad");
+              log(`  Error rate ${rate.toFixed(1)}% is above the ${MAX_RATE}% limit. ABORTING.`);
+              tell(say, `Step: ${pct}%, above the limit`, `<b>${rate.toFixed(1)}%</b> of the new version's requests failed. The limit is ${MAX_RATE}%. Nobody has to decide anything: the pipeline <b>aborts</b>.`, "bad");
+              await beat(1100); if (!live()) return;
+              split(0);
+              log("Rolling back: all traffic to the stable version.");
+              log("Finished: FAILURE");
+              tell(say, "Rolled back automatically", `All traffic is back on the stable version. Only the <b>${pct}%</b> of customers in the canary ever saw the errors, for a few minutes. The failed build is the alarm.`, "bad");
+              busy(false);
+              return;
+            }
+            stepState(pct, "passed", "passed");
+            log(`  Within the limit. Moving on.`);
+            tell(say, `Step: ${pct}%, passed`, `<b>${rate.toFixed(1)}%</b> errors over <b>${s.req}</b> requests: inside the criteria, so the pipeline takes the next step.`, "good");
+            await beat(900); if (!live()) return;
+          }
+        }
+
+        split(100);
+        stepState(100, "passed", "promoted");
+        log("Promoting: 100% of traffic to the new version.");
+        log("Finished: SUCCESS");
+        tell(say, "Promoted", "Every step stayed inside the criteria, so the new version now takes <b>all</b> traffic. The old version stays ready for a quick rollback.", "good");
+        busy(false);
+      }
+
+      root.addEventListener("click", (e) => {
+        const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button");
+        if (!b || b.disabled) return;
+        if (b.dataset.ver) { ver = b.dataset.ver as Ver; press(verBtns, (x) => x === b); reset(); }
+        else if (b.dataset.traffic) { traffic = b.dataset.traffic as Traffic; press(trBtns, (x) => x === b); reset(); }
+        else if (b.dataset.a === "start") canary();
+        else if (b.dataset.a === "reset") reset();
+      });
+      stops.push(() => { run++; });
+    });
+    return () => stops.forEach((s) => s());
+  });
+</script>

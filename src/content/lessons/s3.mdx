@@ -1,0 +1,492 @@
+---
+time: 35 minutes
+level: Beginner
+before: [iam]
+cost: pennies
+quiz:
+  - q: Customers need to download their own receipts, which are stored in a private bucket. What's the right way?
+    answer: 2
+    options:
+      - t: Make the receipts folder public
+        why: Then anyone who guesses or finds a receipt's address can read it. Receipts hold names and addresses.
+      - t: Give every customer AWS credentials
+        why: Customers aren't AWS users, and handing out credentials would be a far bigger risk than the receipts.
+      - t: Have the app create a presigned URL that expires after a few minutes
+        why: The link works for that one receipt, for a short time, and then stops. The bucket stays private throughout.
+      - t: Turn off Block Public Access
+        why: That's the switch that stops a bucket going public by accident. Turning it off solves nothing here and removes the safety net.
+  - q: Someone deletes menu.jpg from a bucket that has versioning on. What actually happens?
+    answer: 1
+    options:
+      - t: The photo and all its versions are gone
+        why: Not with versioning on. A normal delete removes nothing.
+      - t: S3 adds a delete marker on top, and every version is still underneath
+        why: The marker makes the object look deleted. Delete the marker, and the newest version underneath is current again.
+      - t: S3 asks for confirmation from the bucket owner
+        why: There's no such step. The delete happens at once. Versioning is what makes it undoable.
+      - t: The photo moves to a cheaper storage class
+        why: That's what a lifecycle rule does, on a schedule. A delete is unrelated.
+  - q: Versioning was off when a bad sync overwrote every menu photo. You turn versioning on now. What can you recover?
+    answer: 3
+    options:
+      - t: Every overwritten photo
+        why: The old photos were replaced before versioning existed on the bucket. There was never a copy to keep.
+      - t: The photos from the last 30 days
+        why: S3 has no hidden 30-day recycle bin for unversioned buckets.
+      - t: Anything, by asking AWS support
+        why: AWS can't recover an object you overwrote in an unversioned bucket.
+      - t: Nothing that was overwritten before you switched it on
+        why: Versioning only protects changes made after it's on. That's why you turn it on when you create the bucket.
+  - q: What does the key "receipts/2026/order-1001.pdf" tell you about folders in S3?
+    answer: 0
+    options:
+      - t: There are none. The whole string is the object's name; the console just shows the slashes as folders
+        why: S3 is flat. A key is one long name, and the "folders" are prefixes the console groups for you.
+      - t: S3 has created three nested folders
+        why: That's how a laptop's disk works, not S3. Nothing is created apart from the one object.
+      - t: The object is stored in a bucket called receipts
+        why: The bucket is chosen separately. "receipts/" is just the start of the key.
+      - t: The key is invalid because it contains slashes
+        why: Slashes are allowed and common. They're how people organise keys.
+  - q: QuickCart keeps order receipts for seven years, but almost nobody opens one after the first month. What saves money without deleting anything?
+    answer: 1
+    options:
+      - t: Turning off versioning
+        why: That removes the protection against mistakes. Receipts are rarely overwritten, so it would barely change the bill anyway.
+      - t: A lifecycle rule that moves receipts to a cheaper storage class after 30 days
+        why: Storage classes for rarely read data cost much less per GB. A lifecycle rule moves them on a schedule, with nobody doing anything.
+      - t: Compressing each receipt by hand
+        why: That's manual work on millions of files. The storage class is the bigger lever, and it's automatic.
+      - t: Moving them to a second bucket in another region
+        why: Another bucket in the same class costs the same. Replication across regions is for resilience, not saving money.
+---
+
+<Part id="problem">
+
+<Story who="QuickCart, the week the menu photos broke">
+
+QuickCart's app shows a photo for every dish, and the web shop needs them too. Leo needed the photos reachable from anywhere, so he made the bucket they lived in public. It worked straight away.
+
+Months later, the same bucket was also holding customers' receipts, because it was the bucket that already existed. They were public too.
+
+That same week, a script meant to upload new photos to a test folder ran against the real one. It overwrote every dish photo with a placeholder. The bucket had no versioning, so the old photos were simply gone. The restaurants had to send them again.
+
+</Story>
+
+<Case title="This really happens: public buckets">
+
+For several years, security researchers regularly found S3 buckets that anyone on the internet could read. They held customer records, backups, internal documents and credentials, left open by organisations of every size. Most were not made public on purpose. Someone opened access to share one file, or to make a website work, and everything else in the bucket came with it.
+
+AWS responded with **Block Public Access**, a set of switches that overrides anything that would make a bucket public. Since 2023, every new bucket starts with it turned on.
+
+</Case>
+
+So QuickCart needs its files stored where they are **private by default**, where access is handed out **one file at a time**, and where an overwrite or a delete can be **undone**.
+
+</Part>
+
+<Part id="idea">
+
+**S3**, Simple Storage Service, stores files. You put a file in, you get it back by name, and you never think about disks: there's no size to choose and nothing fills up. QuickCart uses it for menu photos, receipts and backups.
+
+### Buckets, objects and keys
+
+| Word | What it is | QuickCart example |
+|---|---|---|
+| **Bucket** | A container for files. It belongs to one region | `quickcart-menu-111122223333` |
+| **Object** | One file, plus some details about it, like its size and type | a photo of a burger |
+| **Key** | The object's full name inside the bucket | `dishes/burger.jpg` |
+
+Bucket names are shared across **every AWS account in the world**, so `quickcart-menu` is probably taken. Adding your account ID to the end keeps yours unique. Names are lower case, with letters, numbers, dots and hyphens.
+
+S3 has **no real folders**. The key `receipts/2026/order-1001.pdf` is one name that happens to contain slashes. The console shows the part before each slash as a folder so it's easier to browse, but nothing called `receipts` exists on its own.
+
+### Private until you say otherwise
+
+A new bucket and everything in it can be read only by your own account. There are three proper ways to let something else in:
+
+| Way | What it gives | QuickCart uses it for |
+|---|---|---|
+| An IAM role's policy | A server or container can read and write the bucket | The API storing receipts. [Who can do what: IAM](/lessons/iam/) covers roles |
+| A **bucket policy** | Rules attached to the bucket itself, for everyone who tries to use it | Refusing any request that isn't over HTTPS |
+| A **presigned URL** | A link to one object that works for a limited time, for anyone who has it | A customer downloading their own receipt |
+
+Making the bucket public is not on that list. Nothing QuickCart does needs anonymous access to the bucket. When a website needs to show files from S3 directly, the usual answer is a CDN such as CloudFront reading the private bucket, not a public bucket.
+
+**Block Public Access** is four switches, all on by default, that override any policy or setting that would make the bucket or its objects public. Leave them on. If something seems to need them off, that's the sign to use one of the three ways above instead.
+
+<Key>An S3 bucket is private until you make it otherwise: keep Block Public Access on, and hand out access with roles and presigned URLs, never by making the bucket public.</Key>
+
+### Presigned URLs
+
+A presigned URL is an ordinary link to one object, with a signature and an expiry time added to the end. The signature is made with the credentials of someone who *is* allowed to read the object, usually the app's role. Anyone holding the link can download that one object until it expires. After that, S3 refuses it.
+
+| Detail | What it means |
+|---|---|
+| Expiry | You choose it. Up to 12 hours from the console, and up to 7 days when signed with a long-lived key |
+| Signed by a role | The link also stops working when that role's temporary credentials expire, which may be sooner |
+| Permissions | The link can do only what the signer could do. If the signer loses access, the link stops working |
+| Anyone with it | It isn't tied to a person. Keep expiry short, like five minutes, for anything private |
+
+QuickCart's app makes a fresh five-minute link each time a customer taps **Download receipt**. The bucket is never public, and an old link shared by mistake stops working almost at once.
+
+### Versioning: an undo button for files
+
+With **versioning** on, S3 keeps every version of every object.
+
+| You do | Versioning off | Versioning on |
+|---|---|---|
+| Upload a file with an existing key | The old one is **replaced for good** | The old one is kept as an older version. The new one becomes current |
+| Delete a file | It's **gone for good** | S3 adds a **delete marker** on top. Every version is still underneath |
+| Undo a delete | Impossible | Delete the delete marker |
+| Get an older version back | Impossible | Copy it back on top, and it becomes the current version |
+
+Two things to know. First, versioning only protects changes made **after** you turn it on, so turn it on when you create the bucket. Second, once on, it can't be turned off again, only **suspended**: new uploads stop being versioned, but the versions already kept stay.
+
+Every version is billed as storage, so a bucket that's overwritten often grows. A lifecycle rule, below, cleans up old versions after a while.
+
+### Encryption
+
+Since January 2023, S3 encrypts every new object automatically with **SSE-S3**: keys that AWS creates, holds and rotates for you. You don't have to do anything, and there's no extra charge.
+
+| Option | Who holds the key | When to choose it |
+|---|---|---|
+| **SSE-S3** | AWS, entirely | The default. Right for most things |
+| **SSE-KMS** | A key in KMS that you control | When you need to decide who can use the key, or see every use of it in CloudTrail. KMS requests cost a little |
+
+That's encryption **at rest**, on AWS's disks. For encryption **in transit**, every request should use HTTPS. A bucket policy can refuse any request that doesn't, as you'll do in the lab.
+
+### Storage classes
+
+Every object has a **storage class**, which trades the monthly price against how quickly and cheaply you can read it back.
+
+| Class | Good for | The catch |
+|---|---|---|
+| **Standard** | Anything read often: menu photos. The default | The highest price per GB, about $0.023 a month in us-east-1 |
+| **Intelligent-Tiering** | Data whose access you can't predict | A small monthly fee per object to watch it |
+| **Standard-IA** | Read rarely but needed at once: last year's receipts | A fee for every GB you read, and you pay for at least 30 days |
+| **One Zone-IA** | Rarely read data you could recreate | Kept in one availability zone, so it can be lost with that zone |
+| **Glacier Instant Retrieval** | Archives read a few times a year | Higher fee to read; at least 90 days |
+| **Glacier Flexible Retrieval** | Archives you can wait minutes to hours for | You request a restore and wait |
+| **Glacier Deep Archive** | Records kept for years for legal reasons | The cheapest; restores take up to 12 hours |
+
+Prices change, and vary by region; check the S3 pricing page for current figures.
+
+### Lifecycle rules
+
+A **lifecycle rule** moves or deletes objects on a schedule, so nobody has to. QuickCart's rules:
+
+| Rule | Why |
+|---|---|
+| Move receipts to Standard-IA 30 days after upload | Almost nobody opens a receipt after the first month |
+| Permanently delete older versions 30 days after they're replaced | Versioning protects against mistakes, but a month is long enough to notice one |
+
+### Bucket policies
+
+A bucket policy is a JSON document attached to the bucket, in the same format as the IAM policies you've already seen. The difference is where it lives: an IAM policy says what one identity can do, while a bucket policy says what anyone can do to this bucket. This one refuses every request that doesn't use HTTPS:
+
+```json title="bucket-policy.json" ph="111122223333"
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyPlainHttp",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::quickcart-menu-111122223333",
+        "arn:aws:s3:::quickcart-menu-111122223333/*"
+      ],
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    }
+  ]
+}
+```
+
+| Field | What it does |
+|---|---|
+| `Version` | The version of the policy language. Always `2012-10-17` |
+| `Sid` | A name for the statement, for people reading it. Optional |
+| `Effect: Deny` | This statement refuses requests. A `Deny` always beats an `Allow` |
+| `Principal: *` | It applies to everyone, including your own account |
+| `Action: s3:*` | Every S3 action |
+| `Resource` | Two lines: the bucket itself, and `/*` for every object in it |
+| `Condition` | Only when this is true… |
+| `aws:SecureTransport: false` | …the request was not made over HTTPS |
+
+<Mistake title="leaving out the /* line">
+
+A policy that lists only `arn:aws:s3:::quickcart-menu-111122223333` covers the **bucket** (listing it, changing its settings) but not the **objects** in it. Downloads over plain HTTP would still work, and the policy would look right.
+
+**Why:** actions on objects, like `s3:GetObject`, are checked against the object's ARN, which ends in `/` and the key.
+
+**The fix:** list both: the bucket's ARN, and the same ARN followed by `/*`.
+
+</Mistake>
+
+</Part>
+
+<Part id="see">
+
+Below is one key, `menu.jpg`, and every version S3 is keeping for it. Upload a photo twice, delete it, then get it back. Then **switch versioning off** and try the same thing.
+
+<S3Versioning />
+
+**What to notice:** with versioning on, the delete didn't remove anything. It added a marker on top, and deleting the marker was the whole undo. With versioning off, the second upload had already destroyed the first photo, and there was nothing to restore after the delete.
+
+</Part>
+
+<Part id="doit">
+
+<Cost kind="pennies">a few small files in S3 Standard cost a fraction of a cent a month, and a handful of requests less than that.</Cost>
+
+You'll create a private, versioned bucket, see that its objects are private, share one with a presigned URL, overwrite and delete a photo and bring it back, add a lifecycle rule, and add the HTTPS-only policy. About 25 minutes.
+
+Before you start, have **two small images** on your laptop, both renamed to `menu.jpg`, in two different folders. Any photos will do. Check the region selector at the top right of the console says **N. Virginia (us-east-1)**.
+
+<Steps>
+
+<Step title="Create the bucket">
+
+Find your account ID: open the account menu at the top right of the console and copy the 12-digit **Account ID**. In this course it's shown as `111122223333`; use yours instead.
+
+<ConsolePath path="S3 > General purpose buckets > Create bucket" />
+
+| Field | Enter |
+|---|---|
+| Bucket type | **General purpose** |
+| Bucket name | `quickcart-menu-` followed by your account ID, like `quickcart-menu-111122223333` |
+| Object Ownership | **ACLs disabled** — the default |
+| Block all public access | **On** — the default. Leave all four boxes ticked |
+| Bucket Versioning | **Enable** |
+| Default encryption | **Server-side encryption with Amazon S3 managed keys (SSE-S3)** — the default |
+
+Choose **Create bucket**.
+
+<See>
+
+A green banner saying the bucket was created, and the bucket in the list.
+
+</See>
+
+</Step>
+
+<Step title="Upload the first photo">
+
+<ConsolePath path="S3 > your bucket > Objects > Upload" />
+
+Choose **Add files**, pick the first `menu.jpg`, and choose **Upload**.
+
+<See>
+
+**Upload succeeded**. Choose **Close**, and `menu.jpg` is in the Objects list.
+
+</See>
+
+</Step>
+
+<Step title="See that it's private">
+
+Choose `menu.jpg` to open its details. Copy the **Object URL** and paste it into a new browser tab.
+
+<See>
+
+Not the photo, but a short XML page containing `<Code>AccessDenied</Code>`. The object has an address, but nobody may read it without permission. That's the default, and it's what you want.
+
+</See>
+
+</Step>
+
+<Step title="Share it with a presigned URL">
+
+<ConsolePath path="S3 > your bucket > menu.jpg > Object actions > Share with a presigned URL" />
+
+| Field | Enter |
+|---|---|
+| Time interval until the presigned URL expires | **Minutes** |
+| Number of minutes | `5` |
+
+Choose **Create presigned URL**. The console copies the link to your clipboard. Paste it into a browser tab.
+
+<See>
+
+The photo. Look at the address bar: the same Object URL as before, followed by a long string of settings including `X-Amz-Expires=300`, which is 300 seconds, and `X-Amz-Signature`.
+
+</See>
+
+Wait five minutes and reload the tab.
+
+<Mistake title="the link stopped working">
+
+```output title="The browser shows XML containing"
+<Code>AccessDenied</Code>
+<Message>Request has expired</Message>
+```
+
+**Why:** that's the point of a presigned URL. The expiry is part of the signature, so it can't be edited to last longer.
+
+**The fix:** make a new one. In QuickCart's app, a new link is made every time a customer taps **Download receipt**.
+
+</Mistake>
+
+</Step>
+
+<Step title="Overwrite the photo">
+
+Upload the **second** `menu.jpg`, the same way as the first. It has the same key, so it replaces the first as the current version.
+
+Back in the Objects list, turn on **Show versions**.
+
+<See>
+
+Two rows for `menu.jpg`, each with a different **Version ID**. The newer one is marked as the current version. The first photo wasn't lost; it's kept underneath.
+
+</See>
+
+</Step>
+
+<Step title="Delete it">
+
+Turn **Show versions** off. Tick `menu.jpg` and choose **Delete**. Type `delete` in the box and choose **Delete objects**.
+
+<See>
+
+The Objects list is empty. As far as the app is concerned, `menu.jpg` is gone.
+
+</See>
+
+Now turn **Show versions** on again.
+
+<See>
+
+Three rows: the two photos, and on top a row of type **Delete marker**. The delete removed nothing; it added the marker.
+
+</See>
+
+</Step>
+
+<Step title="Bring it back">
+
+With **Show versions** on, tick **only the delete marker** and choose **Delete**. Deleting a specific version is permanent, so the console asks you to type `permanently delete`. Type it and choose **Delete objects**.
+
+<See>
+
+Turn **Show versions** off. `menu.jpg` is back, showing the second photo. Removing the marker made the newest version underneath current again.
+
+</See>
+
+<Note title="Getting an older version back">
+
+To go back to the **first** photo instead, open `menu.jpg` → **Versions** tab, choose the older version, and download it. Then upload it again as `menu.jpg`. It becomes the newest version, and the history stays intact.
+
+</Note>
+
+</Step>
+
+<Step title="Add a lifecycle rule">
+
+<ConsolePath path="S3 > your bucket > Management > Create lifecycle rule" />
+
+| Field | Enter |
+|---|---|
+| Lifecycle rule name | `tidy-old-versions` |
+| Choose a rule scope | **Apply to all objects in the bucket**, and tick the box acknowledging it |
+| Lifecycle rule actions | Tick **Transition current versions of objects between storage classes** and **Permanently delete noncurrent versions of objects** |
+| Transition current versions: Choose storage class transitions | **Standard-IA** |
+| Days after object creation | `30` |
+| Permanently delete noncurrent versions: Days after objects become noncurrent | `30` |
+| Number of newer versions to retain | leave empty |
+
+If the console asks you to acknowledge a cost for transitioning small objects, tick it. Choose **Create rule**.
+
+<See>
+
+The rule listed under **Lifecycle rules** as **Enabled**. At the bottom of the form, the console draws a timeline of what happens on day 0 and day 30.
+
+</See>
+
+</Step>
+
+<Step title="Refuse anything that isn't HTTPS">
+
+<ConsolePath path="S3 > your bucket > Permissions > Bucket policy > Edit" />
+
+Paste the policy from [the idea](#idea), with your account ID in place of `111122223333` in **both** `Resource` lines. Choose **Save changes**.
+
+<See>
+
+The policy shown under **Bucket policy**. Block Public Access stays **On**: a `Deny` never makes a bucket public, so it's allowed.
+
+</See>
+
+<Mistake title="the policy won't save">
+
+```output title="Saving fails with an error containing"
+Policy has invalid resource
+```
+
+**Why:** the bucket name in `Resource` doesn't match this bucket, most often because the placeholder account ID is still there in one of the two lines.
+
+**The fix:** make both `Resource` lines use this bucket's exact name.
+
+</Mistake>
+
+</Step>
+
+<Step title="Clean up" cleanup>
+
+A bucket must be empty before it can be deleted, and a versioned bucket holds every version and delete marker too. The **Empty** button removes all of them.
+
+<ConsolePath path="S3 > General purpose buckets > your bucket > Empty" />
+
+Type `permanently delete` and choose **Empty**.
+
+<ConsolePath path="S3 > General purpose buckets > your bucket > Delete" />
+
+Type the bucket's name and choose **Delete bucket**.
+
+<See>
+
+The bucket is gone from the list. Nothing is left that costs money.
+
+</See>
+
+</Step>
+
+</Steps>
+
+</Part>
+
+<Part id="quiz">
+
+<Quiz questions={frontmatter.quiz} />
+
+</Part>
+
+<Part id="cheat">
+
+<Cheat>
+
+| Term or setting | In one line |
+|---|---|
+| Bucket | A container for objects, in one region. Its name is unique worldwide |
+| Object and key | A file, and its full name. The slashes in a key aren't real folders |
+| Block Public Access | On by default. Leave it on |
+| Access | IAM roles for servers, bucket policies for rules, presigned URLs for one file at a time |
+| Presigned URL | A link to one object that expires. Keep it short: minutes, not days |
+| Versioning | Turn it on when you create the bucket. It only protects later changes |
+| Delete marker | What a delete adds when versioning is on. Delete the marker to undo |
+| SSE-S3 | Default encryption on every new object. No setup, no charge |
+| HTTPS only | Bucket policy: `Deny` when `aws:SecureTransport` is `false` |
+| Storage classes | Standard for often, Standard-IA for rarely, Glacier for archives |
+| Lifecycle rule | Move to cheaper classes and delete old versions on a schedule |
+| Delete a bucket | **Empty** first, then **Delete** |
+
+</Cheat>
+
+</Part>
